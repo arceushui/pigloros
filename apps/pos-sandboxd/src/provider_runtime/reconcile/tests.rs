@@ -21,9 +21,9 @@ use tokio::time::Instant;
 use zbus::OwnedObjectPath;
 
 use super::{
-    capture_store_over, ledger, netlink_network, open_capture_store, open_staging, prepare_host,
-    prepare_with, retained_floor, sweep_captures, sweep_staging, HostReconciliation, Reconcile,
-    ReconcileError, ROOT,
+    capture_store_over, ledger, netlink_network, open_capture_store, open_staging, prepare_at,
+    prepare_host, prepare_with, report_unisolated, retained_floor, sweep_captures, sweep_staging,
+    HostReconciliation, Reconcile, ReconcileError, FB_TUNNELS_SYSCTL, ROOT,
 };
 use crate::provider_runtime::tests::{
     bind_as_provider, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -528,6 +528,45 @@ fn refuses_step_7_on_this_host(authority: &RuntimeAuthority) {
     ));
 }
 
+/// The probe reads the file `prepare_at` is given: a 0 refuses before the bus
+/// is connected, and a 1 passes it. It runs over its own bus and call counts.
+fn probes_the_sysctl_file_it_is_given(authority: &RuntimeAuthority) -> TestResult {
+    let servers = Mutex::new(Vec::new());
+    let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let directory = tempfile::tempdir()?;
+    let sysctl = directory.path().join("fb_tunnels_only_for_init_net");
+    fs::write(&sysctl, "0\n")?;
+    let refused = prepare_at(
+        authority,
+        &sysctl,
+        fake_bus(&servers, &calls),
+        clean_network,
+    );
+    assert!(matches!(
+        refused,
+        Err(ProviderRuntimeError::HostUnavailable)
+    ));
+    assert!(servers.lock().is_ok_and(|servers| servers.is_empty()));
+    fs::write(&sysctl, "1\n")?;
+    let passed = prepare_at(
+        authority,
+        &sysctl,
+        fake_bus(&servers, &calls),
+        clean_network,
+    );
+    assert!(passed.is_ok());
+    Ok(())
+}
+
+/// The refusal line names the sysctl and the ADR item, and refuses.
+#[test]
+fn the_sysctl_refusal_line_is_written_and_refuses() {
+    let mut out = Vec::new();
+    assert_eq!(report_unisolated(&mut out), None);
+    let line = format!("pos-sandboxd: {FB_TUNNELS_SYSCTL} must be at least 1 (ADR-069 R14 N12)\n");
+    assert_eq!(out, line.into_bytes());
+}
+
 /// Step 7 over a host whose sysctl probe passes and whose network is clean.
 fn prepare_clean(
     authority: &RuntimeAuthority,
@@ -586,6 +625,7 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let servers = Mutex::new(Vec::new());
     let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     refuses_a_host_without_the_sysctl(&authority, &servers, &calls)?;
+    probes_the_sysctl_file_it_is_given(&authority)?;
     // A failed orphan sweep keeps admission closed; staging is not swept.
     let built = Cell::new(None);
     let failing = |range, probe| {

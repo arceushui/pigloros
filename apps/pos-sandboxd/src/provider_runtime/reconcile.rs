@@ -142,12 +142,23 @@ pub(super) type NetlinkReconciliation =
 pub(super) fn prepare_host(
     authority: &RuntimeAuthority,
 ) -> Result<NetlinkReconciliation, ProviderRuntimeError> {
-    prepare_with(
+    prepare_at(
         authority,
-        || fb_tunnels_isolated(Path::new(FB_TUNNELS_SYSCTL)),
+        Path::new(FB_TUNNELS_SYSCTL),
         SystemdTransientUnitTransport::connect_system(),
         netlink_network,
     )
+}
+
+/// [`prepare_with`] with the fallback-tunnel sysctl probe reading the file
+/// at `sysctl`.
+fn prepare_at<N, P, E>(
+    authority: &RuntimeAuthority,
+    sysctl: &Path,
+    connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
+    network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
+) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
+    prepare_with(authority, || fb_tunnels_isolated(sysctl), connect, network)
 }
 
 /// The netlink orphan sweep, and the `probe` through the Local network port
@@ -188,13 +199,16 @@ pub(super) fn prepare_with<N, P, E>(
 /// `Some` when the fallback-tunnel sysctl probe `isolated` passes; otherwise
 /// `None`, after one line on standard error.
 fn probed(isolated: impl FnOnce() -> bool) -> Option<()> {
-    isolated().then_some(()).or_else(report_unisolated)
+    isolated()
+        .then_some(())
+        .or_else(|| report_unisolated(&mut std::io::stderr()))
 }
 
-/// The refusal line of a host whose fallback-tunnel sysctl is below 1.
-fn report_unisolated() -> Option<()> {
+/// Write the refusal line of a host whose fallback-tunnel sysctl is below 1
+/// to `out`, and refuse.
+fn report_unisolated(out: &mut impl Write) -> Option<()> {
     writeln!(
-        std::io::stderr(),
+        out,
         "pos-sandboxd: {FB_TUNNELS_SYSCTL} must be at least 1 (ADR-069 R14 N12)"
     )
     .ok();
