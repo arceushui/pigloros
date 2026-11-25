@@ -100,8 +100,10 @@ impl<C> EstablishedNetwork<C> {
 /// What kind of failure ended a Local network setup (ADR-069 R14 §3.4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupClass {
-    /// A creation, transport or resource refusal that left no owned state:
-    /// TME1 `launch-failure` 6, with no quarantine.
+    /// A creation, transport or resource refusal: TME1 `launch-failure` 6.
+    /// It leaves no owned state, and so no quarantine, unless the setup had
+    /// begun installing and its removal failed: then `removal` says so, and
+    /// `cleanup.result` 1 and a quarantine follow (R14 N7).
     Creation,
     /// The provider contradicted its own state or lifecycle: the O6 fallback,
     /// code 2 with quarantine (R14 N9, N11 and N15).
