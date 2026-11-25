@@ -162,10 +162,9 @@ fn uv_attempts_are_capped_at_the_first_retry_count() -> TestResult {
     rig.prompt.enter(PIN);
     rig.create(&Ceremony::drawn("create"))?;
     assert_eq!(rig.commands(&KNOWN), [0, 2, 3, 4, 2, 1, 3, 5, 6]);
-    assert_eq!(
-        rig.prompt.notices()[..1],
-        [Notice::UserVerification { retries: 3 }]
-    );
+    let expected = [Notice::UserVerification { retries: 3 }, Notice::Touch];
+    assert_eq!(rig.prompt.notices(), expected);
+    assert_eq!(rig.prompt.asked(), [8]);
 
     let mut rig = Rig::new(true);
     rig.device.override_reply(UV_RETRIES, &three);

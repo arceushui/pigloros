@@ -379,8 +379,8 @@ fn the_direct_host_never_holds_a_quarantined_ceremony() -> TestResult {
 
 type BufferBridge = OwnerBridge<FakeHost, FakeRandom, FakeClock>;
 
-/// A bridge over the fake buffer protocol whose page answers with `port`.
-fn buffer_bridge(port: &Shared) -> Result<BufferBridge, Box<dyn std::error::Error>> {
+/// A bridge over the fake buffer protocol whose page answers with `port`, and its clock.
+fn buffer_bridge(port: &Shared) -> Result<(BufferBridge, FakeClock), Box<dyn std::error::Error>> {
     let clock = FakeClock::start();
     let loopback = FakeLoopback::default();
     let page = HonestPage::new(HonestConfig::standard(&CREDENTIAL_ID))
@@ -393,19 +393,19 @@ fn buffer_bridge(port: &Shared) -> Result<BufferBridge, Box<dyn std::error::Erro
         SurfaceConfig::default(),
     );
     let host = FakeHost::new(clock.clone(), surface, loopback, FakeStore::default());
-    Ok(OwnerBridge::new(
+    let bridge = OwnerBridge::new(
         host,
         FakeRandom::seeded(3),
-        clock,
+        clock.clone(),
         BridgeConfig::default(),
-    ))
+    );
+    Ok((bridge, clock))
 }
 
 #[test]
 fn a_buffer_enrollment_unlocks_through_run_direct_with_the_same_prf() -> TestResult {
     let port = Shared(Rc::new(RefCell::new(FixturePort::new(FakeClock::start())?)));
-    let before = Instant::now();
-    let mut bridge = buffer_bridge(&port)?;
+    let (mut bridge, page_clock) = buffer_bridge(&port)?;
     let mut enrollment = FakeEnrollment::new();
     bridge.enroll(&context(), &mut enrollment)?;
     let (_, prf_input, _) = enrollment.sealed_over.clone().ok_or("nothing was sealed")?;
@@ -413,11 +413,17 @@ fn a_buffer_enrollment_unlocks_through_run_direct_with_the_same_prf() -> TestRes
     let binding = committed.binding().boxed()?;
     let deadlines = port.0.borrow().deadlines.clone();
     assert_eq!(deadlines.len(), 3);
-    // The page gives the port the interaction bound from its own clock, which started after
-    // `before`: every deadline lies at least that far ahead.
-    assert!(deadlines
+    // The page hands the port its clock's time at the call plus the interaction bound, so on
+    // that clock each deadline lies between INTERACTION and the whole fake time spent plus it.
+    let latest = page_clock.elapsed() + INTERACTION;
+    let offsets: Vec<Duration> = deadlines
         .iter()
-        .all(|deadline| *deadline >= before + INTERACTION));
+        .map(|deadline| page_clock.offset_of(*deadline))
+        .collect();
+    assert!(offsets
+        .iter()
+        .all(|offset| *offset >= INTERACTION && *offset <= latest));
+    assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
 
     let clock = FakeClock::start();
     let host = DirectHost::new(port, clock.clone());
@@ -437,7 +443,7 @@ fn a_page_authenticator_that_fails_or_overflows_fails_the_buffer_ceremony() -> T
         let port = Shared(Rc::new(RefCell::new(FixturePort::new(FakeClock::start())?)));
         port.0.borrow_mut().failure = failure;
         port.0.borrow_mut().length = length;
-        let mut bridge = buffer_bridge(&port)?;
+        let (mut bridge, _) = buffer_bridge(&port)?;
         let mut enrollment = FakeEnrollment::new();
         assert_eq!(bridge.enroll(&context(), &mut enrollment), Err(failed));
         assert!(enrollment.calls.is_empty());
