@@ -181,19 +181,28 @@ NETWORK_CASES = {"fb-0": "0", "fb-1": "1", "fb-2": "2"}
 NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWORK_CASES}
 # Each case holds the run's own files; the probe's files exist only if its unit
 # got as far as writing them, so a failed case still has an explaining record.
+NETWORK_RUN_FILES = {"sysctl", "status", "stderr", "journal"}
+NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
 # The composed provider runtime: started as the staged provider binary, then stopped.
+# The unit is not the production `pigloros-provider-runtime-<hex32>.service` (R11 D7) and
+# carries no confinement beyond the R11 5.2 common property set; the shared confinement set
+# is later work. These rows are the ones R11 5.2 lists, and `Result` after the stop is read
+# from the journal, because the unit is collected (CollectMode=inactive-or-failed) once it
+# stops.
 DAEMON_CASES = ("start",)
-DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status"}
+DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status",
+                      "start-stderr", "launcher-sha256", "launcher-program-headers"}
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-exe", "runtime-tree", "runtime-log"}
 PROVIDER_BINARY_PATH = re.compile(r"/var/lib/pigloros/sandbox/providers/[0-9a-f]{64}")
 RUNTIME_UNIT_PROPERTIES = {
     "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
     "Type": "notify", "NotifyAccess": "main", "ExitType": "main", "KillMode": "control-group",
     "Restart": "no", "CollectMode": "inactive-or-failed", "UMask": "0077", "StandardInput": "null",
+    "TimeoutStartUSec": "30s", "Environment": "", "PassEnvironment": "", "RuntimeMaxUSec": "infinity",
 }
 RUNTIME_ENDPOINTS = ("provider-execute.sock", "provider-control.sock")
-NETWORK_RUN_FILES = {"sysctl", "status", "stderr", "journal"}
-NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
+ENDPOINT_MODE, DIRECTORY_MODE = "600", "700"
+STOP_FAILURES = ("Failed with result", "SIGKILL", "timed out", "Killing process")
 LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
 # The modules guest.nix loads, and the fallback device each creates in a new
 # network namespace while the sysctl is 0 (ipip, sit, ip6_tunnel, ip_gre).
@@ -1379,17 +1388,28 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     binary = fields[1]
     if evidence.line(f"{base}/start-status") != "0" or evidence.line(f"{base}/stop-status") != "0":
         log = evidence.text(f"{base}/runtime-log") if (evidence.root / base / "runtime-log").exists() else ""
-        raise EvidenceError(f"the {name} runtime unit did not start and stop cleanly; log: {log.strip()[-600:]!r}")
+        raise EvidenceError(f"the {name} runtime unit did not start and stop cleanly; "
+                            f"start stderr: {evidence.text(f'{base}/start-stderr').strip()[:400]!r}; "
+                            f"log: {log.strip()[-600:]!r}")
+    check_launcher(evidence, base)
     unit = properties(evidence, f"{base}/runtime-properties")
     for key, expected in RUNTIME_UNIT_PROPERTIES.items():
         if unit.get(key) != expected:
             raise EvidenceError(f"the {name} runtime unit has {key}={unit.get(key)!r}, not {expected!r}")
+    # systemctl show omits an empty EnvironmentFiles= list instead of printing it.
+    if unit.get("EnvironmentFiles", "") != "":
+        raise EvidenceError(f"the {name} runtime unit has EnvironmentFiles={unit['EnvironmentFiles']!r}")
     if not unit.get("MainPID", "").isdigit() or int(unit["MainPID"]) == 0 \
             or f"path={binary} ;" not in unit.get("ExecStart", "") \
             or f"argv[]={binary} provider-runtime ;" not in unit["ExecStart"]:
         raise EvidenceError(f"the {name} runtime unit does not run {binary} provider-runtime: {unit.get('ExecStart')!r}")
     if evidence.line(f"{base}/runtime-exe") != binary:
         raise EvidenceError(f"the {name} runtime process is not the staged provider binary")
+    log = evidence.text(f"{base}/runtime-log")
+    failures = [marker for marker in STOP_FAILURES if marker in log]
+    if "Deactivated successfully" not in log or failures:
+        raise EvidenceError(f"the {name} runtime unit did not stop with Result=success: "
+                            f"{failures or 'no Deactivated successfully line'}; log: {log.strip()[-600:]!r}")
     tree = {}
     for line in evidence.text(f"{base}/runtime-tree").splitlines():
         path, kind, mode = tab_fields(line, 3, "runtime-tree")
@@ -1397,7 +1417,23 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     for endpoint in RUNTIME_ENDPOINTS:
         if tree.get(endpoint, ("", ""))[0] != "s":
             raise EvidenceError(f"the {name} runtime bound no socket at /run/pigloros/{endpoint}")
+        if tree[endpoint][1] != ENDPOINT_MODE:
+            raise EvidenceError(f"the {name} runtime socket {endpoint} has mode {tree[endpoint][1]}, "
+                                f"not {ENDPOINT_MODE}")
+    loose = sorted(path for path, (kind, mode) in tree.items() if kind == "d" and mode != DIRECTORY_MODE)
+    if loose:
+        raise EvidenceError(f"the {name} runtime directories {loose} are not mode {DIRECTORY_MODE}")
     return {"binary": binary, "properties": unit, "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
+
+
+def check_launcher(evidence: Evidence, base: str) -> None:
+    """The provider executable is the statically linked pos-sandboxd the attempt units bind."""
+    digest = evidence.line(f"{base}/launcher-sha256").split("  ")
+    if len(digest) != 2 or not re.fullmatch(r"[0-9a-f]{64}", digest[0]) or not digest[1].startswith("/nix/store/"):
+        raise EvidenceError(f"the {base} launcher digest line is malformed")
+    headers = evidence.text(f"{base}/launcher-program-headers")
+    if not re.search(r"^\s*Type:\s+(EXEC|DYN) ", headers, re.M) or "INTERP" in headers or "LOAD" not in headers:
+        raise EvidenceError(f"the {base} launcher is not a loadable statically linked ELF file")
 
 
 def check_daemon(evidence: Evidence) -> dict:

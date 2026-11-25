@@ -153,7 +153,7 @@ impl StagedInstallation {
 
     /// The installed provider executable, which a runtime must run as: the
     /// file the SIC1 provider-executable descriptor names. Empty unless
-    /// staged by [`Self::stage_provider`].
+    /// staged by [`Self::stage_provider`] or [`Self::stage_provider_execution`].
     #[must_use]
     pub fn provider_executable(&self) -> &Path {
         &self.provider_executable

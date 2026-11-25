@@ -68,8 +68,7 @@ let
   # should reach neither build scripts nor proc macros; as an environment
   # variable it replaces, not merges with, any rustflags in a cargo config.
   # build-images.sh refuses an adapter that is not a loadable static ELF file
-  # of the architecture. The static pos-sandboxd launcher is built by the
-  # piece that uses it.
+  # of the architecture.
   adapter = rustPlatform.buildRustPackage {
     pname = "pos-sandbox-evidence-adapter";
     version = "0";
@@ -94,7 +93,9 @@ let
   # SIC1 installs as its kind-11 object and which the composed runtime runs
   # as (`provider-runtime`). The provider also binds it into each attempt unit
   # as /.pigloros/release-launcher (`launch-barrier`), where no loader exists,
-  # so it is linked statically like the adapter.
+  # so it is linked statically like the adapter. Unverified until the first
+  # QEMU run: the collector records its digest and program headers, and the
+  # checker refuses a binary with a PT_INTERP or without a LOAD segment.
   launcher = rustPlatform.buildRustPackage {
     pname = "pos-sandboxd";
     version = "0";
@@ -151,6 +152,7 @@ let
       config.systemd.package
       conformance
       pkgs.coreutils
+      pkgs.binutils
       pkgs.findutils
       pkgs.gawk
       pkgs.gzip

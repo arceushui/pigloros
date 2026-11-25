@@ -199,12 +199,19 @@ start_runtime() { # BINARY
 
 # Stage the installation (the stager mode of the evidence driver), start the
 # composed runtime as the staged provider binary, record what the manager and
-# the kernel show of it, stop it, and unstage. The stager holds the staged
+# the kernel show of it, stop it, and unstage. The stop's outcome is read from
+# the unit's journal: CollectMode=inactive-or-failed unloads the unit, and its
+# Result with it, as soon as it stops. The stager holds the staged
 # installation until its control FIFO closes. Part (c) and the execute
 # evidence run between start and stop.
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   local dir="daemon/$1" fifo=/run/piglor-evidence-stage control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
+  # The provider executable the stager installs: its digest, and its program
+  # headers, which show a loadable statically linked ELF file (no INTERP).
+  sha256sum "${launcher}" >"${dir}/launcher-sha256"
+  readelf -hlW "${launcher}" >"${dir}/launcher-program-headers"
+  : >"${dir}/start-stderr"
   provision_runtime
   # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
   mkfifo -m 0600 "${fifo}"
@@ -221,9 +228,9 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   line="$(head -n 1 "${dir}/stage-report")"
   if [[ ${line} == staged$'\t'* ]]; then
     binary="${line#*$'\t'}"
-    start_runtime "${binary}" || start=$?
+    start_runtime "${binary}" 2>"${dir}/start-stderr" || start=$?
     systemctl show "${RUNTIME_UNIT}.service" \
-      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,ExecStart \
+      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,RuntimeMaxUSec,Environment,EnvironmentFiles,PassEnvironment,ExecStart \
       >"${dir}/runtime-properties"
     readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
     find /run/pigloros -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"

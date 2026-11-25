@@ -445,13 +445,32 @@ def network_files() -> dict[str, bytes | str]:
 
 
 PROVIDER_BINARY = "/var/lib/pigloros/sandbox/providers/" + "ab" * 32
-RUNTIME_PROPERTIES = (
-    "Id=piglor-sandbox-runtime.service\nActiveState=active\nSubState=running\nMainPID=412\n"
-    "Type=notify\nNotifyAccess=main\nExitType=main\nKillMode=control-group\nRestart=no\n"
-    "CollectMode=inactive-or-failed\nUMask=0077\nStandardInput=null\nTimeoutStartUSec=30s\n"
-    f"ExecStart={{ path={PROVIDER_BINARY} ; argv[]={PROVIDER_BINARY} provider-runtime ; ignore_errors=no ; "
-    "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
-)
+RUNTIME_PROPERTY_ROWS = {
+    "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
+    "MainPID": "412", "Type": "notify", "NotifyAccess": "main", "ExitType": "main",
+    "KillMode": "control-group", "Restart": "no", "CollectMode": "inactive-or-failed", "UMask": "0077",
+    "StandardInput": "null", "TimeoutStartUSec": "30s", "RuntimeMaxUSec": "infinity", "Environment": "",
+    "PassEnvironment": "",
+    "ExecStart": f"{{ path={PROVIDER_BINARY} ; argv[]={PROVIDER_BINARY} provider-runtime ; ignore_errors=no ; "
+                 "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+}
+
+
+def runtime_properties(**changes: str | None) -> str:
+    """The `systemctl show` text, with rows replaced, or removed for None."""
+    rows = {**RUNTIME_PROPERTY_ROWS, **changes}
+    return "".join(f"{key}={value}\n" for key, value in rows.items() if value is not None)
+
+
+RUNTIME_PROPERTIES = runtime_properties()
+RUNTIME_LOG = ("[ 100.0] systemd[1]: Starting piglor-sandbox-runtime.service...\n"
+               "[ 120.0] systemd[1]: Stopping piglor-sandbox-runtime.service...\n"
+               "[ 121.0] systemd[1]: piglor-sandbox-runtime.service: Deactivated successfully.\n")
+RUNTIME_TREE = ("\td\t700\nsandbox\td\t700\nsandbox/staging\td\t700\nsandbox/registry\td\t700\n"
+                "provider-execute.sock\ts\t600\nprovider-control.sock\ts\t600\n")
+LAUNCHER_HEADERS = ("ELF Header:\n  Type:                              EXEC (Executable file)\n"
+                    "Program Headers:\n  Type           Offset   VirtAddr\n  LOAD           0x000000 0x400000\n"
+                    "  GNU_STACK      0x000000 0x000000\n")
 
 
 def daemon_files() -> dict[str, bytes | str]:
@@ -459,10 +478,11 @@ def daemon_files() -> dict[str, bytes | str]:
     return {
         f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\nunstaged\n", f"{base}/stage-stderr": "",
         f"{base}/stage-status": "0\n", f"{base}/start-status": "0\n", f"{base}/stop-status": "0\n",
+        f"{base}/start-stderr": "",
+        f"{base}/launcher-sha256": "c" * 64 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd\n",
+        f"{base}/launcher-program-headers": LAUNCHER_HEADERS,
         f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
-        f"{base}/runtime-tree": "\td\t700\nsandbox\td\t700\nprovider-execute.sock\ts\t600\n"
-                               "provider-control.sock\ts\t600\n",
-        f"{base}/runtime-log": "[ 100.0] piglor-sandbox-runtime[412]: ready\n",
+        f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
     }
 
 
@@ -1425,36 +1445,67 @@ class EvidenceTests(unittest.TestCase):
 
     def test_provider_runtime_fabrication_fails_closed(self):
         base = "guest/daemon/start"
+        properties = f"{base}/runtime-properties"
         changes = [
             (lambda f: f.pop(f"{base}/runtime-log"), "malformed daemon record start"),
+            (lambda f: f.pop(f"{base}/start-stderr"), "malformed daemon record start"),
             (lambda f: f.update({f"{base}/extra": ""}), "unexpected"),
             (lambda f: f.update({"guest/daemon/other/x": ""}), "does not hold exactly"),
             (lambda f: f.update({f"{base}/stage-status": "1\n"}), "did not stage and unstage"),
             (lambda f: f.update({f"{base}/stage-report": "staged\t/tmp/x\nunstaged\n"}), "did not stage"),
             (lambda f: f.update({f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\n"}), "did not stage"),
             (lambda f: f.update({f"{base}/stage-report": ""}), "did not stage"),
-            (lambda f: f.update({f"{base}/start-status": "1\n"}), "did not start and stop cleanly"),
+            (lambda f: f.update({f"{base}/start-status": "1\n", f"{base}/start-stderr": "Job failed\n"}),
+             "start stderr: 'Job failed'"),
             (lambda f: f.update({f"{base}/stop-status": "1\n"}), "did not start and stop cleanly"),
-            (lambda f: f.update({f"{base}/runtime-properties": RUNTIME_PROPERTIES.replace("Type=notify", "Type=exec")}),
-             "Type='exec'"),
-            (lambda f: f.update({f"{base}/runtime-properties":
-                                 RUNTIME_PROPERTIES.replace("ActiveState=active", "ActiveState=failed")}),
-             "ActiveState='failed'"),
-            (lambda f: f.update({f"{base}/runtime-properties": RUNTIME_PROPERTIES.replace("MainPID=412", "MainPID=0")}),
-             "does not run"),
-            (lambda f: f.update({f"{base}/runtime-properties":
-                                 RUNTIME_PROPERTIES.replace(" provider-runtime ;", " recovery-peer ;")}),
-             "does not run"),
-            (lambda f: f.update({f"{base}/runtime-properties": RUNTIME_PROPERTIES + "Id=again\n"}), "malformed"),
+            # The executable that stands in for the provider.
             (lambda f: f.update({f"{base}/runtime-exe": "/nix/store/x-other\n"}), "not the staged provider binary"),
+            (lambda f: f.update({f"{base}/launcher-sha256": "nothing\n"}), "launcher digest line is malformed"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS + "  INTERP  0x0\n"}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace("LOAD", "NOTE")}),
+             "not a loadable statically linked"),
+            # How it stopped: the unit is collected, so the journal carries the Result.
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace("Deactivated successfully.", "Failed with result 'exit-code'.")}),
+             "Result=success"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG + "systemd[1]: Killing process 412 (pos-sandboxd) with signal SIGKILL.\n"}),
+             "Result=success"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace("Deactivated successfully.", "Stopped.")}),
+             "no Deactivated successfully line"),
+            # Socket and directory modes (R11 5.2 O9).
+            (lambda f: f.update({f"{base}/runtime-tree": RUNTIME_TREE.replace("provider-execute.sock\ts\t600", "provider-execute.sock\ts\t777")}),
+             "provider-execute.sock has mode 777"),
+            (lambda f: f.update({f"{base}/runtime-tree": RUNTIME_TREE.replace("sandbox/staging\td\t700", "sandbox/staging\td\t755")}),
+             "directories .*staging.* are not mode 700"),
             (lambda f: f.update({f"{base}/runtime-tree": "\td\t700\nprovider-execute.sock\ts\t600\n"}),
              "no socket at /run/pigloros/provider-control.sock"),
             (lambda f: f.update({f"{base}/runtime-tree": "provider-execute.sock\tf\t600\n"
                                                          "provider-control.sock\ts\t600\n"}),
              "no socket at /run/pigloros/provider-execute.sock"),
+            # ExecStart: the path clause must be the binary as well as argv[0].
+            (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
+                f"path={PROVIDER_BINARY} ;", "path=/nix/store/x-other ;"))}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(MainPID="0")}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
+                " provider-runtime ;", " recovery-peer ;"))}), "does not run"),
+            (lambda f: f.update({properties: RUNTIME_PROPERTIES + "Id=again\n"}), "malformed"),
+            # Properties R11 5.2 does not allow, or an environment of any kind.
+            (lambda f: f.update({properties: runtime_properties(EnvironmentFiles="/etc/secret")}),
+             "EnvironmentFiles"),
+            (lambda f: f.update({properties: runtime_properties(Environment=None)}), "Environment=None"),
+            (lambda f: f.update({properties: runtime_properties(PassEnvironment=None)}), "PassEnvironment=None"),
         ]
+        # One mutation per required property: a wrong value for each row of the table.
+        wrong = {"Id": "other.service", "ActiveState": "failed", "SubState": "dead", "Type": "exec",
+                 "NotifyAccess": "all", "ExitType": "cgroup", "KillMode": "process", "Restart": "always",
+                 "CollectMode": "inactive", "UMask": "0022", "StandardInput": "tty",
+                 "TimeoutStartUSec": "infinity", "RuntimeMaxUSec": "5s", "Environment": "SECRET=1",
+                 "PassEnvironment": "HOME"}
+        for key, value in wrong.items():
+            changes.append((lambda f, key=key, value=value: f.update({properties: runtime_properties(**{key: value})}),
+                            f"{key}={value!r}"))
         for change, message in changes:
-            with self.subTest(change=change), self.assertRaisesRegex(checker.EvidenceError, message):
+            with self.subTest(change=change, message=message), self.assertRaisesRegex(checker.EvidenceError, message):
                 self.verdict(change=change)
 
     def test_a_failed_probe_explains_itself(self):

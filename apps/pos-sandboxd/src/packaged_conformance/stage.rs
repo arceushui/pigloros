@@ -42,8 +42,8 @@ impl StageCase {
     /// arguments that are not UTF-8, and [`ConformanceError::Io`] when a
     /// file cannot be read.
     fn from_arguments(arguments: &[OsString]) -> Result<Self, ConformanceError> {
-        let [image, certificate, description, adapter, spi1, key_file_name, binary, adapter_arguments @ ..] =
-            arguments
+        let Some(([image, certificate, description, adapter, spi1, key_file_name, binary], rest)) =
+            arguments.split_first_chunk()
         else {
             return Err(ConformanceError::StageUsage);
         };
@@ -58,10 +58,7 @@ impl StageCase {
             certificate: fs::read(certificate)?,
             key_description: text(description)?,
             adapter: fs::read(adapter)?,
-            adapter_arguments: adapter_arguments
-                .iter()
-                .map(text)
-                .collect::<Result<_, _>>()?,
+            adapter_arguments: rest.iter().map(text).collect::<Result<_, _>>()?,
             spi1: fs::read(spi1)?,
             key_file_name: text(key_file_name)?,
             provider_binary: PathBuf::from(binary),

@@ -184,6 +184,85 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
     Ok(())
 }
 
+/// A control input whose every read fails.
+struct BrokenControl;
+
+impl io::Read for BrokenControl {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("broken control input"))
+    }
+}
+
+#[tokio::test]
+async fn the_stager_stages_the_provider_holds_it_and_unstages_it() -> TestResult {
+    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
+        return run_isolated("the_stager_stages_the_provider_holds_it_and_unstages_it");
+    }
+    if fs::metadata("/proc/self")?.uid() != 0 {
+        return Err("the isolated conformance child is not root".into());
+    }
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
+    let scratch = tempfile::tempdir()?;
+    let image = scratch.path().join("image.raw");
+    let expanded = Command::new("gzip")
+        .arg("-dc")
+        .arg(vectors.join("image.raw.gz"))
+        .stdout(fs::File::create(&image)?)
+        .status()?;
+    assert!(expanded.success());
+    let (adapter, spi1, provider) = (
+        scratch.path().join("adapter"),
+        scratch.path().join("spi1"),
+        scratch.path().join("provider"),
+    );
+    fs::write(&adapter, b"adapter")?;
+    fs::write(&spi1, b"spi1 bytes")?;
+    fs::write(&provider, b"provider bytes")?;
+    let arguments = || -> Vec<OsString> {
+        vec![
+            "stage".into(),
+            image.clone().into(),
+            vectors.join("signer.der").into(),
+            VECTOR_KEY_DESCRIPTION.into(),
+            adapter.clone().into(),
+            spi1.clone().into(),
+            "runtime.key".into(),
+            provider.clone().into(),
+            "honest".into(),
+        ]
+    };
+
+    // The report names the installed provider executable, then the removal.
+    let mut report = Vec::new();
+    run(arguments(), io::empty(), &mut report, describe, release).await?;
+    let report = String::from_utf8(report)?;
+    let lines: Vec<&str> = report.lines().collect();
+    assert_eq!(lines.len(), 2, "{report}");
+    assert!(
+        lines[0].starts_with("staged\t/var/lib/pigloros/sandbox/providers/"),
+        "{report}"
+    );
+    assert_eq!(lines[1], "unstaged");
+    assert!(!Path::new("/var/lib/pigloros").exists());
+
+    // A report or control input that fails still removes the installation.
+    let unreported = run(arguments(), io::empty(), &mut Broken, describe, release).await;
+    assert!(matches!(unreported, Err(ConformanceError::Io(_))));
+    assert!(!Path::new("/var/lib/pigloros").exists());
+    let uncontrolled = run(
+        arguments(),
+        BrokenControl,
+        &mut Vec::new(),
+        describe,
+        release,
+    )
+    .await;
+    assert!(matches!(uncontrolled, Err(ConformanceError::Io(_))));
+    assert!(!Path::new("/var/lib/pigloros").exists());
+    Ok(())
+}
+
 /// Unprivileged and outside the container, so the coverage run records the
 /// binary's own profile beside this test's.
 #[test]

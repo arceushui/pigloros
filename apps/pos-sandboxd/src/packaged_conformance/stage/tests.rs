@@ -107,3 +107,26 @@ async fn the_stage_argument_selects_the_stager() {
     .await;
     assert!(matches!(outcome, Err(ConformanceError::StageUsage)));
 }
+
+#[test]
+fn an_image_that_is_not_a_ddi_is_refused_before_anything_is_staged() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let binary = directory.path().join("provider");
+    std::fs::write(&binary, b"provider bytes")?;
+    let case = StageCase {
+        image: b"not a disk image".to_vec(),
+        certificate: Vec::new(),
+        key_description: "CN: 01".to_owned(),
+        adapter: b"adapter".to_vec(),
+        adapter_arguments: vec!["honest".to_owned()],
+        spi1: vec![1],
+        key_file_name: "runtime.key".to_owned(),
+        provider_binary: binary,
+    };
+    let refused = case.stage();
+    assert!(
+        matches!(&refused, Err(ConformanceError::Stage(reason)) if reason.contains("GPT")),
+        "{refused:?}"
+    );
+    Ok(())
+}
