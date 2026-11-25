@@ -1,4 +1,5 @@
-//! `pos-sandboxd-conformance IMAGE CERTIFICATE_DER KEY_DESCRIPTION`: the #444
+//! `pos-sandboxd-conformance IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER
+//! [ADAPTER_ARGUMENT...]`: the #444
 //! QEMU evidence guest's driver (feature `test-support`, never deployed).
 //!
 //! This file only wires [`pos_sandboxd::packaged_conformance::run`] to the
