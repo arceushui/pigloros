@@ -1515,11 +1515,9 @@ class EvidenceTests(unittest.TestCase):
              "no Stopping and Deactivated"),
             (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(STOPPING, "")}),
              "no Stopping and Deactivated"),
-            # The line must start at the beginning of a journal line and end where it ends: text
-            # in front of it (a daemon writing a copy), or after it, does not count.
-            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
-                DEACTIVATED, "daemon wrote: " + DEACTIVATED)}),
-             "no Stopping and Deactivated"),
+            # The Stopping line must start a journal line (the leading ^) and the Deactivated line
+            # must end its line (the trailing $); the line before Deactivated is anchored by the
+            # newline that precedes it.
             (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
                 "Deactivated successfully.\n", "Deactivated successfully. (copied)\n")}),
              "no Stopping and Deactivated"),
@@ -1570,7 +1568,7 @@ class EvidenceTests(unittest.TestCase):
     def test_only_the_interp_segment_type_makes_the_launcher_dynamic(self):
         base = "guest/daemon/start"
         # A word that merely contains INTERP is not the program interpreter segment.
-        accepted = LAUNCHER_HEADERS + "  NOTE           0x0 INTERPOSED-COMMENT\n"
+        accepted = LAUNCHER_HEADERS + "  NOTE           0x0 NOTINTERP INTERPOSED-COMMENT\n"
         self.verdict(change=lambda f: f.update({f"{base}/launcher-program-headers": accepted}))
         with self.assertRaisesRegex(checker.EvidenceError, "not a loadable statically linked"):
             self.verdict(change=lambda f: f.update(

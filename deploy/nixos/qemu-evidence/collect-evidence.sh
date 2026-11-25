@@ -235,8 +235,9 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
     # The installed copy is byte for byte the launcher the guest built.
     sha256sum "${binary}" >"${dir}/provider-sha256"
     start_runtime "${binary}" 2>"${dir}/start-stderr" || start=$?
-    # A start failure (timeout, notify protocol, exec) is logged by the manager at
-    # debug level only, so record the unit's state and journal right after the start.
+    # A start failure (timeout, notify protocol, exec) may not be printed by
+    # systemd-run (not verified), so record the unit's state and journal right
+    # after the start.
     systemctl show "${RUNTIME_UNIT}.service" --property=ActiveState,SubState,Result,ExecMainStatus \
       >"${dir}/start-state"
     journalctl --sync

@@ -47,20 +47,18 @@ impl StageCase {
         else {
             return Err(ConformanceError::StageUsage);
         };
-        let text = |argument: &OsString| {
-            argument
-                .to_str()
-                .map(str::to_owned)
-                .ok_or(ConformanceError::StageUsage)
-        };
+        // The text arguments first: a malformed one is a usage error before any I/O.
+        let key_description = text(description)?;
+        let key_file_name = text(key_file_name)?;
+        let adapter_arguments = rest.iter().map(text).collect::<Result<_, _>>()?;
         Ok(Self {
             image: fs::read(image)?,
             certificate: fs::read(certificate)?,
-            key_description: text(description)?,
+            key_description,
             adapter: fs::read(adapter)?,
-            adapter_arguments: rest.iter().map(text).collect::<Result<_, _>>()?,
+            adapter_arguments,
             spi1: fs::read(spi1)?,
-            key_file_name: text(key_file_name)?,
+            key_file_name,
             provider_binary: PathBuf::from(binary),
         })
     }
@@ -87,6 +85,14 @@ impl StageCase {
         })
         .map_err(|error| ConformanceError::Stage(error.to_string()))
     }
+}
+
+/// One command-line argument as text.
+fn text(argument: &OsString) -> Result<String, ConformanceError> {
+    argument
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(ConformanceError::StageUsage)
 }
 
 /// Run the stager: stage, report the provider executable, hold until

@@ -84,6 +84,19 @@ fn the_stager_reads_its_files_and_adapter_arguments() -> TestResult {
             Err(ConformanceError::Io(_))
         ));
     }
+
+    // A malformed text argument is a usage error before any file is read, even
+    // beside a missing file.
+    for index in [2, 5, 7] {
+        let mut bad = full(&["honest"]);
+        bad[index] = OsString::from_vec(vec![0xff]);
+        bad[0] = directory.path().join("missing").into_os_string();
+        bad[4] = directory.path().join("missing").into_os_string();
+        assert!(matches!(
+            StageCase::from_arguments(&bad),
+            Err(ConformanceError::StageUsage)
+        ));
+    }
     Ok(())
 }
 
