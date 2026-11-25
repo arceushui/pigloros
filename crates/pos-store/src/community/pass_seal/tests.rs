@@ -106,6 +106,7 @@ fn pass_state(operations: u64) -> CommunityPassStateV1 {
                 annotations: 0,
             },
         )]),
+        retained: BTreeMap::new(),
     }
 }
 
@@ -126,6 +127,9 @@ fn record(trace_rows: u64) -> Result<CommunityPassRecordV1, Error> {
             cbq1_digest: hash(84),
             quote_maxima: [u64::MAX; 3],
             trace_rows,
+            members: Vec::new(),
+            metadata_key: [0x90; 16],
+            failure_cohort_key: [0x91; 16],
             generation_horizon_micros: 10_000,
             outcome_horizon_micros: HORIZON,
         },
