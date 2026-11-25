@@ -456,11 +456,15 @@ class Evidence:
             raise EvidenceError("guest/network/ does not hold exactly the ADR-069 R14 records")
         for name in NETWORK_CASES:
             found = {path.name for path in (network / name).iterdir()}
-            if found not in (NETWORK_RUN_FILES, NETWORK_RUN_FILES | NETWORK_PROBE_FILES):
+            # The run's own files must all exist; the probe's may be any subset, because a
+            # failed `ip` leaves the files it had already created. check_network_case then
+            # judges status and stderr before it requires the whole probe.
+            missing = sorted(NETWORK_RUN_FILES - found)
+            unexpected = sorted(found - NETWORK_RUN_FILES - NETWORK_PROBE_FILES)
+            if missing or unexpected:
                 raise EvidenceError(
-                    f"malformed network record {name}: missing "
-                    f"{sorted(NETWORK_RUN_FILES - found)}, unexpected {sorted(found - NETWORK_RUN_FILES - NETWORK_PROBE_FILES)}"
-                    f", probe files {sorted(found & NETWORK_PROBE_FILES)}")
+                    f"malformed network record {name}: missing {missing}, unexpected {unexpected}, "
+                    f"probe files {sorted(found & NETWORK_PROBE_FILES)}")
 
     def _verify_manifest(self) -> None:
         """A sealed artifact must match its manifest, file for file."""
@@ -1307,14 +1311,16 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
     if evidence.line(f"{base}/sysctl") != value:
         raise EvidenceError(f"{name} did not run with net.core.fb_tunnels_only_for_init_net={value}")
     status = evidence.line(f"{base}/status")
-    stderr = evidence.text(f"{base}/stderr")
+    stderr = evidence.text(f"{base}/stderr").strip()
+    present = sorted(probe for probe in NETWORK_PROBE_FILES if (evidence.root / base / probe).exists())
     if status != "0":
         raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
-                            f"stderr: {stderr.strip()[:400]!r}; journal in {base}/journal")
+                            f"stderr: {stderr[:400]!r}; probe files written: {present}; "
+                            f"journal in {base}/journal")
     if stderr:
-        raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr.strip()[:400]!r}")
-    if not (evidence.root / base / "netns").exists():
-        raise EvidenceError(f"the {name} PrivateNetwork= unit completed but wrote no probe files")
+        raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr[:400]!r}")
+    if present != sorted(NETWORK_PROBE_FILES):
+        raise EvidenceError(f"the {name} PrivateNetwork= unit completed but wrote only {present}")
     netns = evidence.line(f"{base}/netns")
     if not re.fullmatch(r"net:\[[0-9]+\]", netns) or netns == init[0]:
         raise EvidenceError(f"the {name} unit did not run in a network namespace of its own")

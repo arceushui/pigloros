@@ -1401,18 +1401,43 @@ class EvidenceTests(unittest.TestCase):
                 files.pop(f"guest/network/fb-0/{name}")
             files["guest/network/fb-0/status"] = "1\n"
             files["guest/network/fb-0/stderr"] = "Failed to find executable bash\n"
-        with self.assertRaisesRegex(checker.EvidenceError, "status 1.*Failed to find executable bash"):
+        with self.assertRaisesRegex(checker.EvidenceError,
+                                    r"status 1\); stderr: 'Failed to find executable bash'; "
+                                    r"probe files written: \[\]"):
             self.verdict(change=failed)
+
+        # A failed `ip` leaves the files it had created: the case is still judged by its
+        # status and stderr first, and says which probe files exist.
+        def partial(files):
+            for name in ("addrs", "routes4", "routes6"):
+                files.pop(f"guest/network/fb-1/{name}")
+            files["guest/network/fb-1/status"] = "2\n"
+            files["guest/network/fb-1/stderr"] = "  RTNETLINK answers: Operation not permitted \n"
+        with self.assertRaisesRegex(checker.EvidenceError,
+                                    r"status 2\); stderr: 'RTNETLINK answers: Operation not permitted'; "
+                                    r"probe files written: \['links', 'netns'\]"):
+            self.verdict(change=partial)
 
         def silent(files):
             for name in checker.NETWORK_PROBE_FILES:
                 files.pop(f"guest/network/fb-1/{name}")
-        with self.assertRaisesRegex(checker.EvidenceError, "wrote no probe files"):
+        with self.assertRaisesRegex(checker.EvidenceError, r"completed but wrote only \[\]"):
             self.verdict(change=silent)
-        with self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr"):
+
+        def incomplete(files):
+            files.pop("guest/network/fb-1/routes6")
+        with self.assertRaisesRegex(checker.EvidenceError, r"completed but wrote only \['addrs', 'links'"):
+            self.verdict(change=incomplete)
+        with self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr: 'warning'"):
             self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": "warning\n"}))
-        # A record with an unexpected file or partial probe files is named precisely.
-        with self.assertRaisesRegex(checker.EvidenceError, r"malformed network record fb-1: missing \['journal'\]"):
+        # Whitespace alone is no output.
+        self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": " \n"}))
+        # A record with a missing run file or an unexpected file is named precisely, with the
+        # probe files that exist.
+        with self.assertRaisesRegex(
+                checker.EvidenceError,
+                r"malformed network record fb-1: missing \['journal'\], unexpected \[\], "
+                r"probe files \['addrs', 'links', 'netns', 'routes4', 'routes6'\]"):
             self.verdict(change=lambda f: f.pop("guest/network/fb-1/journal"))
         with self.assertRaisesRegex(checker.EvidenceError, r"unexpected \['extra'\]"):
             self.verdict(change=lambda f: f.update({"guest/network/fb-1/extra": ""}))
@@ -1422,7 +1447,7 @@ class EvidenceTests(unittest.TestCase):
         changes = [
             (lambda f: f.pop(f"{base}/modules"), "does not hold exactly"),
             (lambda f: f.update({f"{base}/extra": ""}), "does not hold exactly"),
-            (lambda f: f.pop(f"{base}/fb-1/routes6"), "malformed network record"),
+            (lambda f: f.pop(f"{base}/fb-1/routes6"), "completed but wrote only"),
             (lambda f: f.update({f"{base}/boot-sysctl": "x\n"}), "does not boot"),
             (lambda f: f.update({f"{base}/boot-sysctl": "1\n"}), "does not boot"),
             (lambda f: f.update({f"{base}/boot-sysctl": "7\n"}), "does not boot"),
