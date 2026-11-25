@@ -20,6 +20,20 @@ Before proposing or implementing a ticket:
 
 Do not create artificial micro-PRs that cannot stand on their own. A slice is appropriately sized when its acceptance criteria are coherent, its blocking edges are explicit, and its diff can be understood without loading the whole epic.
 
+Before publishing another ticket, search existing ownership and reconcile
+overlapping scope. Keep a delegated slice callable through its authority and
+consumer seams; do not separate an implementation from the wiring needed to make
+it valid. Slicing changes the review unit, not the whole-ticket delivery scope.
+Include genuine proof-bearing fixture migration and replacement-contract tests
+in the corresponding slice.
+
+Map file ownership across stacked slices before building them. Prefer disjoint
+modules or seams; central registries and manifests need an explicit owner. When
+shared-file edits are unavoidable, document the overlap and land the prerequisite
+before building its dependent slice where practical. Do not add speculative
+entries merely to avoid a later conflict. A squash merge alone does not guarantee
+a conflict; inspect actual ancestry and edits.
+
 ## Ticket and PR contract
 
 The inspection record should map the concrete files, modules, interfaces, tests, migrations, and dependency edges. Each published implementation ticket should state:
@@ -50,7 +64,7 @@ During implementation, keep the diff aligned with the ticket. Never use `git add
 
 After each code change, run the quality gates applicable to the affected language, artifact, and scope. Pull requests recognized by `.github/rust-scope.yml` as documentation-only (for example, Markdown-only changes) skip Rust build, test, coverage, and cargo-crap jobs; retain applicable documentation and policy checks. For Rust-affecting changes, run formatting, workspace tests with ignored tests included, pedantic Clippy, and the 99% LLVM line/region coverage gate. If a new branch cannot be covered, simplify or remove it rather than exempting production code. If local resource constraints prevent a gate, record the limitation and use the repository’s equivalent hosted gate; do not weaken the threshold.
 
-Before opening the PR, inspect `git diff --stat` and the full diff against the fixed point. Confirm that every changed file belongs to the ticket, the PR description names the delivered seam and follow-up tickets, and the acceptance evidence is reproducible. Commit from the isolated worktree before removing it. Always request an independent code review after completing code changes, before starting new work. Use the `code-review` skill with a fixed point, review Standards and Spec fit separately, address findings in a separate round, and re-review the resulting exact head. A conflict-free PR or passing subset of checks is not merge readiness.
+Before opening the PR, inspect `git diff --stat` and the full diff against the fixed point. Confirm that every changed file belongs to the ticket, the PR description names the delivered seam and follow-up tickets, and the acceptance evidence is reproducible. Commit from the isolated worktree before removing it. Use `code-review` for explicitly requested review with a fixed point and independent Standards and Spec axes; address findings and re-review the resulting exact head. Independent review is required before merge under repository policy. A conflict-free PR or passing subset of checks is not merge readiness.
 
 ## Consolidated project learning
 

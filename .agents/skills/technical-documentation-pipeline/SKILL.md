@@ -9,8 +9,14 @@ description: >
 
 # Technical Documentation Pipeline and Template Generation
 
+Internal PiglorOS workflow. Before editing or publishing documentation, read
+[documentation boundary lessons](references/documentation-boundaries.md).
+Canonical ADR decisions belong on Redmine, design docs on Notion, and current
+contributor guidance in Git. Use [prepare-adr](../prepare-adr/SKILL.md) for a new
+architecture choice and [adr-wiki](../adr-wiki/SKILL.md) for canonical page rules.
+
 Process technical prompts, determine the correct phase of the engineering lifecycle, and generate structured documentation adhering to these platform boundaries:
-1. **Architecture Decision Records (ADRs)** → Redmine (basic Markdown, textile-friendly)
+1. **Architecture Decision Records (ADRs)** → Redmine (Markdown, never Textile)
 2. **Technical Design Documents (TDDs)** → Notion (rich Markdown with code blocks, tables, blockquotes)
 
 ## Reference Files — Load on Demand
@@ -45,7 +51,8 @@ Process technical prompts, determine the correct phase of the engineering lifecy
 
 ```mermaid
 flowchart LR
-    P[Proposed] --> D{Discuss}
+    P[Proposed] --> U[Under Review]
+    U --> D{Discuss}
     D -->|Approved| A[Accepted]
     D -->|Rejected| R[Rejected]
     A -->|Replaced by new decision| S[Superseded]
@@ -59,7 +66,8 @@ flowchart LR
 | Status | Meaning |
 |--------|---------|
 | **Proposed** | Draft, under discussion |
-| **Accepted** | Decision agreed, actionable |
+| **Under Review** | Exact revision awaiting a decision |
+| **Accepted** | Revision approved; implementation authorization remains separate |
 | **Rejected** | Considered and declined — keep for posterity |
 | **Deprecated** | Decision no longer valid, no direct replacement |
 | **Superseded** | Replaced by a newer ADR (links to it) |
@@ -78,33 +86,10 @@ When a new decision replaces an old one, the new ADR declares it in its header, 
 
 ## 4. ADR Organization
 
-### Numbering
-
-- Zero-padded for sorting: `0001`, `0042`, `0123`
-- Never reuse numbers
-- Gaps are okay (deleted/rejected ADRs)
-
-### Directory Structure
-
-```
-docs/adr/
-├── README.md
-├── 0001-use-postgresql.md
-├── 0002-rest-api.md
-├── 0003-auth0-migration.md
-└── template.md
-```
-
-### Index File
-
-```
-# Architecture Decision Records
-
-| ADR | Title | Status | Date |
-|-----|-------|--------|------|
-| [001](0001-use-postgresql.md) | Use PostgreSQL | Accepted | 2024-01-15 |
-| [002](0002-rest-api.md) | REST API Strategy | Accepted | 2024-01-20 |
-```
+Use the next unique `ADR-NNN` number after inspecting the canonical Redmine
+wiki. Never reuse numbers. Parent every ADR page under `ADR` so its child-page
+index stays authoritative. Follow `adr-wiki` for titles, Markdown, and read-back.
+Do not create a second canonical ADR directory or index in Git.
 
 ## 5. ADR Workflow
 
@@ -123,16 +108,16 @@ sequenceDiagram
 ```
 
 1. **Propose** — Create ADR in `Proposed` status, share with team
-2. **Discuss** — Review via PR, architecture meeting, or async. Update based on feedback
+2. **Discuss** — Move to `Under Review`, identify the exact revision, and update based on feedback
 3. **Decide** — Update status to `Accepted` or `Rejected`. If rejected, document why
-4. **Implement** — Reference ADR in implementation PRs: `Implements ADR-003: Auth0 Migration`
+4. **Implement** — After implementation authorization, reference the accepted ADR revision in implementation PRs
 5. **Review** — Periodically check: still valid? Should any be deprecated?
 
 ## 6. Redmine ADR Protocol (The "Why")
 
 **Trigger:** Comparisons, framework selections, or foundational shifts.
-**Format:** Basic Markdown (Redmine textile-friendly). No nested HTML.
-**Template:** Load `assets/adr-template.md`
+**Format:** Markdown, never Textile. No nested HTML.
+**Template:** Load [references/adr-template.md](references/adr-template.md).
 
 ### Writing Tips
 
@@ -175,18 +160,19 @@ Key outcomes.
 
 **Trigger:** System design, rollout plans, API definitions, or pipeline construction.
 **Format:** Rich Markdown (code blocks, tables, blockquotes).
-**Template:** Load `assets/design-doc-template.md`
+**Template:** Load [references/design-doc-template.md](references/design-doc-template.md).
 
 ## 8. Pre-Flight Check
 
 Before delivering output, verify:
 - [ ] Template chosen matches the request type (ADR vs Design Doc vs Split)
-- [ ] ADR follows MADR standard with lifecycle status
-- [ ] Numbering follows zero-padded convention
+- [ ] ADR follows the chosen template and canonical lifecycle requirements
+- [ ] Numbering is unique in the Redmine wiki and the page is parented under `ADR`
 - [ ] Supersedes/Superseded-by links are correct if replacing an old decision
 - [ ] All sections present — none skipped or summarized
 - [ ] Placeholders replaced with concrete, realistic technical details
 - [ ] Platform boundary respected: ADR → Redmine, Design Doc → Notion
+- [ ] Canonical writes were read back; current claims, links, and hierarchy agree
 - [ ] Split output has a visual divider between the two documents
 - [ ] Mermaid diagrams included and relevant to the content
 - [ ] No anti-patterns (vague language, missing context, bundled decisions)

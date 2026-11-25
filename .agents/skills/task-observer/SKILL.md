@@ -48,6 +48,8 @@ configuration pins it elsewhere.
 - `references/weekly-review.md` — the comprehensive review procedure
   (scheduled or 7-day fallback), approval policy, delivery/staging of
   updated skills. Load when a review triggers or the user asks for one.
+- `references/safe-records.md` — project append and survival checks. Load before
+  writing shared observation records.
 - `references/skill-authoring.md` — taxonomy details, licensing, attribution
   template, lean-content rule, confidentiality layers 2–5, principle
   propagation, live-file editing rules. Load before creating or editing any
@@ -58,11 +60,12 @@ configuration pins it elsewhere.
 
 These loads are mandatory steps, not suggestions: when an episode fires
 (review triggers → weekly-review; creating/editing a skill →
-skill-authoring; setup/no-filesystem → environments), load the file before
+skill-authoring; shared-record writes → safe-records;
+setup/no-filesystem → environments), load the file before
 proceeding — never improvise the episode from this core file. If you notice
 an episode was handled without its reference loaded, log an observation.
 
-**Bundle manifest:** this skill consists of `SKILL.md` plus the three
+**Bundle manifest:** this skill consists of `SKILL.md` plus the four
 reference files listed above. If a referenced file is missing, the install
 is incomplete: proceed using the rules in this file, tell the user which
 files are missing, and point them to the full bundle at the canonical

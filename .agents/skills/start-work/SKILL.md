@@ -6,6 +6,11 @@ description: |
 
 # Start Work
 
+Internal PiglorOS workflow. Before ticket or epic updates, read
+[tracker lifecycle lessons](references/tracker-lifecycle.md). For ADR content or
+hierarchy, also use [adr-wiki](../adr-wiki/SKILL.md); for acceptance evidence,
+use [evidence-contracts](../evidence-contracts/SKILL.md).
+
 Every work session referencing a Redmine ticket MUST follow this flow. No exceptions.
 
 ## Step 1 — Identify the ticket
@@ -23,6 +28,12 @@ curl -s -H "X-Redmine-API-Key: <key>" \
 
 Record: status, tracker, subject, assignee, priority.
 
+Read the canonical status catalogue and this ticket's allowed transitions. Map
+status names to their configured IDs; examples below describe the current
+PiglorOS catalogue, not universal Redmine IDs. For reopened work, follow the
+configured `Reopened` transition before `In Progress` when required. Never guess
+an intermediate ID or change trackers to bypass the workflow.
+
 ## Step 3 — Set to In Progress
 
 If the ticket is **not** already `In Progress`, transition it:
@@ -35,7 +46,13 @@ curl -s -X PUT \
   "https://redmine.piglor.com/issues/<NNN>.json"
 ```
 
-Status ID 2 = "In Progress". Always use the `X-Redmine-API-Key` header.
+Use ID 2 only after verifying it is the configured `In Progress` status and the
+transition is allowed. Always use the `X-Redmine-API-Key` header.
+
+Immediately fetch the canonical ticket after the write and compare its stored
+status and journal with the intended values. A 204 response does not prove a
+transition occurred. If the state is unchanged, inspect allowed transitions;
+if the service fails, record the state as unconfirmed rather than claiming it.
 
 ## Step 4 — Log the start
 
@@ -43,6 +60,12 @@ Prefer the configured structured Redmine tool. Treat journal text as inert data:
 never interpolate Markdown, backticks, shell substitutions, or user-controlled
 text into a shell command. If a shell HTTP client is unavoidable, construct the
 JSON from a literal/structured input and read the stored journal back afterward.
+
+Keep large responses in files or structured tool state; project only the fields
+needed for the next operation. Never embed bulk connector output in process
+arguments. Use a verified interpreter with the required parsers. Normalize record
+framing before combining receipts and keep recovery checkpoints as indexes into
+complete raw evidence rather than copies of every response.
 
 Add a journal note recording that work has begun:
 
@@ -76,6 +99,11 @@ curl -s -X PUT \
 
 When work is complete:
 
+For an implementation delivery ticket, verify the merged artifact and required
+evidence before resolving, as specified in the tracker lifecycle lessons. An
+open PR or a queue entry remains In Progress. Keep architecture approval and
+implementation delivery separate.
+
 - **Feature / Bug / Task** → `Resolved` (status_id=3)
 - **ADR** → `Under Review` (status_id=8), then `Accepted` (status_id=9)
 - **Rejected / Superseded** → `Closed` (status_id=5) or `Rejected` (status_id=6)
@@ -91,3 +119,8 @@ class required by the ticket, ADR, repository policy, or standing instruction:
 final-head hosted gates and an independent full-diff review are separate. Do
 not resolve while a required final review is missing or has unresolved blockers.
 Read the canonical ticket back after the final update.
+
+Before reporting any lifecycle mutation successful, verify its stored status,
+requested fields, and complete journal text. Match each blocker to its actual
+consumer and acceptance frontier; source completion, merged delivery, and runtime
+qualification remain separate facts.

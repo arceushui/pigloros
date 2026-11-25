@@ -88,6 +88,17 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
     structure, and complete text. A successful response alone is not evidence
     that Redmine stored the intended ADR.
 
+13. **Guard the reviewed base at publication.** Where the provider supports an
+    expected-version field, include the reviewed version with the intended body.
+    A conflict requires a fresh read and reconciliation, not an overwrite. Keep
+    the submitted version, stored revision, and approval receipt distinct.
+
+14. **Account for server transformations explicitly.** Compare the complete
+    canonical text with the submitted text, including observed generated footer
+    or formatting changes. Bound and document known transformations; never
+    silently trim arbitrary differences to claim exact identity. Keep the full
+    architectural evidence with its canonical decision record.
+
 ## Pre-flight
 
 - [ ] The page is parented under `ADR` and uses Markdown.
@@ -95,3 +106,5 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
 - [ ] The exact reviewed revision and approval scope are explicit.
 - [ ] Tables have contiguous structural rows.
 - [ ] The canonical page was read back after the final write.
+- [ ] Supported revision preconditions protected the reviewed base; any server
+      transformations are identified and the complete stored body is verified.

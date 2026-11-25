@@ -1,5 +1,9 @@
 # ADR Template — Redmine
 
+Internal PiglorOS template. Use `prepare-adr` for decision triggers and required
+research, and `adr-wiki` for the canonical parent, header, and revision approval.
+The diagrams below describe decisions; they do not authorize implementation.
+
 ## Decision Flow
 
 ```mermaid
@@ -10,7 +14,7 @@ flowchart TD
     W -->|Significant impact| S[Start ADR]
     N --> D[Document in ticket instead]
     S --> P[Status: Proposed]
-    P --> R[Review with team]
+    P --> R[Status: Under Review]
     R -->|Approved| A[Status: Accepted]
     R -->|Rejected| J[Status: Rejected]
     A --> V{Still valid?}
@@ -41,7 +45,7 @@ flowchart LR
 
 # ADR-NNNN: [Title]
 
-**Status:** [Proposed | Accepted | Deprecated | Superseded by ADR-NNNN]
+**Status:** [Proposed | Under Review | Accepted | Rejected | Deprecated | Superseded by ADR-NNNN]
 **Date:** [YYYY-MM-DD]
 
 ## Context
@@ -115,7 +119,7 @@ If the team prefers the MADR standard (more structured for complex decisions):
 
 ```markdown
 # ADR-NNNN: [Title]
-**Status:** [Proposed | Accepted | Deprecated | Superseded by ADR-NNNN]
+**Status:** [Proposed | Under Review | Accepted | Rejected | Deprecated | Superseded by ADR-NNNN]
 **Date:** [YYYY-MM-DD]
 
 ## Context and Problem Statement
