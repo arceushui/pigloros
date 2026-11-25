@@ -6,7 +6,7 @@ use super::codec::{
     signed, text_value, uint, uint_value, valid_key_id, validate_magic, verify_digest,
     verify_signature, MAX_SAFE_DETAIL_BYTES,
 };
-use super::{SandboxProviderProtocolError, Scy1, Sdy1, SelfDigested, Verified};
+use super::{SandboxProviderProtocolError, Scy1, Sdy1, SelfDigested, Sry1, Verified};
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -381,6 +381,21 @@ pub struct SandboxReconcileRequest {
     pub attempt_id: [u8; 16],
     pub agr1_digest: [u8; 32],
     pub request_digest: [u8; 32],
+}
+
+/// The signed body of an SRY1 before its digest and signature exist; its
+/// `clean` field is the literal `true`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxReconcileResponseFields {
+    /// The SRQ1 request this response answers.
+    pub request_id: [u8; 16],
+    /// The attempt the request named.
+    pub attempt_id: [u8; 16],
+    /// The digest of the attempt's retained `reconciliation-evidence-v1`
+    /// (ADR-069 R15 §3.1).
+    pub reconciliation_evidence_digest: [u8; 32],
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
 }
 
 /// Signed successful SRY1 reconciliation response.
@@ -872,7 +887,80 @@ signed_response_codec!(
     ]
 );
 
+/// SRY1's unsigned prefix: `["SRY1", 1, request, attempt, true, evidence
+/// digest, key ID]` (ADR-069 §10).
+fn reconcile_unsigned_value(fields: &SandboxReconcileResponseFields) -> [Value; 7] {
+    [
+        text_value("SRY1"),
+        uint_value(1),
+        bytes_value(&fields.request_id),
+        bytes_value(&fields.attempt_id),
+        Value::Bool(true),
+        bytes_value(&fields.reconciliation_evidence_digest),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
+}
+
 impl SandboxReconcileResponse {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an SRY1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects a zero identity or evidence digest and an invalid key ID.
+    pub fn self_digested(
+        fields: SandboxReconcileResponseFields,
+    ) -> Result<SelfDigested<Sry1>, SandboxProviderProtocolError> {
+        if fields.request_id == [0; 16]
+            || fields.attempt_id == [0; 16]
+            || fields.reconciliation_evidence_digest == [0; 32]
+            || !valid_key_id(&fields.runtime_attestation_key_id)
+        {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        record_digest(
+            "SRY1",
+            &Value::Array(reconcile_unsigned_value(&fields).to_vec()),
+        )
+        .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Sry1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, response_digest, signature) = verified.into_parts();
+            Ok(Self {
+                request_id: fields.request_id,
+                attempt_id: fields.attempt_id,
+                clean: true,
+                reconciliation_evidence_digest: fields.reconciliation_evidence_digest,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                response_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
+    }
+
+    /// Exact canonical SRY1 bytes.
+    ///
+    /// # Errors
+    /// Returns an encoding error if the record cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        encode(&Value::Array(vec![
+            Value::Array(self.unsigned_value().to_vec()),
+            bytes_value(&self.response_digest),
+            bytes_value(&self.signature),
+        ]))
+    }
+
     fn validate(&self, unsigned: &[Value; 7]) -> Result<(), SandboxProviderProtocolError> {
         if self.request_id == [0; 16]
             || self.attempt_id == [0; 16]

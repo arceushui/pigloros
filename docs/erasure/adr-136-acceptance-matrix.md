@@ -37,7 +37,7 @@ Each entry names its owner decision and the rows it explains.
 
 | Deviation | Tests | Decision | Where |
 |---|---|---|---|
-| ELTA1 operator-key history is not yet refused | 6 | Deferred to #448 (Q9) | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| ELTA1 operator-key history is not yet refused | 6 | Deferred to #448 (Q17) | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
 | Memory and `SQLite` bytes differ only in the replica row | 1 | Q16 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
 | An affected Timeline cannot be deleted under the host | 2 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
 | Imported Timelines keep their exported owner (errata) | 2 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
@@ -116,7 +116,7 @@ other `LEC` test.
 ## Deviations (owner decisions of 2026-11-20)
 
 - **ELTA1 operator-key history:** an ELTA1 that names an operator key outside
-  the trust-state store's history is not yet refused. Deferred to #448 (Q9).
+  the trust-state store's history is not yet refused. Deferred to #448 (Q17).
 - **Memory and `SQLite` bytes:** they differ only in the local-replica row
   (Q16).
 - **Affected Timeline deleted after freeze:** the host refuses every deletion,
@@ -249,7 +249,7 @@ other `LEC` test.
 | A revoked `issued_by` key | `LEC::a_revoked_bundle_root_or_signer_key_is_refused` | Memory | |
 | An ELB1 whose registry digest, store identity, policy or execution binding differs | `LEC::a_bundle_for_another_policy_or_executor_is_a_mismatch`; `LEC::a_bundle_for_another_store_is_a_mismatch`; `LEC::the_executor_binding_is_the_pinned_executor_version_digest` | Memory | |
 | A key-registry signer key that differs from ELB1 | `LEC::a_signer_key_the_key_registry_does_not_hold_is_a_mismatch`; `LEC::a_destroyed_signer_key_is_a_mismatch` | Memory | |
-| An ELTA1 naming an operator key outside the trust-state history | none | | Deviation: deferred to #448 (Q9). |
+| An ELTA1 naming an operator key outside the trust-state history | none | | Deviation: deferred to #448 (Q17). |
 | After an operator-key rotation, a store holding an ERQ1 stays closed until the previous anchor is restored | `LEC::an_operator_key_rotation_closes_a_store_with_requests_until_restored` | `SQLite` | |
 | An expired TPS1 refuses new submissions and freezes, while recovery, `getErasure` and completion of a frozen request still verify | `LEC::an_expired_tps1_closes_new_admissions`; `ACC::an_expired_tps1_refuses_a_freeze_but_a_frozen_request_still_completes`; `LEC::attempt_0_completes_after_the_bundle_expires` | `SQLite` | The ACC test recomposes under a new clock. The projection stands in for `getErasure` at the runtime seam. |
 | Recovery after the installed TPS1 is replaced still verifies an old request | `LEC::a_store_with_requests_opens_only_when_every_retained_tps1_verifies`; `LEC::committed_evidence_still_verifies_after_a_bundle_rotation` | `SQLite` | |

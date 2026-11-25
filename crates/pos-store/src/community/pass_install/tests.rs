@@ -1,6 +1,6 @@
 //! Installation wiring and reservation horizons: the owner horizons are an
-//! installation input (ADR-129 R10.4(3), R13.2(1)), the reuse bound is the
-//! step 5c formula and the roster keys are the planner's CQK1 digests.
+//! installation input (ADR-129 R10.4(3), R13.2(1)), the reuse horizon is
+//! `H_g` and the roster keys are the planner's CQK1 digests.
 
 use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,

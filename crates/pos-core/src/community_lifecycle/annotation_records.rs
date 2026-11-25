@@ -76,10 +76,7 @@ pub struct CommunityAnnotationChargeV1 {
 }
 
 /// The staged CAT1 and Annotation CPN1 of one invocation's included items.
-///
-/// Equality compares the charge, the digests and the graph terms: the
-/// digests bind the encodings.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CommunityAnnotationRecordsV1 {
     charge: CommunityAnnotationChargeV1,
     manifest_digest: Hash,
@@ -88,16 +85,6 @@ pub struct CommunityAnnotationRecordsV1 {
     manifest_bytes: Zeroizing<Vec<u8>>,
     node_bytes: Zeroizing<Vec<u8>>,
 }
-
-impl PartialEq for CommunityAnnotationRecordsV1 {
-    fn eq(&self, other: &Self) -> bool {
-        self.charge == other.charge
-            && self.manifest_digest == other.manifest_digest
-            && self.node == other.node
-            && self.graph == other.graph
-    }
-}
-impl Eq for CommunityAnnotationRecordsV1 {}
 
 impl CommunityAnnotationRecordsV1 {
     /// Stage the records of `items`, or none for no item.

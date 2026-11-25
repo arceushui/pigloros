@@ -55,8 +55,13 @@ impl CommunityGenerationCountsV1 {
 pub(super) struct CommunityPassStateV1 {
     /// T's active generation G (R10.5).
     pub(super) generation: [u8; 16],
-    /// `H(CDP1)` of the profile T was initialized under: every Reserve on T
-    /// names it, whatever profile is installed now (R10.7 5j).
+    /// `H(CDP1)` of the profile T was initialized under.
+    ///
+    /// Every Reserve on T must name it and the installed profile (R10.7 5j).
+    /// A Timeline initializes once (`initialize` refuses a second with
+    /// `Conflict`), so after a reinstallation of another CDP1 every Reserve on
+    /// an initialized T gives 3 and T stays stranded until the original CDP1
+    /// is installed again. A Timeline's context is bound to its profile.
     pub(super) profile_digest: Hash,
     /// `H(CSH1)`, T's selected head: the head and frontier a Reserve must
     /// still find (R10.7 step 5j).
@@ -75,6 +80,10 @@ pub(super) struct CommunityPassStateV1 {
     pub(super) scope_rows: BTreeMap<Hash, Vec<CommunityScopeMemberV1>>,
     /// The retained operation counts per generation.
     pub(super) generations: BTreeMap<[u8; 16], CommunityGenerationCountsV1>,
+    /// The highest pass ordinal ever allocated on T, never decreased by an
+    /// Abort: the in-memory mirror of the CSI1 floor row (R15, annex "Identity
+    /// floor").
+    pub(super) highest_pass_ordinal: u64,
     /// Every observation a Reserve minted, kept for reuse after its Commit
     /// (R9.2).
     pub(super) retained: BTreeMap<CommunityNativeNodeReferenceV1, CommunityRetainedObservationV1>,
@@ -132,6 +141,7 @@ impl CommunityPassStateV1 {
             observations: BTreeMap::new(),
             scope_rows: BTreeMap::new(),
             generations: BTreeMap::new(),
+            highest_pass_ordinal: 0,
             retained: BTreeMap::new(),
         }
     }

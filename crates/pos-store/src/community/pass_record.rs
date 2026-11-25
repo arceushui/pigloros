@@ -110,9 +110,6 @@ pub(super) struct CommunityPassRecordV1 {
 
 impl MemoryCommunityDomainV1 {
     /// The pass reserved under `(T, reservation_operation_id)`, in any status.
-    ///
-    /// Records stay in the index for ever, so `unresolved_pass` scans every
-    /// pass of T: O(passes of T), to revisit in A5.
     pub(super) fn pass_record(
         &self,
         timeline: TimelineId,
@@ -122,6 +119,9 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// T's Reserved or Sealed pass, if any: code 7 gives at most one.
+    ///
+    /// Records stay in the index for ever, so this scans every pass of T:
+    /// O(passes of T), to revisit in A5.
     pub(super) fn unresolved_pass(&self, timeline: TimelineId) -> Option<&CommunityPassRecordV1> {
         self.pass_records
             .range((timeline, [0; 16])..=(timeline, [0xff; 16]))
