@@ -7,11 +7,16 @@ use std::sync::Arc;
 use pos_core::community_lifecycle::{
     CommunityAnnotationCandidateV1 as Candidate, CommunityAnnotationContextV1 as Context,
     CommunityAnnotationOmissionV1 as Omission, CommunityAnnotationOmissionsV1 as Omissions,
-    CommunityAnnotationRecordsV1 as Records, CommunityDigestListV1 as Digests,
+    CommunityAnnotationRecordsV1 as Records, CommunityDependencyBundleInputV1,
+    CommunityDependencyBundleV1, CommunityDigestListV1 as Digests, CommunityEvidenceRootsV1,
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error,
     CommunityNativeNodeReferenceV1 as Reference, CommunityPassKeyV1, CommunityReservationInputV1,
+    CommunityReservationV1, CommunitySealedResultInputV1, CommunitySealedResultV1,
     CommunitySharedCountsV1, CommunityTypedInputRefV1 as Typed, COMMUNITY_CONTROL_OPERATIONS_V1,
-    COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1, COMMUNITY_MAXIMUM_ROSTER_V1,
+    COMMUNITY_MAXIMUM_STORE_KEYS_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    MAX_COMMUNITY_DIRECT_INPUTS_V1, MAX_COMMUNITY_EXPANDED_INPUTS_V1,
+    MAX_COMMUNITY_OBJECT_BINDINGS_V1,
 };
 use pos_core::store::EventStore;
 use pos_core::{
@@ -19,11 +24,13 @@ use pos_core::{
 };
 use ulid::Ulid;
 
+use super::super::erasure_budget::CommunityPendingReservationV1;
 use super::super::pass_record::{
-    CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1,
+    CommunityPassMemberDigestsV1, CommunityPassRecordV1, CommunityPassStatusV1,
+    CommunityReservedPassV1,
 };
 use super::super::pass_state::{CommunityGenerationCountsV1, CommunityPassStateV1};
-use super::{CommunitySealCandidateV1, CommunitySealInputV1, CommunitySealInvocationV1};
+use super::{CommunitySealCandidateV1, CommunitySealInputV1, CommunitySealInvocationV1, SealRoom};
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
 use crate::MemoryTrustedClockAuthorityV1;
@@ -44,7 +51,7 @@ fn id() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([1; 16]))
 }
 
-static STEPS: [Hash; 1] = [hash(0x71)];
+static STEPS: [Hash; 2] = [hash(0x71), hash(0x72)];
 static REVISIONS: [Hash; 1] = [hash(0x72)];
 static PROGRESS: [Hash; 1] = [hash(0x73)];
 static REQUIRED: [Hash; 2] = [hash(0x74), hash(0x75)];
@@ -110,6 +117,15 @@ fn pass_state(operations: u64) -> CommunityPassStateV1 {
     }
 }
 
+fn member(index: u8) -> CommunityPassMemberDigestsV1 {
+    CommunityPassMemberDigestsV1 {
+        roster_index: usize::from(index),
+        cmb1_digest: hash(index),
+        cin1_digest: hash(0xa0 + index),
+        trust_policy_snapshot_digest: hash(0xb0 + index),
+    }
+}
+
 /// A Reserved pass with a materialization of `counts(10)` over `counts(100)`.
 fn record(trace_rows: u64) -> Result<CommunityPassRecordV1, Error> {
     Ok(CommunityPassRecordV1 {
@@ -117,7 +133,7 @@ fn record(trace_rows: u64) -> Result<CommunityPassRecordV1, Error> {
             reservation: CommunityReservationInputV1 {
                 pass_key: pass_key()?,
                 request_digest: hash(80),
-                native_producer_ordinal: 5,
+                native_producer_ordinal: 1_000,
                 predecessor_head_digest: hash(30),
                 roster_digest: hash(81),
                 prepared_input_set_digest: hash(82),
@@ -127,7 +143,7 @@ fn record(trace_rows: u64) -> Result<CommunityPassRecordV1, Error> {
             cbq1_digest: hash(84),
             quote_maxima: [u64::MAX; 3],
             trace_rows,
-            members: Vec::new(),
+            members: vec![member(1), member(2)],
             metadata_key: [0x90; 16],
             failure_cohort_key: [0x91; 16],
             generation_horizon_micros: 10_000,
@@ -154,14 +170,18 @@ fn candidate() -> CommunitySealCandidateV1<'static> {
         factual_binding: None,
         required_node_digests: Digests::from_digests(&REQUIRED),
         additions: counts(1_000),
-        graph_counts: CommunityGraphCountsV1 {
-            registrations: 1,
-            edges: 2,
-            keys: 3,
-            maximum_depth: 4,
-            registration_bytes: 5,
-            artifact_bytes: 6,
-        },
+        graph_counts: graph_counts(),
+    }
+}
+
+const fn graph_counts() -> CommunityGraphCountsV1 {
+    CommunityGraphCountsV1 {
+        registrations: 1,
+        edges: 2,
+        keys: 3,
+        maximum_depth: 4,
+        registration_bytes: 5,
+        artifact_bytes: 6,
     }
 }
 
@@ -187,7 +207,7 @@ fn context(member: u8) -> Result<Context, Error> {
     Ok(Context {
         pass_key: pass_key()?,
         member_binding_digest: hash(member),
-        invocation_step_digest: hash(5),
+        invocation_step_digest: hash(0x70 + member),
         step: native(10),
         producer_ordinal: 1_000,
         node_ordinal: u32::from(member),
@@ -314,7 +334,7 @@ fn the_totals_without_annotations_are_at_most_the_quote() -> TestResult {
         quoted(&mut domain, under, counts(100));
         assert!(matches!(
             domain.stage_seal(&input(Vec::new())),
-            Err(Error::CapacityExhausted)
+            Err(Error::InvalidBinding)
         ));
     }
     Ok(())
@@ -333,7 +353,7 @@ fn the_totals_are_within_p() -> TestResult {
     for over in [over_nodes, over_edges, over_bytes] {
         assert!(matches!(
             domain.stage_seal(&over),
-            Err(Error::CapacityExhausted)
+            Err(Error::InvalidBinding)
         ));
     }
     let mut at_nodes = input(Vec::new());
@@ -417,7 +437,9 @@ fn an_annotation_is_staged_charged_and_bound_in_both_records() -> TestResult {
 
 #[test]
 fn the_control_operation_cap_omits_annotations_and_the_pass_still_seals() -> TestResult {
-    // The pass's own materialization is counted: 8,191 before it, 8,192 now.
+    // The count read at Seal already includes this pass's materialization
+    // (R14, RN.1(6)): 8,191 leaves room for the one Annotation CPN1 and 8,192
+    // does not. A pass that read 8,191 before its Reserve reads 8,192 here.
     let inputs = refs(11..13);
     for (operations, retained) in [
         (COMMUNITY_CONTROL_OPERATIONS_V1 - 1, true),
@@ -497,6 +519,7 @@ fn only_the_first_annotating_invocation_keeps_its_items() -> TestResult {
     );
     assert_eq!(sealed.trace_root, Some(expected.node().node_digest));
     assert!(sealed.omissions == [Omissions::none(), only(Omission::AnnotationPolicy)]);
+    assert_eq!(sealed.retained, [vec![0], Vec::new()]);
     Ok(())
 }
 
@@ -516,6 +539,7 @@ fn a_later_invocation_keeps_its_items_when_the_first_keeps_none() -> TestResult 
         Some(expected.manifest_digest())
     );
     assert!(sealed.omissions == [only(Omission::AnnotationBudget), Omissions::none()]);
+    assert_eq!(sealed.retained, [Vec::new(), vec![0]]);
     Ok(())
 }
 
@@ -573,5 +597,280 @@ fn the_dependency_bundle_and_the_reservation_must_be_valid() -> TestResult {
         domain.stage_seal(&input(Vec::new())),
         Err(Error::InvalidBinding)
     ));
+    Ok(())
+}
+
+#[test]
+fn a_trace_needs_one_more_live_key() -> TestResult {
+    let inputs = refs(11..13);
+    let records = Records::stage(&context(1)?, &[item(&inputs)])?.ok_or("records")?;
+    for (keys, fits) in [
+        (COMMUNITY_MAXIMUM_STORE_KEYS_V1 - 1, true),
+        (COMMUNITY_MAXIMUM_STORE_KEYS_V1, false),
+    ] {
+        let room = SealRoom {
+            prior: counts(100),
+            materialization: counts(10),
+            quote: [u64::MAX; 3],
+            operations: 0,
+            trace_rows: 2,
+            graph: graph_counts(),
+            keys,
+        };
+        assert_eq!(room.admits(counts(1_000), &records), fits);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_trace_closure_must_fit_the_graph_maxima() -> TestResult {
+    let domain = domain(1)?;
+    let inputs = refs(11..13);
+    let records = Records::stage(&context(1)?, &[item(&inputs)])?.ok_or("records")?;
+    // The profile-1 maximum of edges is 8,192.
+    for (edges, retained) in [
+        (8_192 - records.graph().edges, true),
+        (8_193 - records.graph().edges, false),
+    ] {
+        let mut call = input(vec![invocation(1, vec![item(&inputs)])?]);
+        call.candidate.graph_counts.edges = edges;
+        let staged = domain.stage_seal(&call)?;
+        assert_eq!(staged.sealed().trace_root.is_some(), retained);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_trace_objects_stay_below_the_object_maximum() {
+    // The largest roster, each member with its 7 State objects and 2 per
+    // `InputIndex` group at the most groups, CED1 and CEB1, the `2n + 1`
+    // recording objects and the two trace objects (R11.4(4)).
+    let groups = (MAX_COMMUNITY_EXPANDED_INPUTS_V1 / MAX_COMMUNITY_DIRECT_INPUTS_V1) as u64;
+    let roster = COMMUNITY_MAXIMUM_ROSTER_V1 as u64;
+    let objects = roster * (7 + 2 * groups) + 2 + (2 * roster + 1) + 2;
+    assert_eq!(objects, 128);
+    assert!(objects <= MAX_COMMUNITY_OBJECT_BINDINGS_V1 as u64);
+}
+
+/// CPD1 and CPS1 rebuilt from the record and the candidate through the
+/// public codecs: the digests Seal must bind.
+fn expected_digests(
+    domain: &MemoryCommunityDomainV1,
+    shared_counts: CommunitySharedCountsV1,
+    trace_root: Option<Hash>,
+    manifest: Option<Hash>,
+) -> Result<(Hash, Hash), Box<dyn std::error::Error>> {
+    let reservation = domain.pass_reservation(id(), OPERATION).ok_or("record")?;
+    let bundle = CommunityDependencyBundleV1::new(CommunityDependencyBundleInputV1 {
+        pass_key: reservation.pass_key,
+        native_producer_ordinal: reservation.native_producer_ordinal,
+        graph_root_digest: hash(0x64),
+        factual_binding: None,
+        required_node_digests: Digests::from_digests(&REQUIRED),
+        optional_evidence_roots: CommunityEvidenceRootsV1 {
+            presentation_trace: trace_root,
+            replay_recording: Some(hash(0x63)),
+        },
+        shared_counts,
+        graph_counts: graph_counts(),
+        evidence_not_after_micros: HORIZON,
+    })?;
+    let result = CommunitySealedResultV1::new(CommunitySealedResultInputV1 {
+        pass_key: reservation.pass_key,
+        reservation_digest: CommunityReservationV1::new(reservation)?.digest(),
+        invocation_step_digests: Digests::from_digests(&STEPS),
+        event_draft_vector_digest: hash(0x60),
+        event_draft_manifest_digest: hash(0x61),
+        new_revision_digests: Digests::from_digests(&REVISIONS),
+        new_member_progress_digests: Digests::from_digests(&PROGRESS),
+        candidate_head_digest: hash(0x62),
+        dependency_bundle_digest: bundle.digest(),
+        annotation_manifest_digest: manifest,
+        replay_recording_digest: hash(0x63),
+        evidence_not_after_micros: HORIZON,
+    })?;
+    Ok((bundle.digest(), result.digest()))
+}
+
+#[test]
+fn the_sealed_digests_equal_independently_built_records() -> TestResult {
+    let domain = domain(1)?;
+    let plain = domain.stage_seal(&input(Vec::new()))?;
+    let (bundle, result) = expected_digests(&domain, counts(1_000), None, None)?;
+    assert_eq!(plain.sealed().dependency_bundle_digest, bundle);
+    assert_eq!(plain.sealed().result_digest, result);
+    let inputs = refs(11..13);
+    let items = vec![item(&inputs)];
+    let records = Records::stage(&context(1)?, &items)?.ok_or("records")?;
+    let charge = records.charge();
+    let annotated = domain.stage_seal(&input(vec![invocation(1, items)?]))?;
+    let (bundle, result) = expected_digests(
+        &domain,
+        CommunitySharedCountsV1 {
+            nodes: 1_000 + charge.nodes,
+            edges: 1_001 + charge.edges,
+            declared_inputs: 1_002,
+            encoded_record_bytes: 1_003 + charge.bytes,
+        },
+        Some(records.node().node_digest),
+        Some(records.manifest_digest()),
+    )?;
+    assert_eq!(annotated.sealed().dependency_bundle_digest, bundle);
+    assert_eq!(annotated.sealed().result_digest, result);
+    Ok(())
+}
+
+#[test]
+fn annotations_beyond_the_quote_slack_still_seal() -> TestResult {
+    let mut domain = domain(1)?;
+    // The quote holds exactly the totals without annotations.
+    quoted(&mut domain, [1_010, 1_012, 1_016], counts(100));
+    let inputs = refs(11..13);
+    let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+    assert!(staged.sealed().trace_root.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_reused_observation_counts_no_materialization_in_the_cap() -> TestResult {
+    // No materialization of this pass is counted: 8,191 operations leave
+    // room for the one Annotation CPN1, and 8,192 do not.
+    let inputs = refs(11..13);
+    for (operations, retained) in [
+        (COMMUNITY_CONTROL_OPERATIONS_V1 - 1, true),
+        (COMMUNITY_CONTROL_OPERATIONS_V1, false),
+    ] {
+        let mut domain = domain(operations)?;
+        domain
+            .pass_records
+            .entry((id(), OPERATION))
+            .and_modify(|record| record.materialization = None);
+        let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+        assert_eq!(staged.sealed().trace_root.is_some(), retained);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_cat1_keeps_1024_items_and_omits_the_next_with_reason_3() -> TestResult {
+    let domain = domain(1)?;
+    let inputs = refs(11..12);
+    let items: Vec<Candidate<'_>> = (0..1_025).map(|_| item(&inputs)).collect();
+    let staged = domain.stage_seal(&input(vec![invocation(1, items)?]))?;
+    assert_eq!(
+        staged.sealed().retained[0],
+        (0..1_024).collect::<Vec<usize>>()
+    );
+    assert!(staged.sealed().omissions[0] == only(Omission::AnnotationBudget));
+    Ok(())
+}
+
+#[test]
+fn an_abort_after_seal_still_fits_the_pending_entry() -> TestResult {
+    let mut domain = domain(1)?;
+    let entry = CommunityPendingReservationV1::for_pass(10, 4);
+    domain.pending_reservations.insert((id(), OPERATION), entry);
+    let inputs = refs(11..13);
+    let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+    domain.apply_seal(&SEAL, &staged)?;
+    // Seal leaves the entry as the Reserve held it: pass rows plus `F_p`.
+    assert!(domain.stage_abort(id(), OPERATION, 12).is_ok());
+    assert!(matches!(
+        domain.stage_abort(id(), OPERATION, 13),
+        Err(Error::InvalidBinding)
+    ));
+    Ok(())
+}
+
+#[test]
+fn an_invocation_context_must_match_the_pass() -> TestResult {
+    let domain = domain(1)?;
+    let inputs = refs(11..13);
+    let base = context(1)?;
+    let contexts = [
+        Context {
+            pass_key: CommunityPassKeyV1::new(id(), GENERATION, 8)?,
+            ..base
+        },
+        Context {
+            producer_ordinal: 999,
+            ..base
+        },
+        Context {
+            evidence_not_after_micros: HORIZON + 1,
+            ..base
+        },
+        Context {
+            member_binding_digest: hash(9),
+            ..base
+        },
+        Context {
+            invocation_step_digest: hash(0x79),
+            ..base
+        },
+        Context {
+            step: Reference {
+                store_incarnation: [1; 16],
+                ..native(10)
+            },
+            ..base
+        },
+    ];
+    for context in contexts {
+        let mut call = invocation(1, vec![item(&inputs)])?;
+        call.context = context;
+        assert!(matches!(
+            domain.stage_seal(&input(vec![call])),
+            Err(Error::InvalidBinding)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn the_invocations_must_be_in_roster_order() -> TestResult {
+    let domain = domain(1)?;
+    for members in [[2, 1], [1, 1]] {
+        let calls = members
+            .into_iter()
+            .map(|member| invocation(member, Vec::new()))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(matches!(
+            domain.stage_seal(&input(calls)),
+            Err(Error::InvalidBinding)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_defect_of_the_trusted_input_refuses_the_seal_and_is_not_a_budget() -> TestResult {
+    let domain = domain(1)?;
+    let inputs = refs(11..12);
+    let over = refs(11..267);
+    let mut no_horizon = invocation(1, vec![item(&inputs)])?;
+    no_horizon.context.evidence_not_after_micros = 0;
+    let far = Candidate {
+        guest_index: 64,
+        ..item(&inputs)
+    };
+    let low = Candidate {
+        guest_index: 0,
+        ..item(&over)
+    };
+    let high = Candidate {
+        guest_index: 2,
+        ..item(&inputs)
+    };
+    for call in [
+        no_horizon,
+        invocation(1, vec![far])?,
+        invocation(1, vec![high, low])?,
+    ] {
+        assert!(matches!(
+            domain.stage_seal(&input(vec![call])),
+            Err(Error::InvalidBinding)
+        ));
+    }
     Ok(())
 }
