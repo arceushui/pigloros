@@ -1561,9 +1561,20 @@ class EvidenceTests(unittest.TestCase):
              "no Stopping and Deactivated"),
             (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(STOPPING, "")}),
              "no Stopping and Deactivated"),
-            # The Stopping line must start a journal line (the leading ^) and the Deactivated line
-            # must end its line (the trailing $); the line before Deactivated is anchored by the
-            # newline that precedes it.
+            # Each anchor of RUNTIME_STOPPED, one case per mutant: the Stopping line must start a
+            # journal line (the leading ^); the Deactivated line must start one (text before its
+            # `[` on the same line, such as a daemon writing a copy, does not count) and end its
+            # line (the trailing $); and both lines are PID 1's, so `systemd[1]` is exact.
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                DEACTIVATED, "daemon wrote: " + DEACTIVATED)}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "systemd[1]: Stopping", "systemd[412]: Stopping")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "systemd[1]: piglor-sandbox-runtime.service: Deactivated",
+                "systemd[412]: piglor-sandbox-runtime.service: Deactivated")}),
+             "no Stopping and Deactivated"),
             (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
                 "Deactivated successfully.\n", "Deactivated successfully. (copied)\n")}),
              "no Stopping and Deactivated"),
