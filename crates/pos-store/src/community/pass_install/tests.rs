@@ -272,6 +272,7 @@ fn the_domain_installs_its_horizons_with_the_installation_refusals() -> Fallible
     let key = key()?;
     let roster = roster(&key)?;
     let profile = build_profile(&roster, RETENTION)?;
+    let limits = [100, 200];
     let mut domain = crate::community::MemoryCommunityDomainV1::new(
         crate::memory::MemoryStore::new(),
         [0x5a; 16],
@@ -293,17 +294,97 @@ fn the_domain_installs_its_horizons_with_the_installation_refusals() -> Fallible
         },
     ] {
         assert_eq!(
-            domain.install_pass_horizons(&SEAL, &profile, refused).err(),
+            domain
+                .install_pass_horizons(&SEAL, &profile, &limits, refused)
+                .err(),
             Some(Error::InvalidBinding)
         );
         assert!(domain.pass_horizons.is_none());
     }
-    domain.install_pass_horizons(&SEAL, &profile, OWNERS)?;
+    // The minimum pass is checked too: State limits that do not cover the
+    // roster refuse.
+    assert_eq!(
+        domain
+            .install_pass_horizons(&SEAL, &profile, &limits[..1], OWNERS)
+            .err(),
+        Some(Error::InvalidBinding)
+    );
+    assert!(domain.pass_horizons.is_none());
+    let installation = domain.install_pass_horizons(&SEAL, &profile, &limits, OWNERS)?;
+    assert_eq!(
+        installation,
+        install_community_pass_profile_v1(&profile, &limits, OWNERS)?
+    );
     let installed = domain.pass_horizons.ok_or("installed")?;
     assert_eq!(installed.owners, OWNERS);
+    assert_eq!(installed.profile_digest, profile.digest());
     assert_eq!(
         installed.retention.generation_not_after_micros,
         RETENTION.generation_not_after_micros
     );
+    Ok(())
+}
+
+/// R15.8(3): a reinstallation is quiescent: it is refused while a pass is
+/// unresolved, and goes through once it resolves.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_reinstallation_is_refused_while_a_pass_is_unresolved() -> Fallible<()> {
+    const SEAL: pos_core::AuthorityTrustRootSealV1 =
+        pos_core::AuthorityTrustRootSealV1::for_composition_root();
+    let key = key()?;
+    let roster = roster(&key)?;
+    let profile = build_profile(&roster, RETENTION)?;
+    let limits = [100, 200];
+    let mut domain = crate::community::MemoryCommunityDomainV1::new(
+        crate::memory::MemoryStore::new(),
+        [0x5a; 16],
+        crate::MemoryTrustedClockAuthorityV1::new(),
+    )?;
+    domain.install_pass_horizons(&SEAL, &profile, &limits, OWNERS)?;
+    let reservation = pos_core::community_lifecycle::CommunityReservationInputV1 {
+        pass_key: pos_core::community_lifecycle::CommunityPassKeyV1::new(timeline(), [2; 16], 1)?,
+        request_digest: hash(1),
+        native_producer_ordinal: 1,
+        predecessor_head_digest: hash(2),
+        roster_digest: hash(3),
+        prepared_input_set_digest: hash(4),
+        profile_digest: hash(5),
+        evidence_not_after_micros: 1,
+    };
+    let record = |status| crate::community::pass_record::CommunityPassRecordV1 {
+        reserved: crate::community::CommunityReservedPassV1 {
+            reservation,
+            cbq1_digest: hash(6),
+            quote_maxima: [1, 2, 3],
+            trace_rows: 2,
+            members: Vec::new(),
+            metadata_key: [1; 16],
+            failure_cohort_key: [2; 16],
+            generation_horizon_micros: 1,
+            outcome_horizon_micros: 1,
+        },
+        prior_shared_counts: pos_core::community_lifecycle::CommunitySharedCountsV1::default(),
+        materialization: None,
+        status,
+        live: false,
+    };
+    domain.pass_records.insert(
+        (timeline(), [9; 16]),
+        record(crate::community::CommunityPassStatusV1::Sealed),
+    );
+    assert_eq!(
+        domain
+            .install_pass_horizons(&SEAL, &profile, &limits, OWNERS)
+            .err(),
+        Some(Error::PassUnresolved)
+    );
+    domain.pass_records.insert(
+        (timeline(), [9; 16]),
+        record(crate::community::CommunityPassStatusV1::Aborted),
+    );
+    assert!(domain
+        .install_pass_horizons(&SEAL, &profile, &limits, OWNERS)
+        .is_ok());
     Ok(())
 }

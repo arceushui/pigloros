@@ -465,16 +465,16 @@ impl CommunityPassDueV1<'_> {
                                     .require_keys()
                                     .and_then(|()| demand.require_graph())
                                     .and_then(|()| erasure_budget(port, timeline, &demand))
-                                    .and_then(|trace_rows| {
+                                    .and_then(|trace_headroom_rows| {
                                         scope_bounds(port, timeline, steps, &share.scope)
                                             .and_then(|()| demand.require_objects())
-                                            .map(|()| (demand, trace_rows))
+                                            .map(|()| (demand, trace_headroom_rows))
                                     })
                             })
-                            .map(|(demand, trace_rows)| CommunityPassQuotedV1 {
+                            .map(|(demand, trace_headroom_rows)| CommunityPassQuotedV1 {
                                 quote,
                                 demand,
-                                trace_rows,
+                                trace_headroom_rows,
                             })
                     })
             })
@@ -518,7 +518,7 @@ impl CommunityPassDueV1<'_> {
 pub struct CommunityPassQuotedV1 {
     quote: CommunityPassQuoteV1,
     demand: CommunityPassDemandV1,
-    trace_rows: u64,
+    trace_headroom_rows: u64,
 }
 
 impl CommunityPassQuotedV1 {
@@ -536,13 +536,15 @@ impl CommunityPassQuotedV1 {
         &self.demand
     }
 
-    /// The trace rows (CAT1, GCA1 and Annotation CPN1s) the erasure budget
-    /// still admits after the State, recording and `F_p` demand, in every
-    /// actor's scope; the rest are omitted with reason 3 `AnnotationBudget`
-    /// (R13.1(3)). `u64::MAX` when T has no actor to bound it.
+    /// The rows the erasure budget still admits after the State, recording
+    /// and `F_p` demand, in every actor's scope (R13.1(3)).
+    ///
+    /// This is headroom only. A pass holds `n_due + 1` trace rows in its
+    /// entry and plans none (R15.5), so no writer input derives from it.
+    /// `u64::MAX` when T has no actor to bound it.
     #[must_use]
-    pub const fn trace_rows(&self) -> u64 {
-        self.trace_rows
+    pub const fn trace_headroom_rows(&self) -> u64 {
+        self.trace_headroom_rows
     }
 }
 
