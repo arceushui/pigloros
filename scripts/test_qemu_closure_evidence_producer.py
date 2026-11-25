@@ -347,6 +347,101 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual(lines[0], "file\t1\tsha256sum: -: Input/output error  extra")
         self.assertTrue(lines[1].startswith("block-0\t1\t"), lines)
 
+    def test_network_case_sets_the_sysctl_and_records_the_unit_network(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        # systemd-run stub: drop the options, run the command as the unit would.
+        self.shell.stub("systemd-run", 'while [[ $1 == --* ]]; do shift; done\nexec "$@"')
+        self.shell.stub("journalctl", 'printf "journal %s\\n" "$*"')
+        self.shell.stub("ip", 'printf "ip %s\\n" "$*"')
+        out = self.base / "out"
+        out.mkdir()
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{out}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        case = out / "network" / "fb-1"
+        self.assertEqual(sysctl.read_text(), "1\n")
+        self.assertEqual((case / "sysctl").read_text(), "1\n")
+        self.assertEqual((case / "status").read_text(), "0\n")
+        self.assertRegex((case / "netns").read_text(), r"^net:\[[0-9]+\]\n$")
+        self.assertEqual((case / "links").read_text(), "ip -o link show\n")
+        self.assertEqual((case / "addrs").read_text(), "ip -o addr show\n")
+        self.assertEqual((case / "routes4").read_text(), "ip -4 route show table all\n")
+        self.assertEqual((case / "routes6").read_text(), "ip -6 route show table all\n")
+        # The unit runs under the script's own bash, and the case records stderr and the journal.
+        self.assertEqual((case / "stderr").read_text(), "")
+        self.assertIn("--unit=piglor-network-fb-1.service", (case / "journal").read_text())
+
+    def test_the_sysctl_is_restored_to_its_boot_value_and_the_main_body_calls_it(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("2\n")
+        (self.base / "network").mkdir()
+        (self.base / "network/boot-sysctl").write_text("0\n")
+        self.shell.out(f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nrestore_fb_tunnels', COLLECTOR)
+        self.assertEqual(sysctl.read_text(), "0\n")
+        # The main body restores right after the last case and before `complete`.
+        body = COLLECTOR.read_text().split("for value in 0 1 2; do", 1)[1]
+        self.assertRegex(body, r"done\nrestore_fb_tunnels\n\nprintf 'complete")
+
+    def test_the_unit_runs_an_absolute_bash_because_a_unit_path_has_none(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        log = self.base / "argv"
+        self.shell.stub("systemd-run", f'printf "%s\\n" "$@" >"{log}"')
+        self.shell.stub("journalctl", "true")
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-0 0'
+        self.shell.out(script, COLLECTOR)
+        arguments = log.read_text().splitlines()
+        # The harness's own bash, not a literal /bin/bash (which a NixOS guest lacks).
+        self.assertEqual(arguments[arguments.index("-c") - 1], self.shell.out('printf %s "$BASH"', COLLECTOR))
+        self.assertIn("--unit=piglor-network-fb-0", arguments)
+
+    def test_systemd_runs_stderr_is_recorded_and_a_failing_journal_read_is_not_fatal(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        self.shell.stub("systemd-run", 'echo "Failed to start transient service" >&2\nexit 1')
+        self.shell.stub("journalctl", "exit 1")
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        case = self.base / "network/fb-1"
+        self.assertEqual((case / "stderr").read_text(), "Failed to start transient service\n")
+        # A journal that cannot be read still leaves the case's status and an (empty) journal file.
+        self.assertEqual((case / "status").read_text(), "1\n")
+        self.assertEqual((case / "journal").read_text(), "")
+
+    def test_a_start_failure_that_systemd_run_does_not_print_leaves_stderr_empty(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        # A failure that systemd-run does not print leaves stderr empty; the journal is where to look.
+        self.shell.stub("systemd-run", "exit 1")
+        self.shell.stub("journalctl", 'echo "piglor-network-fb-1.service: Failed with result exec-condition"')
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        case = self.base / "network/fb-1"
+        self.assertEqual((case / "stderr").read_text(), "")
+        self.assertEqual((case / "status").read_text(), "1\n")
+        self.assertIn("Failed with result", (case / "journal").read_text())
+        self.assertFalse((case / "netns").exists())
+
+    def test_a_failed_ip_command_fails_the_case_even_when_the_last_one_succeeds(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        self.shell.stub("systemd-run", 'while [[ $1 == --* ]]; do shift; done\nexec "$@"')
+        self.shell.stub("journalctl", 'printf "journal %s\\n" "$*"')
+        # Only the first `ip` command fails; bash -c would otherwise return the last status.
+        self.shell.stub("ip", '[[ $* == "-o link show" ]] && exit 1\nexit 0')
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        self.assertEqual((self.base / "network/fb-1/status").read_text(), "1\n")
+
+    def test_network_case_records_a_failed_unit_instead_of_exiting(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        self.shell.stub("systemd-run", "exit 3")
+        self.shell.stub("journalctl", 'printf "journal %s\\n" "$*"')
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-2 2'
+        self.shell.out(script, COLLECTOR)
+        self.assertEqual((self.base / "network/fb-2/status").read_text(), "3\n")
+
     def test_producer_and_checker_hash_the_same_inputs(self):
         import check_qemu_closure_evidence as checker
         listed = self.shell.out('printf "%s\\n" "${provenance_files[@]}"').split()
