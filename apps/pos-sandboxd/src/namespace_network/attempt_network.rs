@@ -410,7 +410,7 @@ where
             }
             AttemptNetworkError::Establish(error)
         })?;
-        let mut teardown = Teardown {
+        let teardown = Teardown {
             control: Arc::clone(&self.control),
             egress: Arc::clone(&self.egress),
             attempt: AttemptEgress {
@@ -421,7 +421,16 @@ where
             slot,
             removed: false,
         };
-        // A failure removes whatever was installed, and says if it could not.
+        self.install_and_open(teardown)
+    }
+
+    /// Give the established namespace of `teardown` its host egress and open
+    /// it for the connector. A failure removes whatever was installed, and
+    /// says if it could not.
+    fn install_and_open(
+        &self,
+        mut teardown: Teardown<C, E>,
+    ) -> Result<NamespaceConnector<C, E>, AttemptNetworkError> {
         if let Err(error) = self.egress.install(&teardown.attempt) {
             let cause = AttemptNetworkError::Egress(error);
             return Err(after_removal(cause, teardown.remove_once()));
