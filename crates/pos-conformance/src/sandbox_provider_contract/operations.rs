@@ -3,8 +3,8 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, bounded_text, decode, digest, encode, fixed, sign, text, uint, validate_magic,
-    value_bytes, value_text, value_uint, verify,
+    array, bounded_text, decode, digest, digest_with_domain, encode, fixed, sign, text, uint,
+    validate_magic, value_bytes, value_text, value_uint, verify,
 };
 use super::protocol::{
     decode_request_authority, request_authority_value, validate_request_authority,
@@ -170,6 +170,66 @@ pub struct SandboxReconcileResponseV1 {
     pub response_digest: [u8; 32],
     /// Runtime-attestation Ed25519 signature.
     pub signature: [u8; 64],
+}
+
+/// The exact V1 `reconciliation-evidence-v1` tuple that SRY1 field 5
+/// digests (ADR-069 R15 §3.1): the four digest fields, then six literal
+/// `true` cleanup booleans. It has no magic and no self-digest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReconciliationEvidenceV1 {
+    /// Exact nonzero attempt identity from SRQ1 and AGR1.
+    pub attempt_id: [u8; 16],
+    /// AGR1 self-digest that SRQ1 names.
+    pub agr1_digest: [u8; 32],
+    /// Self-digest of the delivered terminal SPY1.
+    pub terminal_spy1_digest: [u8; 32],
+    /// Self-digest of the last SAU1 of that response.
+    pub final_sau1_digest: [u8; 32],
+}
+
+/// The specialized digest domain of [`ReconciliationEvidenceV1`].
+const RECONCILIATION_EVIDENCE_V1_DOMAIN: &[u8] = b"PiglorOS.ReconciliationEvidence.v1\0";
+
+impl ReconciliationEvidenceV1 {
+    fn value(&self) -> Result<Value, SandboxContractErrorV1> {
+        if self.attempt_id == [0; 16]
+            || [
+                self.agr1_digest,
+                self.terminal_spy1_digest,
+                self.final_sau1_digest,
+            ]
+            .contains(&[0; 32])
+        {
+            return Err(SandboxContractErrorV1::FieldOutOfBounds);
+        }
+        let mut fields = vec![
+            value_bytes(&self.attempt_id),
+            value_bytes(&self.agr1_digest),
+            value_bytes(&self.terminal_spy1_digest),
+            value_bytes(&self.final_sau1_digest),
+        ];
+        fields.extend(std::iter::repeat_n(Value::Bool(true), 6));
+        Ok(Value::Array(fields))
+    }
+
+    /// Exact preferred-deterministic CBOR of the 10-item tuple.
+    ///
+    /// # Errors
+    /// Returns [`SandboxContractErrorV1::FieldOutOfBounds`] for a zero
+    /// identity or digest.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxContractErrorV1> {
+        self.value().and_then(|value| encode(&value))
+    }
+
+    /// `BLAKE3-256("PiglorOS.ReconciliationEvidence.v1\0" || tuple)`.
+    ///
+    /// # Errors
+    /// Returns [`SandboxContractErrorV1::FieldOutOfBounds`] for a zero
+    /// identity or digest.
+    pub fn digest(&self) -> Result<[u8; 32], SandboxContractErrorV1> {
+        self.value()
+            .and_then(|value| digest_with_domain(RECONCILIATION_EVIDENCE_V1_DOMAIN, &value))
+    }
 }
 
 /// Closed unsigned local selector failure code.
