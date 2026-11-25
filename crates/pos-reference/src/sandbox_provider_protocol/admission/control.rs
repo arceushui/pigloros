@@ -124,11 +124,14 @@ impl AdmittedSandboxProvider {
     ///
     /// The key ID is compared with the admitted manifest first, then the
     /// signature is verified under the admitted runtime key, then the request
-    /// identities are checked. When the selector accepted the attempt's
+    /// identities are checked. When the caller holds the attempt's accepted
     /// terminal SPY1, `accepted_spy1_digest` must equal the digest the SCY1
-    /// binds (R15 §3.5, "also equals every SCY1 SPY1 digest"). That check is
-    /// an addition to R15 §3.3 to §3.5, not a prescribed selector rule, and
-    /// refuses with `InconsistentFields` by analogy with SRY1.
+    /// binds. R15 §3.5 guarantees that equality on the provider side ("also
+    /// equals every SCY1 SPY1 digest"); the selector check is an addition,
+    /// not a prescribed rule, and refuses with `InconsistentFields` by
+    /// analogy with SRY1. The production selector sends SCQ1 only before it
+    /// holds a terminal and passes `None`; the optional digest is kept for
+    /// the test-support guest client, which cancels after its execute.
     ///
     /// # Errors
     /// Rejects a malformed, foreign-keyed, forged, unbound or contradicting
