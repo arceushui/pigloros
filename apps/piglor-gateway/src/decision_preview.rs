@@ -233,12 +233,14 @@ impl InFlightSlotV1 {
     fn take(slots: &InFlightV1, principal_id: [u8; 16]) -> Option<Self> {
         let mut taken = slots.lock().unwrap_or_else(PoisonError::into_inner);
         let held = taken.get(&principal_id).copied().unwrap_or(0);
-        (held < MAX_IN_FLIGHT_PER_PRINCIPAL).then(|| {
-            taken.insert(principal_id, held + 1);
-            Self {
-                slots: Arc::clone(slots),
-                principal_id,
-            }
+        if held >= MAX_IN_FLIGHT_PER_PRINCIPAL {
+            return None;
+        }
+        taken.insert(principal_id, held + 1);
+        drop(taken);
+        Some(Self {
+            slots: Arc::clone(slots),
+            principal_id,
         })
     }
 }
