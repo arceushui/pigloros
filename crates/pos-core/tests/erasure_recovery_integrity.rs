@@ -2018,8 +2018,7 @@ fn acknowledgement_replay_is_idempotent_and_conflicting_identity_is_refused(
     let target = target(10);
     let graph = active_graph(vec![target], None)?;
     let request = graph.request.reference();
-    let mut coordinator =
-        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
     let acknowledgement_value = acknowledgement(request, target, reference(171))?;
 
     let admitted = coordinator.acknowledge(request, acknowledgement_value)?;
@@ -2028,10 +2027,8 @@ fn acknowledgement_replay_is_idempotent_and_conflicting_identity_is_refused(
         .current_manifest(request)
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
-    assert_eq!(
-        coordinator.acknowledge(request, acknowledgement_value)?,
-        admitted
-    );
+    let mut replayed = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
+    assert_eq!(replayed.acknowledge(request, acknowledgement_value)?, admitted);
     assert_eq!(
         graph
             .adapter
@@ -2040,8 +2037,10 @@ fn acknowledgement_replay_is_idempotent_and_conflicting_identity_is_refused(
             .digest(),
         admitted_manifest
     );
+    let mut conflicting =
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
     assert_eq!(
-        coordinator.acknowledge(request, acknowledgement(request, target, reference(172))?),
+        conflicting.acknowledge(request, acknowledgement(request, target, reference(172))?),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
