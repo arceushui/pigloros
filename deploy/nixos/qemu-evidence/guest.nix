@@ -89,6 +89,7 @@ let
       pkgs.findutils
       pkgs.gawk
       pkgs.gzip
+      pkgs.iproute2
       pkgs.keyutils
       pkgs.lvm2
       pkgs.util-linux
@@ -142,6 +143,12 @@ in
     "loop"
     "dm_verity"
     "erofs"
+    # ADR-069 R14: the modules whose fallback tunnel devices show what
+    # net.core.fb_tunnels_only_for_init_net does to a new network namespace.
+    "ipip"
+    "sit"
+    "ip6_tunnel"
+    "ip_gre"
   ];
   networking.hostName = "piglor-qemu-evidence";
   networking.useDHCP = false;
