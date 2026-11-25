@@ -1,12 +1,15 @@
 //! Installation wiring and reservation horizons of a community pass
-//! (#560 A4c-3b; ADR-129 revisions 10 and 13, R10.4(3), R10.7 step 5c,
-//! R13.2).
+//! (#560 A4c-3b; ADR-129 revisions 10, 13 and 15, R10.4(3), R10.7 step 5c,
+//! R13.2, R15.8).
 //!
 //! The owner horizons are an installation input the composition root
-//! supplies ([`CommunityOwnerHorizonsV1`]), never a runtime or caller value:
-//! the recording owner's admitted horizon bounds the CDP1 recording horizon
-//! at installation, and the other required owners' admitted evidence
-//! horizon is the owner term of `H_g` and `H_r` at every Reserve.
+//! supplies ([`CommunityOwnerHorizonsV1`]), never a runtime or caller value.
+//! Installation refuses a CDP1 whose recording or metadata deadline exceeds
+//! its owner's admitted horizon (3); generation is not refused but clamped:
+//! every Reserve recomputes `H_g` from the installed generation, metadata
+//! and owner evidence horizons (R15.8(2)). One call,
+//! [`MemoryCommunityDomainV1::install_pass_horizons`], installs the CDP1 and
+//! its owner horizons together, after the minimum-pass check.
 
 use pos_core::community_lifecycle::{
     check_community_pass_installation_v1, CommunityDurableProfileV1,
@@ -121,26 +124,44 @@ pub(super) fn reservation_horizons(
 pub(super) struct CommunityHorizonPolicyV1 {
     pub(super) retention: CommunityProfileRetentionV1,
     pub(super) owners: CommunityOwnerHorizonsV1,
+    /// `H(CDP1)` of the installed profile: every Reserve request binds it.
+    pub(super) profile_digest: Hash,
 }
 
 #[cfg(target_os = "linux")]
 impl super::memory_domain::MemoryCommunityDomainV1 {
-    /// Install the horizon inputs of the Reserve writer from the installed
-    /// CDP1 and the owners' admitted horizons.
+    /// Install a CDP1 and its owner horizons for the Reserve writer.
+    ///
+    /// It runs [`install_community_pass_profile_v1`] first, so the minimum
+    /// pass and the recording and metadata owner horizons are checked, and
+    /// only then installs what every Reserve recomputes `H_g` and `H_r`
+    /// from (R13.4(2), R15.8). A reinstallation is quiescent (R15.8(3)): it
+    /// is refused while any pass is unresolved.
     ///
     /// # Errors
-    /// Returns `InvalidBinding` for an invalid owner horizon and for a
-    /// recording or metadata deadline above its owner's, as at installation
-    /// (R15.8(3)); nothing is installed.
+    /// Returns `PassUnresolved` (7) while a pass is unresolved, then the
+    /// errors of [`install_community_pass_profile_v1`]; nothing is
+    /// installed on a refusal.
     pub fn install_pass_horizons(
         &mut self,
         _seal: &'static pos_core::AuthorityTrustRootSealV1,
         profile: &CommunityDurableProfileV1<'_>,
+        state_limit_bytes: &[u64],
         owners: CommunityOwnerHorizonsV1,
-    ) -> Result<(), Error> {
-        let retention = profile.as_input().retention;
-        owners.admit(retention).map(|()| {
-            self.pass_horizons = Some(CommunityHorizonPolicyV1 { retention, owners });
+    ) -> Result<CommunityPassInstallationV1, Error> {
+        if self
+            .pass_records
+            .values()
+            .any(|record| record.status.unresolved())
+        {
+            return Err(Error::PassUnresolved);
+        }
+        install_community_pass_profile_v1(profile, state_limit_bytes, owners).inspect(|_| {
+            self.pass_horizons = Some(CommunityHorizonPolicyV1 {
+                retention: profile.as_input().retention,
+                owners,
+                profile_digest: profile.digest(),
+            });
         })
     }
 }

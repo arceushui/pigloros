@@ -265,7 +265,7 @@ pub fn prepare_community_observation_v1<D: CommunityStoreDomainV1>(
 /// (CPE1), an Event type of at most 128 bytes (CES1), a 1 MiB payload per
 /// Event, 1 GiB read in total and a Fork depth of 64. The publisher's fold
 /// reads under the same bounds.
-const EVENT_READ_BOUNDS: EventReadBounds = EventReadBounds::new_with_total_bytes(
+pub(super) const EVENT_READ_BOUNDS: EventReadBounds = EventReadBounds::new_with_total_bytes(
     1 << 20,
     MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
     64,
