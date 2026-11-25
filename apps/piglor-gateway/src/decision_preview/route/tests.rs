@@ -196,11 +196,7 @@ fn options(entries: &[(&str, &[&str])]) -> Vec<PreviewOptionV1> {
 #[test]
 fn the_golden_recommendations_are_the_rendered_match_score() -> TestResult {
     let worked = (
-        weights(&[
-            ("city", -300_000),
-            ("nature", 800_000),
-            ("quiet", 500_000),
-        ]),
+        weights(&[("city", -300_000), ("nature", 800_000), ("quiet", 500_000)]),
         options(&[
             ("coast", &["nature", "quiet", "surf"]),
             ("city", &["city", "nightlife"]),
@@ -232,9 +228,7 @@ fn the_golden_recommendations_are_the_rendered_match_score() -> TestResult {
 
 /// A well-formed `createDecisionPreview` body.
 fn request_body() -> Value {
-    let reference = |id: &str, revision: u64, byte: &str| {
-        json!({"id": id, "revision": revision, "digest": byte.repeat(32)})
-    };
+    let reference = |id: &str, revision: u64, byte: &str| json!({"id": id, "revision": revision, "digest": byte.repeat(32)});
     json!({
         "schema_version": 1,
         "scenario_room": reference("01JC0GATEWAYW9R00M00000001", 2, "0a"),

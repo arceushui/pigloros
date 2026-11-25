@@ -1473,7 +1473,9 @@ fn the_golden_examples_carry_the_derived_provenance_digest() -> TestResult {
         };
         let outcome = match text("/state")?.as_str() {
             "admitted" => None,
-            "failed" => Some(PreviewOutcomeV1::Failed(PreviewFailureCodeV1::input_deleted())),
+            "failed" => Some(PreviewOutcomeV1::Failed(
+                PreviewFailureCodeV1::input_deleted(),
+            )),
             _ => Some(PreviewOutcomeV1::Computed),
         };
         let result = outcome.map(|outcome| StoredResultV1 {

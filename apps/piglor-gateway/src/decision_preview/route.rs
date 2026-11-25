@@ -109,12 +109,14 @@ impl CreateRequestBodyV1 {
             .admit()
             .zip(preference.admit())
             .zip(option_spec.admit())
-            .map(|((scenario_room, preference), option_spec)| PreviewRequestV1 {
-                scenario_room,
-                preference,
-                option_spec,
-                profile_id,
-            })
+            .map(
+                |((scenario_room, preference), option_spec)| PreviewRequestV1 {
+                    scenario_room,
+                    preference,
+                    option_spec,
+                    profile_id,
+                },
+            )
     }
 }
 
@@ -411,7 +413,9 @@ fn refusal(error: DecisionPreviewErrorV1) -> Response {
     let (code, status, detail, retryable) = match error {
         DecisionPreviewErrorV1::Gateway(error) => return error.into_response(),
         DecisionPreviewErrorV1::NotFound => return not_found(),
-        DecisionPreviewErrorV1::QuotaExceeded { retry_after } => return quota_exceeded(retry_after),
+        DecisionPreviewErrorV1::QuotaExceeded { retry_after } => {
+            return quota_exceeded(retry_after)
+        }
         // A revision load answers only `InvalidRecord`, `Unavailable` or
         // `ModeBindingStale`, so the conflict and parent-head arms of
         // `revision::store_failure` cannot occur here.
