@@ -89,9 +89,9 @@ impl<'a> Channel<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `Lifecycle(ClientFailed)` for a transport or framing failure,
-    /// `Lifecycle(InteractionTimeout)` at `deadline`, and `Unavailable(PrfUnsupported)` for a
-    /// device without the CBOR capability.
+    /// Returns `Lifecycle(ClientFailed)` for a transport or framing failure or a reserved new
+    /// channel id (all zeros or all ones), `Lifecycle(InteractionTimeout)` at `deadline`, and
+    /// `Unavailable(PrfUnsupported)` for a device without the CBOR capability.
     pub fn open(
         transport: &'a mut dyn HidTransport,
         clock: &'a dyn MonotonicClock,
@@ -116,6 +116,9 @@ impl<'a> Channel<'a> {
             return Err(BridgeError::Unavailable(UnavailableCode::PrfUnsupported));
         }
         channel.cid.copy_from_slice(&reply[8..12]);
+        if channel.cid == BROADCAST || channel.cid == [0; 4] {
+            return Err(CLIENT_FAILED);
+        }
         Ok(channel)
     }
 

@@ -92,8 +92,12 @@ fn nonce() -> [u8; 8] {
 }
 
 fn init_reply(nonce: [u8; 8], capabilities: u8) -> Vec<Report> {
+    init_reply_on(nonce, CID, capabilities)
+}
+
+fn init_reply_on(nonce: [u8; 8], cid: [u8; 4], capabilities: u8) -> Vec<Report> {
     let mut payload = nonce.to_vec();
-    payload.extend_from_slice(&CID);
+    payload.extend_from_slice(&cid);
     payload.extend_from_slice(&[2, 1, 0, 0, capabilities]);
     frames(BROADCAST, CMD_INIT, &payload)
 }
@@ -139,6 +143,15 @@ fn init_refuses_a_short_reply_and_a_device_without_cbor() {
     let mut device = Scripted::new(&clock, init_reply(nonce(), 0x08));
     let unsupported = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
     assert_eq!(open(&mut device, &clock), Err(unsupported));
+}
+
+#[test]
+fn init_refuses_a_reserved_new_channel_id() {
+    let clock = FakeClock::start();
+    for reserved in [[0; 4], [0xff; 4]] {
+        let mut device = Scripted::new(&clock, init_reply_on(nonce(), reserved, 0x0c));
+        assert_eq!(open(&mut device, &clock), Err(CLIENT_FAILED));
+    }
 }
 
 #[test]

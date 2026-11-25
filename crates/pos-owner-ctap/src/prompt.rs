@@ -58,7 +58,8 @@ impl PinBuffer {
     /// fits in 63 bytes. The UTF-8 encoding of each code point is written into a zeroized 4-byte
     /// scratch buffer. Two copies are not wiped: the `unicode-normalization` iterator keeps its
     /// pending code points in an internal recomposition buffer, and each `char` it yields is a
-    /// plain stack copy.
+    /// plain stack copy. The returned `Option<Self>` is moved by value, which can leave further
+    /// unwiped stack copies of the buffer.
     pub(crate) fn normalized(&self) -> Option<Self> {
         let text = std::str::from_utf8(&self.bytes[..self.length]).ok()?;
         let mut nfc = Self::new();

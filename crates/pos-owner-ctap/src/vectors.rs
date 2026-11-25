@@ -23,10 +23,5 @@ pub(crate) fn vector(file: &str, name: &str) -> Vec<u8> {
 
 /// The first 32 bytes of `bytes`, or zeros when there are fewer.
 pub(crate) fn array32(bytes: &[u8]) -> [u8; 32] {
-    let mut array = [0; 32];
-    array
-        .iter_mut()
-        .zip(bytes)
-        .for_each(|(to, from)| *to = *from);
-    array
+    bytes.first_chunk().copied().unwrap_or_default()
 }
