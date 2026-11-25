@@ -82,7 +82,10 @@ pub use pass_planner::{
     CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
 };
 #[cfg(target_os = "linux")]
-pub use pass_record::{CommunityPassCountsV1, CommunityPassStatusV1, CommunityReservedPassV1};
+pub use pass_record::{
+    CommunityPassCountsV1, CommunityPassMemberDigestsV1, CommunityPassStatusV1,
+    CommunityReservedPassV1,
+};
 #[cfg(target_os = "linux")]
 pub use pass_seal::{
     CommunitySealCandidateV1, CommunitySealInputV1, CommunitySealInvocationV1,

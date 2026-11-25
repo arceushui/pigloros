@@ -855,6 +855,7 @@ fn a_second_pass_state_never_replaces_the_first() -> TestResult {
             observations: BTreeMap::new(),
             scope_rows: BTreeMap::new(),
             generations: BTreeMap::new(),
+            retained: BTreeMap::new(),
         },
     );
     assert_eq!(domain.commit(*staged).err(), Some(Error::Conflict));

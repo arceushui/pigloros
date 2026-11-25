@@ -31,12 +31,11 @@
 //! refused at the apply only, not at stage). A Commit or Abort is refused
 //! when its entry is gone or too small, which also refuses their replay.
 //!
-//! A Reserve replayed after its reservation resolved is not refused here:
-//! it creates an entry, so it applies again. Refusing it, and the same
-//! identity under 4a's original outcome, is the planner's step 4a, which
-//! the pipeline runs first. Neither apply re-runs the budget, caps, head or
-//! counters compares; a token staged before another operation changed them
-//! is for the pipeline to discard.
+//! A resolved reservation identity stays in the CRI1 index, so a replay of
+//! it is refused (`Conflict`) at stage and at apply. The planner's step 4a
+//! still returns the original outcome first. Neither apply re-runs the
+//! budget, caps, head or counters compares; a token staged before another
+//! operation changed them is for the pipeline to discard.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
@@ -47,11 +46,17 @@ use pos_core::{AuthorityTrustRootSealV1, Hash, Seq, TimelineId};
 
 use super::erasure_budget::{CommunityErasureBudgetPortV1, CommunityPendingReservationV1};
 use super::memory_domain::MemoryCommunityDomainV1;
+use super::observation::fork_segments;
+use super::pass_install::reservation_horizons;
 use super::pass_planner::{
     admit_caps, trace_room, CommunityPassCapsV1, CommunityPassReadPortV1,
     CommunityQuarantineIndexV1,
 };
 use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1};
+use super::pass_state::CommunityRetainedObservationV1;
+
+/// The deepest Fork chain the writer walks for the cut compare.
+const FORK_DEPTH_LIMIT: usize = 64;
 
 /// The observation materialization a Reserve mints (R9.7), as its stage-1
 /// quote derived it.
@@ -71,6 +76,9 @@ pub struct CommunityMintedObservationV1 {
     pub scope_reference: Hash,
     /// Its scope rows (R11.4(3)).
     pub scope: Vec<CommunityScopeMemberV1>,
+    /// The earliest `evidence_not_after` of its records, kept for a later
+    /// reuse (R9.2).
+    pub not_after_micros: u64,
     /// The cut its CPE1 observes: the writer compares it with the store
     /// (R9.7 step 6).
     pub cut: CommunityObservationCutV1,
@@ -82,7 +90,9 @@ pub struct CommunityObservationCutV1 {
     /// `through_seq`, which must still be T's Logical Head.
     pub through_seq: u64,
     /// The chain hash at each owning Timeline's cut: T at `through_seq` and
-    /// every Fork-prefix source at its immutable Fork cut.
+    /// every Fork-prefix source at its immutable Fork cut. The writer
+    /// derives which are required from the topology, so a missing entry
+    /// refuses.
     pub chain_heads: Vec<(TimelineId, u64, Hash)>,
 }
 
@@ -112,9 +122,10 @@ pub struct CommunityReserveInputV1 {
     pub failure_reserve: u64,
     /// The materialization this call mints, or `None` for a reused one.
     pub minted: Option<CommunityMintedObservationV1>,
-    /// The earliest `evidence_not_after` of the reused observation's
-    /// records: `Some` exactly when no materialization is minted (R9.2).
-    pub reused_not_after_micros: Option<u64>,
+    /// The Observation CPN1 this call reuses: `Some` exactly when no
+    /// materialization is minted. The domain holds its horizon and cut
+    /// from the Reserve that minted it (R9.2).
+    pub reused: Option<CommunityNativeNodeReferenceV1>,
     /// What the pass record keeps: the CPR1 fields, the quote and the
     /// horizons (R8.1(7)).
     pub pass: CommunityReservedPassV1,
@@ -197,14 +208,24 @@ impl MemoryCommunityDomainV1 {
         let key = (input.timeline, input.reservation_operation_id);
         let reservation = input.pass.reservation;
         let pass_key = reservation.pass_key;
-        // The CPR1 horizon is `H_r`, which never passes `H_g` (R13.2(1)); a
-        // reused observation is named exactly when none is minted.
+        // A reused observation is named exactly when none is minted.
         if pass_key.timeline() != input.timeline
             || pass_key.generation() != input.generation
             || reservation.predecessor_head_digest != input.selected_head
-            || reservation.evidence_not_after_micros != input.pass.outcome_horizon_micros
-            || input.pass.outcome_horizon_micros > input.pass.generation_horizon_micros
-            || input.minted.is_some() == input.reused_not_after_micros.is_some()
+            || input.minted.is_some() == input.reused.is_some()
+        {
+            return Err(Error::InvalidBinding);
+        }
+        // `H_g` and `H_r` are the writer's own, from its sample (R13.4(2)).
+        let policy = self.pass_horizons.ok_or(Error::EvidenceUnavailable)?;
+        let horizons = reservation_horizons(
+            policy.retention,
+            policy.owners,
+            input.reservation_sample_micros,
+        );
+        if input.pass.generation_horizon_micros != horizons.generation_micros
+            || input.pass.outcome_horizon_micros != horizons.outcome_micros
+            || reservation.evidence_not_after_micros != horizons.outcome_micros
         {
             return Err(Error::InvalidBinding);
         }
@@ -220,17 +241,30 @@ impl MemoryCommunityDomainV1 {
             .get(&input.timeline)
             .ok_or(Error::EvidenceUnavailable)?;
         // The Logical Head and chain compare comes first, with the
-        // authority re-check (R10.7 step 5j: 12).
-        if let Some(minted) = &input.minted {
-            self.check_cut(input.timeline, &minted.cut)?;
-        }
+        // authority re-check (R10.7 step 5j: 12), for a minted cut and for
+        // the cut a reused observation observed.
+        let retained = input
+            .reused
+            .map(|reference| {
+                state
+                    .retained
+                    .get(&reference)
+                    .ok_or(Error::EvidenceUnavailable)
+            })
+            .transpose()?;
+        input
+            .minted
+            .as_ref()
+            .map(|minted| &minted.cut)
+            .or_else(|| retained.map(|retained| &retained.cut))
+            .ok_or(Error::InvalidBinding)
+            .and_then(|cut| self.check_cut(input.timeline, cut))?;
         if state.generation != input.generation {
             return Err(Error::StaleGeneration);
         }
         // The exact reuse horizon (R10.7 steps 5c and 5j: 6).
-        let reuse_short = input
-            .reused_not_after_micros
-            .is_some_and(|retained| retained < input.pass.reservation.evidence_not_after_micros);
+        let reuse_short =
+            retained.is_some_and(|retained| retained.not_after_micros < horizons.outcome_micros);
         if state.head != input.selected_head
             || state.counters != input.prior_shared_counts
             || reuse_short
@@ -275,27 +309,41 @@ impl MemoryCommunityDomainV1 {
         })
     }
 
-    /// R9.7 step 6: T's Logical Head is still the cut's `through_seq`, and
-    /// every owning Timeline's chain hash at its cut is the one observed.
+    /// R9.7 step 6: T's Logical Head is still the cut's `through_seq`, T's
+    /// chain hash at it and every Fork-prefix source's at its immutable
+    /// Fork cut are the ones observed. The required cuts come from the
+    /// topology, never from the caller.
     fn check_cut(
         &self,
         timeline: TimelineId,
         cut: &CommunityObservationCutV1,
     ) -> Result<(), Error> {
-        let head_holds = self
-            .store
+        let events: &dyn EventStore = &self.store;
+        let observed = |owner: TimelineId, seq: u64| {
+            cut.chain_heads.iter().any(|(entry, entry_seq, expected)| {
+                *entry == owner
+                    && *entry_seq == seq
+                    && events
+                        .chain_hash_at(owner, Seq::from_u64(seq))
+                        .is_ok_and(|hash| hash == *expected)
+            })
+        };
+        let head_holds = events
             .logical_head(timeline)
             .is_ok_and(|head| head.as_u64() == cut.through_seq);
-        let chains_hold = cut.chain_heads.iter().all(|(owner, seq, expected)| {
-            self.store
-                .chain_hash_at(*owner, Seq::from_u64(*seq))
-                .is_ok_and(|hash| hash == *expected)
-        });
-        if head_holds && chains_hold {
-            Ok(())
-        } else {
-            Err(Error::EvidenceUnavailable)
-        }
+        fork_segments(events, timeline, FORK_DEPTH_LIMIT).and_then(|segments| {
+            // A segment starts one after its Fork cut, so a source's cut is
+            // the next segment's start less one.
+            let prefix_holds = segments
+                .iter()
+                .zip(segments.iter().skip(1))
+                .all(|(source, child)| observed(source.0, child.1 - 1));
+            if head_holds && observed(timeline, cut.through_seq) && prefix_holds {
+                Ok(())
+            } else {
+                Err(Error::EvidenceUnavailable)
+            }
+        })
     }
 
     /// R13.1(4) at the writer: every actor of T's scope still fits the
@@ -365,6 +413,13 @@ impl MemoryCommunityDomainV1 {
                 counts.materializations = counts.materializations.saturating_add(1);
                 state.counters = add_counts(state.counters, minted.additions);
                 state.observations.insert(minted.reference, minted.graph);
+                state.retained.insert(
+                    minted.reference,
+                    CommunityRetainedObservationV1 {
+                        not_after_micros: minted.not_after_micros,
+                        cut: minted.cut,
+                    },
+                );
                 state
                     .scope_rows
                     .insert(minted.scope_reference, minted.scope);

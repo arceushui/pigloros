@@ -23,6 +23,7 @@ use super::erasure_budget::CommunityPendingErasureV1;
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::native_graph::{CommunityAssembledRecordV1, CommunityInitializationGraphV1};
 use super::pass_planner::CommunityPassReadPortV1;
+use super::pass_writer::CommunityObservationCutV1;
 
 /// One generation's retained operation counts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -71,6 +72,18 @@ pub(super) struct CommunityPassStateV1 {
     pub(super) scope_rows: BTreeMap<Hash, Vec<CommunityScopeMemberV1>>,
     /// The retained operation counts per generation.
     pub(super) generations: BTreeMap<[u8; 16], CommunityGenerationCountsV1>,
+    /// Every observation a Reserve minted, kept for reuse after its Commit
+    /// (R9.2).
+    pub(super) retained: BTreeMap<CommunityNativeNodeReferenceV1, CommunityRetainedObservationV1>,
+}
+
+/// What a later Reserve needs to reuse a minted observation (R9.2, R9.7).
+#[derive(Clone)]
+pub(super) struct CommunityRetainedObservationV1 {
+    /// The earliest `evidence_not_after` of its records.
+    pub(super) not_after_micros: u64,
+    /// The cut it observed, which T must still be at.
+    pub(super) cut: CommunityObservationCutV1,
 }
 
 impl CommunityPassStateV1 {
@@ -111,6 +124,7 @@ impl CommunityPassStateV1 {
             observations: BTreeMap::new(),
             scope_rows: BTreeMap::new(),
             generations: BTreeMap::new(),
+            retained: BTreeMap::new(),
         }
     }
 }

@@ -33,6 +33,21 @@ impl CommunityPassStatusV1 {
     }
 }
 
+/// One due member's commitments a failure Abort needs, in roster order
+/// (R15.3(2)).
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CommunityPassMemberDigestsV1 {
+    /// The member's index in the installed CDP1 roster: its stable entry
+    /// and IMK1, for the CQK1, come from that row.
+    pub roster_index: usize,
+    /// `H(CMB1)` of the member's binding.
+    pub cmb1_digest: Hash,
+    /// `H(CIN1)` of the member's prepared invocation.
+    pub cin1_digest: Hash,
+    /// The member's trust-policy snapshot digest.
+    pub trust_policy_snapshot_digest: Hash,
+}
+
 /// The counters a pass's quote was built over and its materialization's
 /// actual additions.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -52,8 +67,18 @@ pub struct CommunityReservedPassV1 {
     pub cbq1_digest: Hash,
     /// The quote's maximum required nodes, edges and bytes.
     pub quote_maxima: [u64; 3],
-    /// The trace rows the budget still admitted at step 5g (R13.1(3)).
+    /// The trace rows held in the pass's entry: `n_due + 1`, the `F_p`
+    /// share (R15.5), the most Seal's annotations may take.
     pub trace_rows: u64,
+    /// Each due member's digests, in roster order: what a failure Abort
+    /// re-derives its CFO1 from once the CIN1 bytes are dropped (R15.3(2)).
+    pub members: Vec<CommunityPassMemberDigestsV1>,
+    /// The protection ID of the pass's one metadata key, which seals the
+    /// pass's CNE1 records, Abort's included (R13.2(1), R15.1(2)).
+    pub metadata_key: [u8; 16],
+    /// The protection ID of the failure cohort key (R15.1(3)), provisioned
+    /// with the Reserve's State keys.
+    pub failure_cohort_key: [u8; 16],
     /// `H_g`, the horizon of the records a selected State needs (R13.2).
     pub generation_horizon_micros: u64,
     /// `H_r`, the horizon of the outcome evidence, at most `H_g` (R13.2).

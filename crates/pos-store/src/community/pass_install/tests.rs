@@ -83,6 +83,7 @@ const RETENTION: CommunityProfileRetentionV1 = CommunityProfileRetentionV1 {
 
 const OWNERS: CommunityOwnerHorizonsV1 = CommunityOwnerHorizonsV1 {
     recording_micros: 7_000_000_000,
+    metadata_micros: 8_000_000_000,
     evidence_micros: 8_500_000_000,
 };
 
@@ -101,6 +102,14 @@ fn installation_bounds_the_recording_horizon_by_the_owner() -> Fallible<()> {
     };
     assert_eq!(
         install_community_pass_profile_v1(&profile, &limits, below).err(),
+        Some(Error::InvalidBinding)
+    );
+    let metadata = CommunityOwnerHorizonsV1 {
+        metadata_micros: OWNERS.metadata_micros - 1,
+        ..OWNERS
+    };
+    assert_eq!(
+        install_community_pass_profile_v1(&profile, &limits, metadata).err(),
         Some(Error::InvalidBinding)
     );
     // The pass check's own refusals pass through.
@@ -128,6 +137,10 @@ fn an_invalid_owner_horizon_is_refused() -> Fallible<()> {
             ..OWNERS
         },
         CommunityOwnerHorizonsV1 {
+            metadata_micros: 0,
+            ..OWNERS
+        },
+        CommunityOwnerHorizonsV1 {
             evidence_micros: u64::MAX,
             ..OWNERS
         },
@@ -148,6 +161,7 @@ fn an_invalid_owner_horizon_is_refused() -> Fallible<()> {
     // The largest horizon is admitted.
     let largest = CommunityOwnerHorizonsV1 {
         recording_micros: i64::MAX as u64,
+        metadata_micros: i64::MAX as u64,
         evidence_micros: i64::MAX as u64,
     };
     assert!(community_reservation_horizons_v1(&profile, largest, 1).is_ok());
@@ -197,15 +211,8 @@ fn the_reservation_horizons_take_the_least_term() -> Fallible<()> {
         community_reservation_horizons_v1(&generation, OWNERS, 1)?.generation_micros,
         4_000_000_000
     );
-    // Overflow refuses, at u64 and at the trusted range.
-    assert_eq!(
-        horizons(OWNERS, u64::MAX).err(),
-        Some(Error::BoundsExceeded)
-    );
-    assert_eq!(
-        horizons(OWNERS, i64::MAX as u64).err(),
-        Some(Error::BoundsExceeded)
-    );
+    // The window end saturates, so a sample at the top clamps to `H_g`.
+    assert_eq!(horizons(OWNERS, u64::MAX)?.outcome_micros, 8_000_000_000);
     Ok(())
 }
 
@@ -252,5 +259,51 @@ fn the_roster_keys_are_the_cqk1_digests_in_roster_order() -> Fallible<()> {
     assert_eq!(keys, expected);
     assert_eq!(keys.len(), 2);
     assert_ne!(keys[0], keys[1]);
+    Ok(())
+}
+
+/// The Reserve writer's horizon inputs are installed with the same refusals
+/// as the installation check, and nothing is installed on a refusal.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_domain_installs_its_horizons_with_the_installation_refusals() -> Fallible<()> {
+    const SEAL: pos_core::AuthorityTrustRootSealV1 =
+        pos_core::AuthorityTrustRootSealV1::for_composition_root();
+    let key = key()?;
+    let roster = roster(&key)?;
+    let profile = build_profile(&roster, RETENTION)?;
+    let mut domain = crate::community::MemoryCommunityDomainV1::new(
+        crate::memory::MemoryStore::new(),
+        [0x5a; 16],
+        crate::MemoryTrustedClockAuthorityV1::new(),
+    )?;
+    assert!(domain.pass_horizons.is_none());
+    for refused in [
+        CommunityOwnerHorizonsV1 {
+            recording_micros: OWNERS.recording_micros - 1,
+            ..OWNERS
+        },
+        CommunityOwnerHorizonsV1 {
+            metadata_micros: OWNERS.metadata_micros - 1,
+            ..OWNERS
+        },
+        CommunityOwnerHorizonsV1 {
+            evidence_micros: 0,
+            ..OWNERS
+        },
+    ] {
+        assert_eq!(
+            domain.install_pass_horizons(&SEAL, &profile, refused).err(),
+            Some(Error::InvalidBinding)
+        );
+        assert!(domain.pass_horizons.is_none());
+    }
+    domain.install_pass_horizons(&SEAL, &profile, OWNERS)?;
+    let installed = domain.pass_horizons.ok_or("installed")?;
+    assert_eq!(installed.owners, OWNERS);
+    assert_eq!(
+        installed.retention.generation_not_after_micros,
+        RETENTION.generation_not_after_micros
+    );
     Ok(())
 }
