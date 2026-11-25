@@ -28,8 +28,9 @@ use crate::MemoryTrustedClockAuthorityV1;
 
 use super::super::erasure_budget::CommunityErasureBudgetPortV1;
 use super::super::erasure_budget::CommunityErasureContextV1;
+use super::super::erasure_budget::CommunityPendingReservationV1;
 use super::super::pass_planner::CommunityPassReadPortV1;
-use super::super::pass_state::{CommunityPassStateV1, CommunityPendingReservationV1};
+use super::super::pass_state::CommunityPassStateV1;
 use super::{
     CommittedInitializationV1, CommunityInitializationContextV1, CommunityInitializationReceiptV1,
     CommunityInitializeCallV1, PreparedV1, SealedMetadataV1, StagedInitializationV1,
@@ -319,7 +320,7 @@ fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
     );
     let rows = roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
-    case.initialize(&profile, OPERATION)??;
+    let receipt = case.initialize(&profile, OPERATION)??;
     let domain = &case.domain.world.domain;
     let committed = domain
         .initializations
@@ -342,6 +343,8 @@ fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
         (counters.nodes, counters.edges, counters.declared_inputs),
         (11, 9, 3)
     );
+    // R10.5: the state names T's active generation.
+    assert_eq!(state.generation, receipt.generation());
     // The graph's own additions agree with the CBQ1's `2n` maxima.
     let maxima = quote.as_input();
     assert_eq!(counters.nodes - prior.nodes, maxima.maximum_required_nodes);
@@ -844,6 +847,8 @@ fn a_second_pass_state_never_replaces_the_first() -> TestResult {
     domain.pass_states.insert(
         target(),
         CommunityPassStateV1 {
+            generation: staged.pass_state.generation,
+            head: staged.pass_state.head,
             counters: CommunitySharedCountsV1::default(),
             graph: staged.pass_state.graph,
             closure: BTreeSet::new(),
