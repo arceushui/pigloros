@@ -210,8 +210,9 @@ pub use pass_quote::{
     CommunityPassTermsV1,
 };
 pub use prepared::{
-    CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
-    TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
+    community_prepared_input_set_digest_v1, CommunityPreparedInputSetV1,
+    CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1, TimelinePositionV1,
+    MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
 };
 pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
