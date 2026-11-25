@@ -47,7 +47,7 @@ PRODUCER_SHA256 = {
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
     "deploy/nixos/qemu-evidence/guest.nix": "5ae292739f7066bc7a96d6e247c7a1b3e96f23946c7f4499b246ff2fa92ad834",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "03e9fc29498f4809c9ceca110f42a787da568c23af8d7c29dc1cba092bc55e21",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "042cdafbe5e944f8dd7fb4bba8e655701263b55e0f8793593d5c664786fc47be",
     "deploy/nixos/qemu-evidence/build-images.sh": "5af7ecafd360247566229f705bfa605533841ae48c629fceb4f8dbf30949fa58",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt": "418702f8e3af31e90ec317776153beeeda4be61e489366379cab3a4a76455896",
     "deploy/nixos/dev-trust/root-hash-dev-test.key": "ca6cdbcf2f58cc20de6e45e63e387be37fc9d46e21d0e6e1212e6c9a0cd0dcd8",
