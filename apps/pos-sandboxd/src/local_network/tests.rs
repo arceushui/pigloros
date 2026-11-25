@@ -435,8 +435,7 @@ fn a_refusing_connector_removes_nothing() {
 }
 
 #[test]
-fn an_io_error_is_a_creation_failure_that_removed_nothing() {
-    let error = io::Error::other("refused");
-    assert_eq!(error.setup_class(), SetupClass::Creation);
-    assert_eq!(error.removal(), None);
+fn the_fail_closed_setup_error_is_a_creation_failure_that_removed_nothing() {
+    assert_eq!(FailClosedSetup.setup_class(), SetupClass::Creation);
+    assert_eq!(FailClosedSetup.removal(), None);
 }

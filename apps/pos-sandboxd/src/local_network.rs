@@ -148,7 +148,14 @@ pub trait RemoveNetwork {
     fn remove(&mut self) -> Result<(), NetworkRemovalFailure>;
 }
 
-impl SetupError for io::Error {
+/// The error of [`FailClosedLocalNetwork`], which never fails; it names a
+/// class and no removal, so the port needs no blanket answer for a foreign
+/// error type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("the fail-closed Local network cannot fail")]
+pub struct FailClosedSetup;
+
+impl SetupError for FailClosedSetup {
     fn setup_class(&self) -> SetupClass {
         SetupClass::Creation
     }
@@ -202,13 +209,13 @@ pub struct FailClosedLocalNetwork;
 
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
-    type Error = io::Error;
+    type Error = FailClosedSetup;
 
     fn establish(
         &self,
         attempt_id: [u8; 16],
         _endpoints: &[SocketAddr],
-    ) -> Result<EstablishedNetwork<RefusingConnector>, io::Error> {
+    ) -> Result<EstablishedNetwork<RefusingConnector>, FailClosedSetup> {
         Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }
 }

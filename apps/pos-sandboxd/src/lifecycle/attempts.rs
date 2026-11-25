@@ -1780,10 +1780,10 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
     let cleanup = steps
         .finish(&mut progress, directory, cgroup, root, deadlines)
         .await
-        // A cleanup that failed on its own is the one error reported. A
-        // network removal failure beside it changes nothing observable: both
-        // leave `cleanup.result` 1 and quarantine, and the port quarantines
-        // the network's slot itself.
+        // A cleanup that failed on its own is the one error reported, and the
+        // reason of a network removal failure beside it is not kept. Both
+        // leave `cleanup.result` 1 and quarantine, so the record is the same;
+        // the port quarantines the network's slot with its own reason.
         .and_then(|completed| removal.map_or(Ok(completed), |failure| Err(failure.into())))
         .map_err(AttemptLifecycleError::from);
     (progress, cleanup)

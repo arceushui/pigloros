@@ -537,13 +537,15 @@ async fn captured_at(ending: Ending, expected: AttemptEnding) -> TestResult<Outp
 /// cancellation.
 #[tokio::test]
 async fn a_failed_removal_is_reported_on_every_ending_that_serves_the_proxy() -> TestResult {
-    let endings = [
+    type Reaches = fn(&AttemptEnding) -> bool;
+    let endings: [(&str, Ending, Reaches); 3] = [
         (
             "watchdog",
             Ending {
                 local: Some(Fd3::Silent),
                 ..Ending::default()
             },
+            |ending| matches!(ending, AttemptEnding::WatchdogKilled),
         ),
         (
             "protocol failure",
@@ -551,6 +553,7 @@ async fn a_failed_removal_is_reported_on_every_ending_that_serves_the_proxy() ->
                 local: Some(Fd3::Violation),
                 ..Ending::default()
             },
+            |ending| matches!(ending, AttemptEnding::ProtocolFailureKilled),
         ),
         (
             "cancellation",
@@ -559,9 +562,10 @@ async fn a_failed_removal_is_reported_on_every_ending_that_serves_the_proxy() ->
                 local: Some(Fd3::Silent),
                 ..Ending::default()
             },
+            |ending| matches!(ending, AttemptEnding::Cancelled { .. }),
         ),
     ];
-    for (name, ending) in endings {
+    for (name, ending, reaches) in endings {
         for removal_fails in [false, true] {
             let mut scenario = Scenario::new()?;
             let (mode, plan) = ending.script(&mut scenario)?;
@@ -573,6 +577,7 @@ async fn a_failed_removal_is_reported_on_every_ending_that_serves_the_proxy() ->
                 .run_on(&network, job, recheck)
                 .await
                 .map_err(|failed| failed.error)?;
+            assert!(reaches(&execution.ending), "{name}: {:?}", execution.ending);
             assert_eq!(torn_down.load(Ordering::SeqCst), 1, "{name}");
             assert_eq!(execution.network_removal.is_some(), removal_fails, "{name}");
         }

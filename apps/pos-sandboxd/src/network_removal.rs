@@ -1,7 +1,7 @@
 //! Reporting the removal of a Local network (ADR-069 R14 N7).
 //!
 //! The execute path wraps each established connector in an
-//! [`OwnedConnector`] tied to one [`RemovalReport`]. Dropping the connector
+//! `OwnedConnector` tied to one `RemovalReport`. Dropping the connector
 //! removes its network and records a failed removal, so every path that drops
 //! the network, whichever it is, reports the result with the execution. The
 //! report is fail closed: a connector still alive when it is read counts as a
@@ -25,6 +25,13 @@ struct RemovalState {
     failure: Option<NetworkRemovalFailure>,
 }
 
+impl RemovalState {
+    /// Keep `failure`, unless an earlier one is kept.
+    fn keep(&mut self, failure: NetworkRemovalFailure) {
+        self.failure.get_or_insert(failure);
+    }
+}
+
 /// The first removal failure of one execution, collected from wherever its
 /// network was dropped.
 #[derive(Clone, Debug, Default)]
@@ -37,7 +44,7 @@ impl RemovalReport {
 
     /// Keep `failure`, unless an earlier one is kept.
     pub(crate) fn record(&self, failure: NetworkRemovalFailure) {
-        self.state().failure.get_or_insert(failure);
+        self.state().keep(failure);
     }
 
     /// The failure of the execution's network removal, leaving none.
@@ -57,7 +64,7 @@ impl RemovalReport {
 }
 
 /// A connector whose network is removed when it is dropped, with the result
-/// recorded in the execution's [`RemovalReport`].
+/// recorded in the execution's `RemovalReport`.
 #[derive(Debug)]
 pub(crate) struct OwnedConnector<C: RemoveNetwork> {
     connector: C,
@@ -87,7 +94,7 @@ impl<C: RemoveNetwork> Drop for OwnedConnector<C> {
         let mut state = self.report.state();
         state.owned -= 1;
         if let Err(failure) = removed {
-            state.failure.get_or_insert(failure);
+            state.keep(failure);
         }
     }
 }

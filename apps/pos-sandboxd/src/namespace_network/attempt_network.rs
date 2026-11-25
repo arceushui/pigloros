@@ -137,7 +137,7 @@ pub enum AttemptNetworkError {
     InUse,
     /// A setup failed after it began installing, and the network it had
     /// installed could not be removed (R14 N7).
-    #[error("the attempt network could not be removed after its setup failed: {removal}")]
+    #[error("the attempt network setup failed and its cleanup failed: {removal}")]
     Unremoved {
         /// Why the setup failed.
         #[source]
