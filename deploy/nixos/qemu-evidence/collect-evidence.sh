@@ -200,6 +200,50 @@ mountfsd_reply_case() { # IMAGE
   rm -- "${image}"
 }
 
+# --- ADR-069 R14: the network a PrivateNetwork= unit gets -----------------
+
+# The sysctl behind "net.core.fb_tunnels_only_for_init_net".
+FB_TUNNELS_SYSCTL=/proc/sys/net/core/fb_tunnels_only_for_init_net
+
+# What a unit sees of its network, as raw `ip` output, written under DIR.
+network_probe() { # DIR
+  readlink /proc/self/ns/net >"$1/netns"
+  ip -o link show >"$1/links"
+  ip -o addr show >"$1/addrs"
+  ip -4 route show table all >"$1/routes4"
+  ip -6 route show table all >"$1/routes6"
+}
+
+# One transient PrivateNetwork=yes unit's network with the sysctl set to VALUE.
+# The kernel reads the sysctl when it creates a network namespace, so each
+# value governs the next unit. The unit runs with this script's PATH for `ip`
+# and with this script's own bash (${BASH}): a NixOS unit's default PATH holds
+# no bash, so `systemd-run bash` fails to find it. `stderr` holds systemd-run's
+# client-side errors (an executable that is not found, a bus error) and the
+# unit's own standard error. A start-job or unit failure that systemd-run does
+# not print can leave `stderr` empty: look in the unit's `journal` then.
+# (--quiet suppresses informational output; whether it also hides
+# a start-job failure is not verified here.)
+network_case() { # NAME VALUE
+  local dir="network/$1" status=0
+  mkdir -p "${dir}"
+  printf '%s\n' "$2" >"${FB_TUNNELS_SYSCTL}"
+  cat "${FB_TUNNELS_SYSCTL}" >"${dir}/sysctl"
+  systemd-run --quiet --unit="piglor-network-$1" --wait --collect --pipe \
+    --property=PrivateNetwork=yes --setenv=PATH \
+    "${BASH}" -c "set -o errexit; $(declare -f network_probe); network_probe \"\$1\"" probe \
+    "${PWD}/${dir}" 2>"${dir}/stderr" || status=$?
+  journalctl --boot --no-pager --output=short-monotonic --unit="piglor-network-$1.service" \
+    >"${dir}/journal" || true
+  printf '%s\n' "${status}" >"${dir}/status"
+}
+
+# Put the sysctl back to the value recorded at boot in network/boot-sysctl,
+# so later cases run as the package ships.
+restore_fb_tunnels() {
+  cat network/boot-sysctl >"${FB_TUNNELS_SYSCTL}"
+}
+
 # scripts/test_qemu_closure_evidence_producer.py sources the functions above.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
   return 0
@@ -320,5 +364,18 @@ rm -r -- /run/verity.d
 journalctl --dmesg --boot --no-pager --output=cat >cases/kernel-log
 # mountfsd's own log, with monotonic times, for reading each case's refusal.
 journalctl --boot --no-pager --output=short-monotonic --unit=systemd-mountfsd.service >cases/mountfsd-log
+
+# ADR-069 R14: the init namespace and its fallback tunnel devices, then the
+# unit namespace under each value of the fallback-tunnel sysctl. The modules
+# guest.nix loads are the ones that create fallback devices.
+mkdir network
+cat "${FB_TUNNELS_SYSCTL}" >network/boot-sysctl
+readlink /proc/1/ns/net >network/init-netns
+ip -o link show >network/init-links
+cat /proc/modules >network/modules
+for value in 0 1 2; do
+  network_case "fb-${value}" "${value}"
+done
+restore_fb_tunnels
 
 printf 'complete\n' >status
