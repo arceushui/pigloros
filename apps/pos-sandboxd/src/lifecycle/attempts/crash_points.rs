@@ -64,7 +64,10 @@ mod cases {
     use std::sync::atomic::AtomicBool;
 
     use futures_util::future::{join, Either};
-    use pos_reference::sandbox_provider_protocol::{RequestAuthority, SandboxExecutionMode};
+    use pos_reference::sandbox_provider_protocol::{
+        RequestAuthority, SandboxCancelRequest, SandboxCancellationResult, SandboxExecutionMode,
+        SandboxReconcileRequest,
+    };
 
     use super::super::*;
     use crate::test_fixtures::{
@@ -599,9 +602,13 @@ mod cases {
         )?)
     }
 
-    const fn authority_of(attempt_id: [u8; 16]) -> RequestAuthority {
+    /// A request of `attempt_id` whose ID ends in `kind`, so it never reuses
+    /// the attempt's SPX1 request ID (the attempt ID) in the ledger.
+    const fn authority_of(attempt_id: [u8; 16], kind: u8) -> RequestAuthority {
+        let mut request_id = attempt_id;
+        request_id[15] = kind;
         RequestAuthority {
-            request_id: attempt_id,
+            request_id,
             apt1_digest: [1; 32],
             policy_epoch: 6,
             nonce: attempt_id,
@@ -610,7 +617,7 @@ mod cases {
 
     const fn reconcile_request(attempt_id: [u8; 16]) -> SandboxReconcileRequest {
         SandboxReconcileRequest {
-            request: authority_of(attempt_id),
+            request: authority_of(attempt_id, 0x5c),
             attempt_id,
             agr1_digest: [attempt_id[0] ^ 0xa5; 32],
             request_digest: [4; 32],
@@ -619,7 +626,7 @@ mod cases {
 
     const fn cancel_request(attempt_id: [u8; 16]) -> SandboxCancelRequest {
         SandboxCancelRequest {
-            request: authority_of(attempt_id),
+            request: authority_of(attempt_id, 0xca),
             attempt_id,
             agr1_digest: [attempt_id[0] ^ 0xa5; 32],
             request_digest: [3; 32],
@@ -843,6 +850,8 @@ mod cases {
         at: usize,
     ) -> TestResult {
         for attempt in ended {
+            // Each ended attempt gets its signed response first.
+            drop(lifecycle.sign_for_test(attempt.attempt_id()));
             let reported = lifecycle.reconcile(&reconcile_request(attempt.attempt_id()));
             assert_eq!(
                 reported.is_ok(),
