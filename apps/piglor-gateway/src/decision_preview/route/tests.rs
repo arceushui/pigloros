@@ -9,7 +9,9 @@ use axum::{
 };
 use piglor_ledger::LedgerView;
 use pos_core::{EntityId, GatewayRevisionErrorV1, GatewayRevisionKindV1};
-use pos_runtime::ErasureCoordinatorCompositionV1;
+use pos_runtime::{
+    match_score_v1, ErasureCoordinatorCompositionV1, PreferenceWeightV1, PreviewOptionV1,
+};
 use pos_store::StoreConfig;
 use tower::ServiceExt;
 
@@ -161,6 +163,68 @@ fn execution_profile_ids_follow_the_contract_pattern() {
     ] {
         assert!(!execution_profile_id(id), "{id}");
     }
+}
+
+/// The weights of a Preference.
+fn weights(entries: &[(&str, i64)]) -> Vec<PreferenceWeightV1> {
+    entries
+        .iter()
+        .map(|(dimension, weight_micro)| PreferenceWeightV1 {
+            dimension: (*dimension).to_owned(),
+            weight_micro: *weight_micro,
+        })
+        .collect()
+}
+
+/// The options of an `OptionSpec`.
+fn options(entries: &[(&str, &[&str])]) -> Vec<PreviewOptionV1> {
+    entries
+        .iter()
+        .map(|(key, tags)| PreviewOptionV1 {
+            key: (*key).to_owned(),
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        })
+        .collect()
+}
+
+/// ADR-140 section 9: the Recommendation of every read golden example is the
+/// rendering of `pigloros.match-score.v1` over the inputs it names: the
+/// worked example, a Toss-up with margin 0 and `insufficient-evidence`.
+#[test]
+fn the_golden_recommendations_are_the_rendered_match_score() -> TestResult {
+    let worked = (
+        weights(&[
+            ("city", -300_000),
+            ("nature", 800_000),
+            ("quiet", 500_000),
+        ]),
+        options(&[
+            ("coast", &["nature", "quiet", "surf"]),
+            ("city", &["city", "nightlife"]),
+        ]),
+    );
+    let toss_up = (
+        weights(&[("nature", 400_000), ("quiet", 400_000)]),
+        options(&[("coast", &["nature"]), ("lake", &["quiet"])]),
+    );
+    let insufficient = (
+        weights(&[("cost", -400_000)]),
+        options(&[("coast", &["nature"]), ("city", &["culture"])]),
+    );
+    for (name, (weights, options)) in [
+        ("decision-preview-committed", worked),
+        ("decision-preview-toss-up", toss_up),
+        ("decision-preview-insufficient-evidence", insufficient),
+    ] {
+        let recommendation =
+            match_score_v1(&weights, &options).map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            recommendation_json(&recommendation),
+            golden(name)?["recommendation"],
+            "{name}"
+        );
+    }
+    Ok(())
 }
 
 /// A well-formed `createDecisionPreview` body.
@@ -442,6 +506,10 @@ async fn the_release_composition_refuses_every_fresh_request() -> TestResult {
     assert_eq!(saturated.body["retryable"], true);
     assert_eq!(saturated.retry_after, None);
     drop(slots);
+    // A read is decided before any lookup: without an actor it is `401`.
+    let unknown = format!("{PREVIEWS}/{}", EntityId::new());
+    let anonymous = exchange(app, builder("GET", &unknown, None), Body::empty()).await?;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
     assert!(!recorded(&served.gateway).await?);
     served.gateway.shutdown().await?;
     drop(served);
