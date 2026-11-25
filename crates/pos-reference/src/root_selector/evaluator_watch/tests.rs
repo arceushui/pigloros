@@ -57,6 +57,7 @@ fn wait_for_watcher(in_flight: &InFlightAttempt) {
     while in_flight.waiting() == 0 && Instant::now() < deadline {
         thread::yield_now();
     }
+    assert!(in_flight.waiting() > 0, "no watcher arrived");
 }
 
 /// Whether `run` finished within ten seconds. A watcher that is never woken
@@ -228,6 +229,7 @@ fn a_hang_up_before_the_grant_cancels_once_the_grant_arrives() -> TestResult {
                 &quiet(),
             );
         });
+        wait_for_watcher(&in_flight);
         in_flight.granted(DIGEST);
     });
     assert_eq!(receiver.try_recv()?, DIGEST);
@@ -255,6 +257,7 @@ fn a_finished_execute_ends_a_watch_that_waits_for_a_grant() -> TestResult {
                 &quiet(),
             );
         });
+        wait_for_watcher(&in_flight);
         in_flight.finish();
     });
     assert!(receiver.try_recv().is_err());
@@ -263,21 +266,34 @@ fn a_finished_execute_ends_a_watch_that_waits_for_a_grant() -> TestResult {
 }
 
 #[test]
-fn an_execute_with_a_live_evaluator_returns_its_result() -> TestResult {
+fn an_execute_with_a_live_evaluator_returns_its_result_and_is_never_cancelled() -> TestResult {
     let (evaluator, peer) = UnixStream::pair()?;
-    let in_flight = InFlightAttempt::default();
-    let result = execute_watched(
-        &evaluator,
-        &in_flight,
-        |_| {},
-        &quiet(),
-        || {
-            in_flight.granted(DIGEST);
-            7
-        },
-    )?;
-    assert_eq!(result, 7);
-    drop(peer);
+    let (done, finished) = mpsc::channel();
+    // Run apart: without the wake, the watcher would keep waiting on the live
+    // evaluator and the call would never return.
+    thread::spawn(move || {
+        let in_flight = InFlightAttempt::default();
+        let cancels = AtomicUsize::new(0);
+        let result = execute_watched(
+            &evaluator,
+            &in_flight,
+            |_| {
+                cancels.fetch_add(1, Ordering::SeqCst);
+            },
+            &quiet(),
+            || {
+                in_flight.granted(DIGEST);
+                7
+            },
+        );
+        done.send((result.ok(), cancels.load(Ordering::SeqCst)))
+            .ok();
+        drop(peer);
+    });
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(10)),
+        Ok((Some(7), 0))
+    );
     Ok(())
 }
 

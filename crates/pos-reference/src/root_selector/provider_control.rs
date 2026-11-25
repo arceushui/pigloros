@@ -17,10 +17,12 @@
 //!   still holds only because every ID is derived from (attempt, operation,
 //!   index): a second call repeats the same IDs, which the provider answers as
 //!   exact repeats, and a refusal adds no ledger entry.
-//! - A hung provider can occupy one selector connection handler for about the
-//!   attempt watchdog, plus two SCQ1 budgets (the evaluator watcher's and
-//!   `settle_exhausted`'s are separate calls), plus one SRQ1 budget. The
-//!   pauses between retries lie inside each budget.
+//! - A hung provider can occupy one selector connection handler for at most
+//!   the attempt watchdog, plus two SCQ1 budgets (the evaluator watcher's and
+//!   `settle_exhausted`'s are separate calls), plus one SRQ1 budget. Each SCQ1
+//!   budget already contains `run_bound` (a watchdog and the input window), so
+//!   the sum is a safe upper bound, not an estimate. The pauses between
+//!   retries lie inside each budget.
 
 use std::thread;
 use std::time::{Duration, Instant};

@@ -165,7 +165,10 @@ pub(super) fn execute_watched<R>(
                     .map(|_watcher| {
                         // `AssertUnwindSafe` is sound here: after a panic `execute`
                         // is never called again, and its captures are only
-                        // observed through the re-raised panic.
+                        // observed through the re-raised panic. State captured by
+                        // reference (the admission lease, `in_flight`) is not
+                        // torn: its destructors run during the unwind, and each
+                        // takes its lock or releases its own count independently.
                         let outcome = catch_unwind(AssertUnwindSafe(execute));
                         in_flight.finish();
                         drop(wake);

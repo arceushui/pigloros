@@ -7878,6 +7878,10 @@ mod tests {
             Ok(AuthenticatedProviderTerminal::Error(fixture.spe1)),
         ] {
             let (seen, diagnostics) = control_after(result)?;
+            // The provider was asked, the evaluator got its answer, and no
+            // control request followed.
+            assert_eq!(seen.executed, 1);
+            assert!(!seen.reply.is_empty());
             assert!(seen.calls.is_empty());
             assert!(diagnostics.is_empty());
         }

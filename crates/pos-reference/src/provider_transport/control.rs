@@ -27,7 +27,8 @@ struct ControlRequest<'a> {
 impl ProviderTransport {
     /// Send one SCQ1 and authenticate its SCY1.
     ///
-    /// `accepted_spy1_digest` is the SPY1 digest the selector accepted, if any.
+    /// `accepted_spy1_digest` is the SPY1 digest the caller accepted, if any. The
+    /// production selector passes `None`; the test-support guest client may not.
     ///
     /// # Errors
     /// [`ProviderControlError`] for an unreachable provider, an authenticated

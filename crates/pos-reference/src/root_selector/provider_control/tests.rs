@@ -270,6 +270,8 @@ fn a_contradicting_digest_is_reported_and_not_retried() -> TestResult {
     Ok(())
 }
 
+// Unlike the `retrying`-level tests, this one sleeps for real (about 0.2 s):
+// `reconcile` pauses between the refusals.
 #[test]
 fn a_busy_provider_gets_the_next_distinct_request_and_then_succeeds() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
@@ -288,6 +290,8 @@ fn a_busy_provider_gets_the_next_distinct_request_and_then_succeeds() -> TestRes
     Ok(())
 }
 
+// Sleeps for real (about 0.3 s) between the four requests, unlike the
+// `retrying`-level tests.
 #[test]
 fn retryable_refusals_stop_at_four_distinct_requests() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
@@ -441,6 +445,15 @@ struct Run {
 }
 
 fn count_calls(budget: Duration, failure: impl Fn() -> ProviderControlError) -> Run {
+    count_calls_after_work(budget, Duration::ZERO, failure)
+}
+
+/// As [`count_calls`], with each call taking `work` of real time first.
+fn count_calls_after_work(
+    budget: Duration,
+    work: Duration,
+    failure: impl Fn() -> ProviderControlError,
+) -> Run {
     let mut calls = 0;
     let paused = std::cell::RefCell::new(Vec::new());
     let result = retrying(
@@ -449,6 +462,7 @@ fn count_calls(budget: Duration, failure: impl Fn() -> ProviderControlError) -> 
         |_, left| {
             calls += 1;
             assert!(left <= budget);
+            thread::sleep(work);
             Err(failure())
         },
     );
@@ -492,13 +506,18 @@ fn a_permanent_refusal_is_sent_once_without_a_pause() {
 }
 
 #[test]
-fn the_pause_between_retries_never_exceeds_the_budget() {
-    let budget = Duration::from_millis(30);
-    let run = count_calls(budget, || {
+fn the_pause_is_cut_to_what_remains_of_the_budget_after_the_work() {
+    // The first request takes 20 ms of a 60 ms budget, so at most 40 ms
+    // remain for the pause, below the 100 ms the pause would otherwise be.
+    let budget = Duration::from_millis(60);
+    let work = Duration::from_millis(20);
+    let run = count_calls_after_work(budget, work, || {
         ProviderControlError::Refused(ProviderControlRefusal::Busy12)
     });
+    assert!(budget < RETRY_PAUSE);
+    let most = Duration::from_millis(40);
+    assert!(run.paused.iter().all(|pause| *pause <= most));
     assert!(!run.paused.is_empty());
-    assert!(run.paused.iter().all(|pause| *pause <= budget));
 }
 
 #[test]
