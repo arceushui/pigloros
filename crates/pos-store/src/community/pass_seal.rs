@@ -380,7 +380,9 @@ impl MemoryCommunityDomainV1 {
     /// Re-check a Seal against its pass record and stage it.
     ///
     /// `replay_recording_digest` is the CRR1 the pipeline built from
-    /// `planned`, the result of [`Self::plan_annotations`]. A Seal of a
+    /// `planned`, the result of [`Self::plan_annotations`]. Seal plans again
+    /// to verify `planned`, so the admission, which is quadratic in the item
+    /// count, runs twice in a pipeline. A Seal of a
     /// Sealed pass is a replay: it stages the same result again and is
     /// refused only for a different one. A replay is also a fresh read of
     /// the store-wide live key count, so one that comes after the count
