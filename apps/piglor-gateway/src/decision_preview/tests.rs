@@ -311,19 +311,22 @@ async fn an_exact_retry_finishes_an_interrupted_preview() -> TestResult {
     })
     .await?;
     let read = admitted(
-        served.gateway
+        served
+            .gateway
             .read_decision_preview(permit(&served.gateway).await?, preview_id)
             .await,
     )?;
     assert_eq!(read.state, DecisionPreviewStateV1::Admitted);
     let receipt = admitted(
-        served.gateway
+        served
+            .gateway
             .create_decision_preview(permit(&served.gateway).await?, "k-1", request)
             .await,
     )?;
     assert_eq!(receipt.preview_id, preview_id);
     let read = admitted(
-        served.gateway
+        served
+            .gateway
             .read_decision_preview(permit(&served.gateway).await?, preview_id)
             .await,
     )?;
@@ -503,7 +506,8 @@ async fn the_in_flight_slot_bounds_concurrent_requests() -> TestResult {
     assert!(InFlightSlotV1::take(in_flight, [8; 16]).is_some());
     assert_eq!(
         refused(
-            served.gateway
+            served
+                .gateway
                 .create_decision_preview(permit(&served.gateway).await?, "k-1", request.clone())
                 .await
         ),
@@ -512,7 +516,8 @@ async fn the_in_flight_slot_bounds_concurrent_requests() -> TestResult {
     drop(slots.pop());
     assert_eq!(
         refused(
-            served.gateway
+            served
+                .gateway
                 .create_decision_preview(permit(&served.gateway).await?, "k-1", request)
                 .await
         ),
