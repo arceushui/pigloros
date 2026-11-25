@@ -352,6 +352,7 @@ class ProducerShellTests(unittest.TestCase):
         sysctl.write_text("0\n")
         # systemd-run stub: drop the options, run the command as the unit would.
         self.shell.stub("systemd-run", 'while [[ $1 == --* ]]; do shift; done\nexec "$@"')
+        self.shell.stub("journalctl", 'printf "journal %s\\n" "$*"')
         self.shell.stub("ip", 'printf "ip %s\\n" "$*"')
         out = self.base / "out"
         out.mkdir()
@@ -366,6 +367,9 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual((case / "addrs").read_text(), "ip -o addr show\n")
         self.assertEqual((case / "routes4").read_text(), "ip -4 route show table all\n")
         self.assertEqual((case / "routes6").read_text(), "ip -6 route show table all\n")
+        # The unit runs under the script's own bash, and the case records stderr and the journal.
+        self.assertEqual((case / "stderr").read_text(), "")
+        self.assertIn("--unit=piglor-network-fb-1.service", (case / "journal").read_text())
 
     def test_the_sysctl_is_restored_to_its_boot_value_and_the_main_body_calls_it(self):
         sysctl = self.base / "fb_tunnels"
@@ -378,10 +382,24 @@ class ProducerShellTests(unittest.TestCase):
         body = COLLECTOR.read_text().split("for value in 0 1 2; do", 1)[1]
         self.assertRegex(body, r"done\nrestore_fb_tunnels\n\nprintf 'complete")
 
+    def test_the_unit_runs_an_absolute_bash_because_a_unit_path_has_none(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        log = self.base / "argv"
+        self.shell.stub("systemd-run", f'printf "%s\\n" "$@" >"{log}"')
+        self.shell.stub("journalctl", "true")
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-0 0'
+        self.shell.out(script, COLLECTOR)
+        arguments = log.read_text().splitlines()
+        shell = arguments[arguments.index("-c") - 1]
+        self.assertTrue(shell.startswith("/") and shell.endswith("bash"), arguments)
+        self.assertIn("--unit=piglor-network-fb-0", arguments)
+
     def test_a_failed_ip_command_fails_the_case_even_when_the_last_one_succeeds(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")
         self.shell.stub("systemd-run", 'while [[ $1 == --* ]]; do shift; done\nexec "$@"')
+        self.shell.stub("journalctl", 'printf "journal %s\\n" "$*"')
         # Only the first `ip` command fails; bash -c would otherwise return the last status.
         self.shell.stub("ip", '[[ $* == "-o link show" ]] && exit 1\nexit 0')
         script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
@@ -392,6 +410,7 @@ class ProducerShellTests(unittest.TestCase):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")
         self.shell.stub("systemd-run", "exit 3")
+        self.shell.stub("journalctl", 'printf "journal %s\\n" "$*"')
         script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-2 2'
         self.shell.out(script, COLLECTOR)
         self.assertEqual((self.base / "network/fb-2/status").read_text(), "3\n")
