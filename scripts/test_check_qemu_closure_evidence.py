@@ -296,7 +296,11 @@ def static_elf(machine: int, tag: bytes, *, interpreter: bool = False, size: int
     struct.pack_into("<Q", header, 32, 64)
     struct.pack_into("<HH", header, 54, 56, 2)
     headers = bytearray(112)
-    struct.pack_into("<I", headers, 0, 1)
+    # One PT_LOAD that maps the whole file at 0x400000, with the entry point
+    # just after the headers.
+    total = 176 + size
+    struct.pack_into("<IIQQQQQQ", headers, 0, 1, 5, 0, 0x400000, 0x400000, total, total, 4096)
+    struct.pack_into("<Q", header, 24, 0x400000 + 176)
     # PT_INTERP names the loader of a dynamic executable; PT_NOTE does not.
     struct.pack_into("<I", headers, 56, 3 if interpreter else 4)
     # Non-repeating filler, so that no part of the file occurs elsewhere.
@@ -304,6 +308,33 @@ def static_elf(machine: int, tag: bytes, *, interpreter: bool = False, size: int
 
 
 X86_ADAPTER = static_elf(62, b"adapter")
+
+
+def elf_defects() -> list[bytes]:
+    """Adapters that are not loadable static x86-64 executables, each wrong in one way."""
+    machine = checker.ELF_MACHINES["x86_64"]
+
+    def patched(offset: int, data: bytes) -> bytes:
+        return X86_ADAPTER[:offset] + data + X86_ADAPTER[offset + len(data):]
+
+    return [
+        # The 7-byte stand-in the staged SIM1 used to name, a script, and truncations: below the
+        # size floor, and above it with the headers intact.
+        b"adapter", b"#!/bin/sh\n" + bytes(200_000), X86_ADAPTER[:99_999], X86_ADAPTER[:150_000],
+        # A wrong class, byte order or ident version.
+        patched(4, b"\x01"), patched(5, b"\x02"), patched(6, b"\x09"),
+        # Another architecture, a relocatable object and a wrong ELF version.
+        static_elf(checker.ELF_MACHINES["aarch64"], b"adapter"), patched(16, struct.pack("<H", 1)),
+        patched(20, struct.pack("<I", 9)),
+        # Dynamically linked: no loader exists inside the image's root.
+        static_elf(machine, b"adapter", interpreter=True),
+        # Nothing to load: no program headers, or none of type PT_LOAD.
+        patched(56, struct.pack("<H", 0)), patched(64, struct.pack("<I", 4)),
+        # A program header table beyond the file, or too small an entry.
+        patched(32, struct.pack("<Q", 10**9)), patched(54, struct.pack("<H", 8)),
+        # An entry point outside every segment, and a segment larger than the file.
+        patched(24, struct.pack("<Q", 0x10)), patched(96, struct.pack("<Q", 300_000)),
+    ]
 # The raw reply's imageSize is the positive image's length, adapter included.
 IMAGE_SIZE = len(ddi())
 REPLY = REPLY.replace('"imageSize": 0', f'"imageSize": {IMAGE_SIZE}')
@@ -1162,15 +1193,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(ddi().count(X86_ADAPTER), 0)
 
     def test_a_stand_in_or_broken_adapter_fails_closed(self):
-        machine = checker.ELF_MACHINES["x86_64"]
-        other = checker.ELF_MACHINES["aarch64"]
-
-        def broken(change):
-            """An adapter changed by `change`, carried by every image, so only it is wrong."""
-            return lambda f: f.update(executable_files("x86_64", change(X86_ADAPTER)))
-
-        def patched(offset, data):
-            return broken(lambda adapter: adapter[:offset] + data + adapter[offset + len(data):])
+        def broken(adapter):
+            """An adapter carried by every image, so only it is wrong."""
+            return lambda f: f.update(executable_files("x86_64", adapter))
 
         def carried(**image):
             """Images built with `image`, all alike, so only the carrying is wrong."""
@@ -1178,29 +1203,9 @@ class EvidenceTests(unittest.TestCase):
                 "host/images/positive.raw": ddi(**image), "host/images/wrong-key.raw": ddi(**image),
                 "host/images/tampered.raw": tampered_ddi(**image)})
 
-        stub = b"adapter"
-        changes = [
-            # The 7-byte stand-in the staged SIM1 used to name, in the file and in the image.
-            broken(lambda adapter: stub),
-            lambda f: f.update({"host/images/adapter": stub}),
-            # A script, a truncated ELF, and a wrong class, byte order or ident version.
-            broken(lambda adapter: b"#!/bin/sh\n" + bytes(200_000)),
-            broken(lambda adapter: adapter[:99_999]),
-            patched(4, b"\x01"),
-            patched(5, b"\x02"),
-            patched(6, b"\x09"),
-            # Another architecture, a relocatable object and a wrong ELF version.
-            broken(lambda adapter: static_elf(other, b"adapter")),
-            patched(16, struct.pack("<H", 1)),
-            patched(20, struct.pack("<I", 9)),
-            # Dynamically linked: no loader exists inside the image's root.
-            broken(lambda adapter: static_elf(machine, b"adapter", interpreter=True)),
-            # Nothing to load: no program headers, or none of type PT_LOAD.
-            patched(56, struct.pack("<H", 0)),
-            patched(64, struct.pack("<I", 4)),
-            # A program header table beyond the file, or too small an entry.
-            patched(32, struct.pack("<Q", 10**9)),
-            patched(54, struct.pack("<H", 8)),
+        changes = [broken(defect) for defect in elf_defects()] + [
+            # The stand-in in the file alone.
+            lambda f: f.update({"host/images/adapter": b"adapter"}),
             # The images do not carry the adapter's blocks exactly once, then its tail.
             carried(adapter=b"other"),
             carried(extra=erofs_file(X86_ADAPTER)),
@@ -1211,6 +1216,46 @@ class EvidenceTests(unittest.TestCase):
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
+
+    def test_a_tiny_or_constant_tail_is_not_a_positional_binding(self):
+        # A tail under MIN_TAIL_BYTES is left to the SIM1 digest; a longer one that is a single
+        # repeated byte would be found in any zero-filled block, so it is refused.
+        machine = checker.ELF_MACHINES["x86_64"]
+        blocks = 196_608 - 176
+        short = static_elf(machine, b"adapter", size=blocks + checker.MIN_TAIL_BYTES - 1)
+        resized = REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {len(ddi(adapter=short))}')
+        self.verdict(change=lambda f: f.update({**executable_files("x86_64", short),
+                                                "guest/cases/mountfsd-reply/reply": resized}))
+        constant = static_elf(machine, b"adapter", size=blocks + checker.MIN_TAIL_BYTES)
+        constant = constant[:-checker.MIN_TAIL_BYTES] + bytes(checker.MIN_TAIL_BYTES)
+        resized = REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {len(ddi(adapter=constant))}')
+        with self.assertRaisesRegex(checker.EvidenceError, "adapter's tail"):
+            self.verdict(change=lambda f: f.update({**executable_files("x86_64", constant),
+                                                    "guest/cases/mountfsd-reply/reply": resized}))
+
+    def test_build_images_applies_the_checkers_rules_to_the_adapter(self):
+        text = (ROOT / "deploy/nixos/qemu-evidence/build-images.sh").read_text(encoding="utf-8")
+        start = text.index("python3 -I -c '", text.index("(static_executable)")) + len("python3 -I -c '")
+        code = text[start:text.index("' \"${architecture}\" \"${ADAPTER}\"", start)]
+        aarch64 = static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")
+        names = {"x86-64": "x86_64", "arm64": "aarch64"}
+        cases = [("x86-64", X86_ADAPTER, True), ("arm64", aarch64, True)]
+        cases += [("x86-64", defect, False) for defect in elf_defects()]
+        # Each architecture's adapter is wrong for the other.
+        cases += [("x86-64", aarch64, False), ("arm64", X86_ADAPTER, False)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "adapter"
+            for name, adapter, accepted in cases:
+                path.write_bytes(adapter)
+                script = subprocess.run([sys.executable, "-I", "-c", code, name, str(path)],
+                                        capture_output=True, text=True, check=False)
+                try:
+                    checker.static_executable(adapter, names[name], "adapter")
+                    checked = True
+                except checker.EvidenceError:
+                    checked = False
+                with self.subTest(name=name, size=len(adapter), accepted=accepted):
+                    self.assertEqual((script.returncode == 0, checked), (accepted, accepted), script.stderr)
 
     def test_mount_image_case_fabrication_fails_closed(self):
         positive, tampered = "guest/cases/positive", "guest/cases/tampered"

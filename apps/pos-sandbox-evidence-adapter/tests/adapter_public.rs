@@ -157,14 +157,17 @@ fn a_stream_that_is_not_one_exact_eai1_attempt_writes_nothing_and_exits_2() -> T
     Ok(())
 }
 
-/// A writer that accepts nothing, or accepts everything and refuses to flush.
+/// A writer that accepts nothing, or accepts everything and refuses to flush,
+/// and counts the `write` calls it gets.
 struct Refusing {
     accepted: Vec<u8>,
+    writes: usize,
     refuse_write: bool,
 }
 
 impl Write for Refusing {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.writes += 1;
         if self.refuse_write {
             Err(io::ErrorKind::BrokenPipe.into())
         } else {
@@ -183,6 +186,7 @@ fn an_unwritable_or_unflushable_output_is_an_output_failure() -> TestResult {
     for refuse_write in [true, false] {
         let mut writer = Refusing {
             accepted: Vec::new(),
+            writes: 0,
             refuse_write,
         };
         let result = run(
@@ -191,8 +195,11 @@ fn an_unwritable_or_unflushable_output_is_an_output_failure() -> TestResult {
             &mut writer,
         );
         assert_eq!(result, Err(AdapterRunError::Output));
-        // The stream is one write of the complete observation, never a part.
-        if !refuse_write {
+        // The complete stream is handed over in exactly one write, never in frames.
+        assert_eq!(writer.writes, 1);
+        if refuse_write {
+            assert!(writer.accepted.is_empty());
+        } else {
             assert!(read_observation(writer.accepted.as_slice(), 1 << 10).is_ok());
         }
     }

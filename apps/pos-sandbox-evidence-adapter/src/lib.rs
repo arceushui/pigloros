@@ -14,8 +14,10 @@
 //! and the validating `write_observation`, so they need their own seam in
 //! [`run`] before the observation is written.
 //!
-//! The EAO1 stream is built in memory and written once, so a failure writes
-//! no EAO1 byte at all, and ends the process with a distinct code.
+//! The EAO1 stream is encoded and validated in memory first, so an encoding
+//! or validation failure writes nothing. A valid stream then reaches the
+//! writer in one `write_all`; a failing writer can still leave part of it
+//! (a pipe may accept some bytes), and the process ends with a distinct code.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -39,7 +41,7 @@ impl Mode {
     fn parse(argument: &OsStr) -> Option<Self> {
         MODES
             .iter()
-            .find(|(name, _)| argument.to_str() == Some(name))
+            .find(|(name, _)| argument.to_str() == Some(*name))
             .map(|(_, mode)| *mode)
     }
 }
@@ -100,8 +102,9 @@ pub fn run(
             .map(|attempt| observe(mode, &attempt))
     })
     .and_then(|observation| {
-        // One buffer, one write: a failed write cannot leave a partial stream
-        // that the provider would capture as an incomplete EAO1.
+        // One buffer, one `write_all`: an encoding or validation failure
+        // writes nothing, and a valid stream is never written in pieces by
+        // this function.
         let mut stream = Vec::new();
         write_observation(&mut stream, &observation)
             .or(Err(AdapterRunError::Output))
