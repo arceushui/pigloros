@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Enforce ADR-110 E15's source boundary before subject-encryption activation.
 
-`TYPES` lists the activation surface: the activation type `SubjectEncryptorLock`
-and the ADR-137 G2 activation constructors, three functions and one type.
+`TYPES` lists the activation surface: the activation type `SubjectEncryptorLock`,
+the ADR-137 G2 activation constructors (three functions and one type), and the
+real ADR-091 enrollment adapter with its volatile store (E15 item (v), #1484).
 Extend it when another activation constructor lands; pure codecs, role enums and
 the lease, permit and generation types are not activation names. References to
 these names stay in file-gated fixtures, so a function pointer, inferred return
@@ -29,6 +30,10 @@ TYPES = (
     "mint_owner_consent_v2_permit",
     "destroy_subject_key",
     "VolatileSubjectNonceLedgerV1",
+    # E15 (v): the real owner adapter, built as an `EnrollmentPort`, and the
+    # test-support store it is composed with until #1373.
+    "OwnerEnrollmentAdapter",
+    "VolatileEnrollmentStore",
 )
 PORTS = ("EnrollmentPort", "UnlockPort")
 NAMES = "|".join((*TYPES, *PORTS))

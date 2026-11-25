@@ -25,18 +25,28 @@
 //!
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
-//! re-validates only what is cheap to check: the pass state and the entry.
-//! A Reserve is refused when its identity is pending (`Conflict`) or when
-//! another reservation of the same T is pending (`PassUnresolved`, code 7,
-//! refused at the apply only, not at stage). A Commit or Abort is refused
-//! when its entry is gone or too small, which also refuses their replay.
+//! re-validates only what is cheap to check: the pass state, the recorded
+//! identity and the pending entries (a Reserve), or the entry (a Commit or
+//! Abort).
+//! A Reserve is refused with `Conflict` when its identity is recorded in
+//! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
+//! and again at the apply. It is refused with `PassUnresolved` (code 7)
+//! at stage when T already has an unresolved pass. A second Reserve staged
+//! before the first was applied is invisible at stage, so only the apply
+//! refuses it (`PassUnresolved`, from T's pending entries). A Commit or
+//! Abort is refused when its entry is gone or too small, which also refuses
+//! their replay.
 //!
-//! A Reserve replayed after its reservation resolved is not refused here:
-//! it creates an entry, so it applies again. Refusing it, and the same
-//! identity under 4a's original outcome, is the planner's step 4a, which
-//! the pipeline runs first. Neither apply re-runs the budget, caps, head or
-//! counters compares; a token staged before another operation changed them
-//! is for the pipeline to discard.
+//! A Reserve replay is refused here as well as by the pipeline's step 4a
+//! discovery: `pass_records` keeps every pass with its status after it
+//! resolves, so a recorded identity, pending or resolved, is a `Conflict`
+//! at stage, before the generation, head and counters are compared, and
+//! again at the apply. The discovery still answers a replay from its
+//! original outcome first; this refusal is the backstop.
+//!
+//! No apply re-runs the budget, caps, head or counters compares; a token
+//! staged before another operation changed them is for the pipeline to
+//! discard.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
@@ -50,6 +60,8 @@ use super::pass_planner::{
     admit_caps, trace_room, CommunityPassCapsV1, CommunityPassReadPortV1,
     CommunityQuarantineIndexV1,
 };
+use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1};
+use super::pass_state::CommunityPassStateV1;
 
 /// The observation materialization a Reserve mints (R9.7), as its stage-1
 /// quote derived it.
@@ -97,6 +109,9 @@ pub struct CommunityReserveInputV1 {
     pub failure_reserve: u64,
     /// The materialization this call mints, or `None` for a reused one.
     pub minted: Option<CommunityMintedObservationV1>,
+    /// What the pass record keeps: the CPR1 fields, the quote and the
+    /// horizons (R8.1(7)).
+    pub pass: CommunityReservedPassV1,
 }
 
 /// A Reserve that passed every writer re-check and awaits its apply.
@@ -104,6 +119,7 @@ pub struct CommunityStagedReserveV1 {
     key: (TimelineId, [u8; 16]),
     entry: CommunityPendingReservationV1,
     minted: Option<CommunityMintedObservationV1>,
+    record: CommunityPassRecordV1,
 }
 
 /// One Commit's writer inputs (R10.3(6), R11.3, R13.1(4)).
@@ -146,12 +162,18 @@ pub struct CommunityStagedAbortV1 {
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
-    /// Another pending reservation of T (`PassUnresolved`, code 7) is not
-    /// refused here, only at [`Self::apply_reserve`].
+    /// An unresolved pass of T is refused here (`PassUnresolved`, code 7). A
+    /// second reservation staged but not yet applied is invisible at stage
+    /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
-    /// Returns `InvalidBinding` when the minted rows exceed the pass rows,
-    /// `Conflict` for a reservation identity already pending and
+    /// Returns `InvalidBinding` when the minted rows exceed the pass rows or
+    /// when the record's CPK1 Timeline or generation, or its predecessor
+    /// head, differs from the call's T, G or `selected_head`; `Conflict` for
+    /// a reservation identity already recorded, resolved or not; and
+    /// `PassUnresolved` (7) for another unresolved pass of T. These come
+    /// first, as R10.7 steps 4a and 4c precede 5j; the byte-equal
+    /// bound-content compare of R8.1(7) is the call layer's. Then
     /// `EvidenceUnavailable` for a Timeline with no pass state; then in the
     /// step-5j order `StaleGeneration` (5), `StaleFrontier` (6) for a moved
     /// head, moved counters or a budget the pending reservations now fill,
@@ -166,19 +188,12 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::InvalidBinding);
         }
         let key = (input.timeline, input.reservation_operation_id);
-        if self.pending_reservations.contains_key(&key) {
-            return Err(Error::Conflict);
-        }
+        self.check_identity(&input, key)?;
         let state = self
             .pass_states
             .get(&input.timeline)
             .ok_or(Error::EvidenceUnavailable)?;
-        if state.generation != input.generation {
-            return Err(Error::StaleGeneration);
-        }
-        if state.head != input.selected_head || state.counters != input.prior_shared_counts {
-            return Err(Error::StaleFrontier);
-        }
+        check_frontier(state, &input)?;
         self.check_reserve_budget(&input)?;
         if input.roster_quarantine_keys.iter().any(|member| {
             self.quarantine_reasons(*member)
@@ -204,9 +219,42 @@ impl MemoryCommunityDomainV1 {
                     input.pass_rows - bound,
                     input.failure_reserve,
                 ),
+                record: CommunityPassRecordV1 {
+                    reserved: input.pass,
+                    prior_shared_counts: input.prior_shared_counts,
+                    materialization: input.minted.as_ref().map(|minted| minted.additions),
+                    status: CommunityPassStatusV1::Reserved,
+                    live: true,
+                },
                 minted: input.minted,
             }
         })
+    }
+
+    /// The record's binding to the call (`InvalidBinding`), then the identity
+    /// and T checks that R10.7 steps 4a and 4c put before 5j: a recorded
+    /// identity, resolved or not, is a replay (`Conflict`, R8.1(7)) and an
+    /// unresolved pass of T is `PassUnresolved`.
+    fn check_identity(
+        &self,
+        input: &CommunityReserveInputV1,
+        key: (TimelineId, [u8; 16]),
+    ) -> Result<(), Error> {
+        let reservation = input.pass.reservation;
+        let pass_key = reservation.pass_key;
+        if pass_key.timeline() != input.timeline
+            || pass_key.generation() != input.generation
+            || reservation.predecessor_head_digest != input.selected_head
+        {
+            return Err(Error::InvalidBinding);
+        }
+        if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
+            return Err(Error::Conflict);
+        }
+        if self.unresolved_pass(input.timeline).is_some() {
+            return Err(Error::PassUnresolved);
+        }
+        Ok(())
     }
 
     /// R13.1(4) at the writer: every actor of T's scope still fits the
@@ -236,36 +284,25 @@ impl MemoryCommunityDomainV1 {
 
     /// Apply a staged Reserve in the guarded step that published its records.
     ///
-    /// It adds one retained outcome and the pending entry and, for a minted
+    /// It adds one retained outcome, the pending entry and the pass record
+    /// (the CRI1 index entry, status Reserved) and, for a minted
     /// materialization, its additions to the counters, the closure terms and
     /// scope rows a reuse reads and one more control operation.
     ///
     /// # Errors
-    /// Returns `Conflict` when the reservation identity is pending already,
-    /// `PassUnresolved` (7) when another reservation of T is pending, and
-    /// `EvidenceUnavailable` when the Timeline has no pass state; the
-    /// domain is unchanged.
+    /// Returns `Conflict` when the reservation identity is recorded already,
+    /// resolved or not, `PassUnresolved` (7) when another reservation of T
+    /// is pending, and `EvidenceUnavailable` when the Timeline has no pass
+    /// state; the domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedReserveV1,
     ) -> Result<(), Error> {
+        self.check_apply_reserve(staged.key)?;
         let (timeline, _) = staged.key;
-        if self.pending_reservations.contains_key(&staged.key) {
-            return Err(Error::Conflict);
-        }
-        if self
-            .pending_reservations
-            .range((timeline, [0; 16])..=(timeline, [u8::MAX; 16]))
-            .next()
-            .is_some()
-        {
-            return Err(Error::PassUnresolved);
-        }
-        if !self.pass_states.contains_key(&timeline) {
-            return Err(Error::EvidenceUnavailable);
-        }
         self.pending_reservations.insert(staged.key, staged.entry);
+        self.pass_records.insert(staged.key, staged.record);
         self.pass_states.entry(timeline).and_modify(|state| {
             let counts = state.generations.entry(state.generation).or_default();
             counts.outcomes = counts.outcomes.saturating_add(1);
@@ -281,8 +318,33 @@ impl MemoryCommunityDomainV1 {
         Ok(())
     }
 
+    /// The cheap re-validation of an apply: the identity is not recorded
+    /// (`Conflict`), T has no other pending reservation (`PassUnresolved`)
+    /// and has pass state (`EvidenceUnavailable`).
+    fn check_apply_reserve(&self, key: (TimelineId, [u8; 16])) -> Result<(), Error> {
+        let (timeline, _) = key;
+        if self.pending_reservations.contains_key(&key) || self.pass_records.contains_key(&key) {
+            return Err(Error::Conflict);
+        }
+        if self
+            .pending_reservations
+            .range((timeline, [0; 16])..=(timeline, [u8::MAX; 16]))
+            .next()
+            .is_some()
+        {
+            return Err(Error::PassUnresolved);
+        }
+        if !self.pass_states.contains_key(&timeline) {
+            return Err(Error::EvidenceUnavailable);
+        }
+        Ok(())
+    }
+
     /// Check a Commit against its pending entry: it binds no more rows than
     /// the entry holds (R13.1(4)).
+    ///
+    /// It does not require the pass to be Sealed: that rule is A5's, which
+    /// reads the record's status before it stages the Commit.
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a reservation with no pending entry or
@@ -319,6 +381,7 @@ impl MemoryCommunityDomainV1 {
         let key = (input.timeline, input.reservation_operation_id);
         self.entry_of(key, input.bound_rows).map(|()| {
             self.pending_reservations.remove(&key);
+            self.set_pass_status(key.0, key.1, CommunityPassStatusV1::Committed);
             self.pass_states.entry(input.timeline).and_modify(|state| {
                 state.counters = add_counts(state.counters, input.additions);
                 state.graph = input.graph;
@@ -336,6 +399,9 @@ impl MemoryCommunityDomainV1 {
 
     /// Check an Abort against its pending entry: it registers no more rows
     /// than the entry holds, and no cap or budget refuses it (R13.1(5)).
+    ///
+    /// It does not check the live call: an Abort of a pass whose `run_pass`
+    /// call is live gives 15 in A4e-2 (R8.3(3)), from the record's `live`.
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a reservation with no pending entry or
@@ -374,6 +440,7 @@ impl MemoryCommunityDomainV1 {
         let CommunityStagedAbortV1 { key, rows } = *staged;
         self.entry_of(key, rows).map(|()| {
             self.pending_reservations.remove(&key);
+            self.set_pass_status(key.0, key.1, CommunityPassStatusV1::Aborted);
         })
     }
 
@@ -381,11 +448,34 @@ impl MemoryCommunityDomainV1 {
         if !self.pass_states.contains_key(&key.0) {
             return Err(Error::EvidenceUnavailable);
         }
-        match self.pending_reservations.get(&key) {
+        // A pending entry belongs to an unresolved pass (R13.1(4)); the
+        // Sealed-before-Commit rule is A5's and the live-call 15 is
+        // A4e-2's, both on the record's status and `live` flag.
+        let held = self.pending_reservations.get(&key).filter(|_| {
+            self.pass_records
+                .get(&key)
+                .is_some_and(|record| record.status.unresolved())
+        });
+        match held {
             Some(entry) if rows <= entry.rows => Ok(()),
             _ => Err(Error::InvalidBinding),
         }
     }
+}
+
+/// The generation (5), then the head and the counters (6), the call was
+/// planned over: R10.7 step 5j.
+fn check_frontier(
+    state: &CommunityPassStateV1,
+    input: &CommunityReserveInputV1,
+) -> Result<(), Error> {
+    if state.generation != input.generation {
+        return Err(Error::StaleGeneration);
+    }
+    if state.head != input.selected_head || state.counters != input.prior_shared_counts {
+        return Err(Error::StaleFrontier);
+    }
+    Ok(())
 }
 
 /// The counters with `added` on top, saturating like every counter.

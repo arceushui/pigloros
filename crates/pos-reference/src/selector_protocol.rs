@@ -918,10 +918,11 @@ fn validate_evidence(
         trs1_digest: grant.authority.trs1_digest,
         rvs1_digest: grant.authority.rvs1_digest,
     };
-    if !result_matches_evidence(result, grant, receipt)
-        || !grant_matches_execute_request(grant, &spx, &expected_grant_authority)
-        || !receipt_matches_grant(receipt, grant, &expected_receipt_authority)
-    {
+    if !evidence_relations_hold(
+        (result, grant, receipt),
+        &spx,
+        (&expected_grant_authority, &expected_receipt_authority),
+    ) {
         return Err(AdapterError::ProtocolFailure);
     }
     result
@@ -952,6 +953,22 @@ fn validate_evidence(
     Ok(())
 }
 
+/// The SPY1, AGR1 and SPR1 agree with one another and with the SPX1.
+fn evidence_relations_hold(
+    (result, grant, receipt): (
+        &SandboxProviderResult,
+        &AdmissionGrant,
+        &SandboxProviderReceipt,
+    ),
+    spx: &SandboxExecuteRequest,
+    (expected_grant, expected_receipt): (&AdmissionAuthority, &ReceiptAuthority),
+) -> bool {
+    result_matches_evidence(result, grant, receipt)
+        && grant_matches_execute_request(grant, spx, expected_grant)
+        && receipt_matches_grant(receipt, grant, expected_receipt)
+        && transcripts_fit_plans(receipt, spx)
+}
+
 fn result_matches_evidence(
     result: &SandboxProviderResult,
     grant: &AdmissionGrant,
@@ -980,6 +997,20 @@ fn grant_matches_execute_request(
                 .map(|plan| plan.plan_digest)
                 .collect::<Vec<_>>()
         && grant.expected_launch_policy_digest == spx.authority.lps1_digest
+}
+
+/// The receipt binds at most one NXT1 digest per planned exchange (ADR-069
+/// R16 N13): none without plans, as every V1 execute of #1488-a.
+///
+/// The check is mode-independent, so it is stricter than R16 requires for every
+/// non-Local mode, `Replay` with empty plans included. The R16 residual clause
+/// ("NXT1 empty unless `release1-digest` is non-null") is specified in R16 §3.3
+/// change C, and 1492-b (R16 §7) owns the checks for non-empty plans.
+const fn transcripts_fit_plans(
+    receipt: &SandboxProviderReceipt,
+    spx: &SandboxExecuteRequest,
+) -> bool {
+    receipt.network_transcript_digests.len() <= spx.network_plans.len()
 }
 
 fn receipt_matches_grant(
@@ -1233,7 +1264,8 @@ mod tests {
     use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
     use crate::profile::DeterministicBudget;
     use crate::sandbox_provider_protocol::{
-        SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
+        NetworkExchangePlan, SandboxLocalErrorCode, SandboxLocalErrorPhase,
+        SandboxProviderOperation,
     };
 
     use super::*;
@@ -3209,6 +3241,56 @@ mod tests {
         Ok(())
     }
 
+    fn relations(
+        evidence: &AdmittedEvidence,
+        grant: &AdmissionGrant,
+        receipt: &SandboxProviderReceipt,
+        spx: &SandboxExecuteRequest,
+    ) -> bool {
+        evidence_relations_hold(
+            (&evidence.result, grant, receipt),
+            spx,
+            (&grant.authority, &receipt.authority),
+        )
+    }
+
+    #[test]
+    fn a_receipt_binds_at_most_one_transcript_per_plan() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let evidence = admitted_evidence(&control)?;
+        let mut spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&evidence.fields[5])?)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut receipt = evidence.receipt.clone();
+        let mut grant = evidence.grant.clone();
+        // The relation helpers compare fields and do not verify the SPR1
+        // digest, so an unsealed tamper isolates the guard in the chain.
+        assert!(transcripts_fit_plans(&receipt, &spx));
+        assert!(relations(&evidence, &grant, &receipt, &spx));
+        receipt.network_transcript_digests = vec![[1; 32]];
+        assert!(!transcripts_fit_plans(&receipt, &spx));
+        assert!(!relations(&evidence, &grant, &receipt, &spx));
+        spx.network_plans = vec![NetworkExchangePlan {
+            exchange_id: [2; 16],
+            occurrence: 0,
+            capability_id: "network".to_owned(),
+            request_length: 1,
+            request_digest: [3; 32],
+            response_maximum: 1,
+            expected_response_digest: [4; 32],
+            retention_policy_digest: [5; 32],
+            plan_digest: [6; 32],
+        }];
+        grant.exchange_plan_digests = vec![[6; 32]];
+        assert!(transcripts_fit_plans(&receipt, &spx));
+        assert!(relations(&evidence, &grant, &receipt, &spx));
+        receipt.network_transcript_digests.clear();
+        assert!(transcripts_fit_plans(&receipt, &spx));
+        receipt.network_transcript_digests = vec![[1; 32], [7; 32]];
+        assert!(!transcripts_fit_plans(&receipt, &spx));
+        Ok(())
+    }
+
     #[test]
     fn evidence_relationships_reject_each_cross_record_mismatch() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
@@ -3275,6 +3357,20 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+
+        // A transcript with no plan to bind it: the same guard, reached
+        // through `validate_evidence`.
+        let mut receipt = evidence.receipt.clone();
+        receipt.network_transcript_digests = vec![[99; 32]];
+        assert_eq!(
+            validate_evidence(
+                &evidence.fields,
+                &evidence.result,
+                &evidence.grant,
+                &receipt,
+            ),
+            Err(AdapterError::ProtocolFailure)
+        );
 
         for field in 0..4 {
             let mut result = evidence.result.clone();
