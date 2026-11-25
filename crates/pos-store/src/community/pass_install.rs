@@ -18,8 +18,6 @@ use pos_core::community_lifecycle::{
 };
 use pos_core::{Hash, TimelineId};
 
-use super::pass_planner::decision_bound;
-
 /// The largest positive trusted horizon, `i64::MAX` microseconds.
 const MAXIMUM_HORIZON_MICROS: u64 = i64::MAX as u64;
 
@@ -184,21 +182,24 @@ pub fn community_reservation_horizons_v1(
         .map(|()| reservation_horizons(profile.as_input().retention, owners, reserve_time_micros))
 }
 
-/// The reservation horizon bound the planner judges observation reuse by.
+/// The horizon a reused observation must reach, the planner's 5c comparand.
 ///
-/// It is `min(t_r + 27 s + recovery window, generation_not_after)` (R10.7
-/// step 5c), a conservative upper bound of the exact `H_r`: it ignores the
-/// metadata and owner terms. The Reserve writer re-checks with the exact
-/// horizon and gives 6 on a mismatch. No production caller exists yet.
-#[must_use]
-pub fn community_reuse_horizon_bound_v1(
+/// It is `H_g` (R13.2(1)): the State records of the pass depend on the
+/// reused Observation CPN1, so its records must outlive the horizon those
+/// State records live to (R13.2(2), (4a); owner reading of R9.2 and R10.7
+/// 5c). It does not depend on the sample, so the Reserve writer re-checks
+/// the same value and gives 6 when a reinstallation moved it. No production
+/// caller exists yet.
+///
+/// # Errors
+/// Returns `InvalidBinding` for an invalid owner horizon.
+pub fn community_reuse_horizon_v1(
     profile: &CommunityDurableProfileV1<'_>,
-    reservation_sample_micros: u64,
-) -> u64 {
-    let retention = profile.as_input().retention;
-    decision_bound(reservation_sample_micros)
-        .saturating_add(retention.recovery_window_micros)
-        .min(retention.generation_not_after_micros)
+    owners: CommunityOwnerHorizonsV1,
+) -> Result<u64, Error> {
+    owners
+        .validate()
+        .map(|()| reservation_horizons(profile.as_input().retention, owners, 0).generation_micros)
 }
 
 /// The CQK1 digest of every roster member, due or not, in roster order

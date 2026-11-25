@@ -5,13 +5,13 @@
 use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityLifecycleErrorV1 as Error, CommunityProfileMemberV1,
-    CommunityProfileRetentionV1, CommunityQuarantineKeyV1, COMMUNITY_DECISION_DEADLINE_MICROS_V1,
+    CommunityProfileRetentionV1, CommunityQuarantineKeyV1,
 };
 use pos_core::{Hash, ImplementationKeyV1, TimelineId};
 use ulid::Ulid;
 
 use super::{
-    community_reservation_horizons_v1, community_reuse_horizon_bound_v1,
+    community_reservation_horizons_v1, community_reuse_horizon_v1,
     community_roster_quarantine_keys_v1, install_community_pass_profile_v1,
     CommunityOwnerHorizonsV1, CommunityReservationHorizonsV1,
 };
@@ -216,24 +216,54 @@ fn the_reservation_horizons_take_the_least_term() -> Fallible<()> {
     Ok(())
 }
 
-/// R10.7 step 5c: `min(t_r + 27 s + window, generation_not_after)`,
-/// saturating.
+/// R13.2(1), R13.2(4a): the horizon a reused observation must reach is `H_g`,
+/// whatever the sample: the least of the generation, metadata and owner
+/// evidence horizons.
 #[test]
-fn the_reuse_bound_is_the_step_5c_formula() -> Fallible<()> {
+fn the_reuse_horizon_is_the_generation_horizon() -> Fallible<()> {
     let key = key()?;
     let roster = roster(&key)?;
     let profile = build_profile(&roster, RETENTION)?;
+    assert_eq!(community_reuse_horizon_v1(&profile, OWNERS)?, 8_000_000_000);
     assert_eq!(
-        community_reuse_horizon_bound_v1(&profile, 1_000),
-        1_000 + COMMUNITY_DECISION_DEADLINE_MICROS_V1 + 3_600_000_000
+        community_reuse_horizon_v1(
+            &profile,
+            CommunityOwnerHorizonsV1 {
+                evidence_micros: 5_000_000_000,
+                ..OWNERS
+            }
+        )?,
+        5_000_000_000
     );
+    for (profile_horizons, expected) in [
+        (
+            CommunityProfileRetentionV1 {
+                generation_not_after_micros: 4_000_000_000,
+                ..RETENTION
+            },
+            4_000_000_000,
+        ),
+        (
+            CommunityProfileRetentionV1 {
+                metadata_not_after_micros: 6_000_000_000,
+                ..RETENTION
+            },
+            6_000_000_000,
+        ),
+    ] {
+        let profile = build_profile(&roster, profile_horizons)?;
+        assert_eq!(community_reuse_horizon_v1(&profile, OWNERS)?, expected);
+    }
     assert_eq!(
-        community_reuse_horizon_bound_v1(&profile, 9_000_000_000),
-        9_000_000_000
-    );
-    assert_eq!(
-        community_reuse_horizon_bound_v1(&profile, u64::MAX),
-        9_000_000_000
+        community_reuse_horizon_v1(
+            &profile,
+            CommunityOwnerHorizonsV1 {
+                evidence_micros: 0,
+                ..OWNERS
+            }
+        )
+        .err(),
+        Some(Error::InvalidBinding)
     );
     Ok(())
 }
