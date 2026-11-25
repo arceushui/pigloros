@@ -98,14 +98,15 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
         .stdout(fs::File::create(image)?)
         .status()?;
     assert!(expanded.success());
-    let adapter = Path::new("/tmp/conformance-adapter");
-    fs::write(adapter, b"adapter")?;
+    let adapter_directory = tempfile::tempdir()?;
+    let adapter = adapter_directory.path().join("adapter");
+    fs::write(&adapter, b"adapter")?;
     let arguments = || -> Vec<OsString> {
         vec![
             image.into(),
             vectors.join("signer.der").into(),
             VECTOR_KEY_DESCRIPTION.into(),
-            adapter.into(),
+            adapter.clone().into(),
         ]
     };
 
