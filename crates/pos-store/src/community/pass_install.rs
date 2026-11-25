@@ -124,6 +124,9 @@ pub(super) struct CommunityHorizonPolicyV1 {
     pub(super) owners: CommunityOwnerHorizonsV1,
     /// `H(CDP1)` of the installed profile: every Reserve request binds it.
     pub(super) profile_digest: Hash,
+    /// The installed roster's length: every Reserve names one CQK1 per
+    /// roster member and only roster rows (R10.6).
+    pub(super) roster_len: usize,
 }
 
 #[cfg(target_os = "linux")]
@@ -159,6 +162,7 @@ impl super::memory_domain::MemoryCommunityDomainV1 {
                 retention: profile.as_input().retention,
                 owners,
                 profile_digest: profile.digest(),
+                roster_len: profile.as_input().roster.len(),
             });
         })
     }

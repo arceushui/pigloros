@@ -37,8 +37,14 @@
 //!   (R15.5). The writer checks that `reserved.trace_rows` is `n_due + 1`
 //!   and Seal relies on it.
 //! - The graph maxima over the candidate's selected graph, with the trace
-//!   closure on top (R11.3(5)). The trace adds up to 257 edges a pass, so
-//!   it can reach the 8,192-edge maximum before R13's target budget binds.
+//!   closure on top (R11.3(5)). The bound is per pass, not cumulative: the
+//!   Annotation CPN1 and the CAT1 are outside the CGR1 closure (R15.6(6)),
+//!   records outside it are not charged to the CGR1 graph counts (R11.2(5)),
+//!   and Commit selects the new CGR1's counts, from which the next pass's
+//!   demand starts. So the up to 257 edges of one annotated pass do not
+//!   add up across passes. Counting the trace on top of the selected counts
+//!   over-counts, since the step's ancestry is already in them, and it bites
+//!   only when the selected graph is within the trace's terms of a maximum.
 //! - R11.1(6): one more live key against the store-wide 65,536. The row cap
 //!   of R13 is per Timeline, so about a hundred contexts at their floor
 //!   could reach the store-wide limit. The pass record does not say whether

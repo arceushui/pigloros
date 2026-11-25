@@ -120,9 +120,10 @@ pub struct CommunityReserveInputV1 {
     pub prior_shared_counts: CommunitySharedCountsV1,
     /// The CQK1 digest of every roster member, due or not (R10.6).
     pub roster_quarantine_keys: Vec<Hash>,
-    /// `t_r`, the call's trusted-clock reservation sample. The pipeline
-    /// takes it from the domain's clock reservation; the writer cannot
-    /// check it.
+    /// `t_r`, the call's trusted-clock reservation sample.
+    ///
+    /// The writer cannot check it. The pipeline that makes the domain's
+    /// clock reservation (A4c-3c-ii) must take the sample from it.
     pub reservation_sample_micros: u64,
     /// The worst-case ARD1 rows of the pass: State and recording rows, the
     /// materialization's included, and no trace (R13.1(4), R15.5).
@@ -198,8 +199,10 @@ impl MemoryCommunityDomainV1 {
     /// when the record's CPK1 Timeline or generation, or its predecessor
     /// head, differs from the call's T, G or `selected_head`; when the pass
     /// facts disagree (members, trace rows, `F_p`, key IDs); when the CPR1
-    /// profile is not the installed one; or when the record's `H_g` or `H_r`
-    /// differs from the writer's own. Then `EvidenceUnavailable` with no
+    /// profile is not the installed one or not the one T was initialized
+    /// under; when the roster keys or member rows do not fit the installed
+    /// roster; or when the record's `H_g` or `H_r` differs from the writer's
+    /// own. Then `EvidenceUnavailable` with no
     /// installed horizons, `Conflict` for a reservation identity already
     /// recorded, resolved or not, and `PassUnresolved` (7) for another
     /// unresolved pass of T. These come first, as R10.7 steps 4a and 4c
@@ -274,7 +277,15 @@ impl MemoryCommunityDomainV1 {
             input.reservation_sample_micros,
         );
         let pass = &input.pass;
-        if pass.reservation.profile_digest != policy.profile_digest
+        // One CQK1 per installed roster member and only installed roster rows
+        // (R10.6): a short list would skip the whole-roster refusal 9.
+        let roster = policy.roster_len;
+        if input.roster_quarantine_keys.len() != roster
+            || pass
+                .members
+                .iter()
+                .any(|member| member.roster_index >= roster)
+            || pass.reservation.profile_digest != policy.profile_digest
             || pass.generation_horizon_micros != horizons.generation_micros
             || pass.outcome_horizon_micros != horizons.outcome_micros
             || pass.reservation.evidence_not_after_micros != horizons.outcome_micros
@@ -297,6 +308,10 @@ impl MemoryCommunityDomainV1 {
         state: &CommunityPassStateV1,
         writer: WriterHorizonsV1,
     ) -> Result<(), Error> {
+        // T was initialized under the profile the request names.
+        if state.profile_digest != input.pass.reservation.profile_digest {
+            return Err(Error::InvalidBinding);
+        }
         // The Logical Head and chain compare comes first, with the
         // authority re-check (R10.7 step 5j: 12), for the cut a minted
         // observation observed and for the cut a reused one observed. A call
