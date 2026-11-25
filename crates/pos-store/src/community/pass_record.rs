@@ -69,6 +69,9 @@ pub(super) struct CommunityPassRecordV1 {
     /// The minted materialization's actual additions, if the pass minted one.
     pub(super) materialization: Option<CommunitySharedCountsV1>,
     pub(super) status: CommunityPassStatusV1,
+    /// `H(CPS1)` of the sealed result a Seal latched (R8.4): a later Seal
+    /// of the pass must be that result again.
+    pub(super) sealed_result_digest: Option<Hash>,
     /// Whether the `run_pass` call that reserved the pass is still running
     /// (R8.3(3): another call gets 15).
     pub(super) live: bool,

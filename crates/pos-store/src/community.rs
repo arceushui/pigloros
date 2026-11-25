@@ -24,6 +24,8 @@ mod pass_planner;
 #[cfg(target_os = "linux")]
 mod pass_record;
 #[cfg(target_os = "linux")]
+mod pass_seal;
+#[cfg(target_os = "linux")]
 mod pass_state;
 #[cfg(target_os = "linux")]
 mod pass_writer;
@@ -81,6 +83,11 @@ pub use pass_planner::{
 };
 #[cfg(target_os = "linux")]
 pub use pass_record::{CommunityPassCountsV1, CommunityPassStatusV1, CommunityReservedPassV1};
+#[cfg(target_os = "linux")]
+pub use pass_seal::{
+    CommunitySealCandidateV1, CommunitySealInputV1, CommunitySealInvocationV1,
+    CommunitySealedPassV1, CommunityStagedSealV1,
+};
 #[cfg(target_os = "linux")]
 pub use pass_writer::{
     CommunityCommitInputV1, CommunityMintedObservationV1, CommunityObservationCutV1,
