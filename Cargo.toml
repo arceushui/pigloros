@@ -36,6 +36,7 @@ members = [
   "apps/pos-plugin-worker",
   "apps/pos-plugin-conformance-adapter",
   "apps/pos-metric-conformance-adapter",
+  "apps/pos-sandbox-evidence-adapter",
   "apps/pos-gateway-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
