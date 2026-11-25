@@ -33,7 +33,7 @@ use pos_core::community_lifecycle::{
 use pos_core::{
     AuthorityGranteeV1, AuthorityTrustRootSealV1, AuthorizationRequestV1, Hash, TimelineId,
 };
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 use super::super::lifecycle_authority::{
@@ -416,7 +416,7 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityCurrentViewV1, Error> {
         let pass_key = record.reserved.reservation.pass_key;
         let authority_rows = self.authority_rows(inputs)?;
-        let trust_rows = self.abort_trust_rows(context, lifecycle.trust_scope())?;
+        let trust_rows = self.abort_trust_rows(context, lifecycle.trust_scope(), record)?;
         CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
             CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
                 store_incarnation: self.store_incarnation,
@@ -458,29 +458,63 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// One trust row per distinct Plugin of the roster (R6.5(4)), read now
-    /// from this domain's own registry. A Plugin with no active release has
-    /// none: the accepted text gives no row for that state, and an
-    /// operator Abort is not refused for it (open point for the owner).
+    /// One trust row per distinct Plugin of the roster (R6.5(4)).
+    ///
+    /// A Plugin with an active release has its registry row, read now from
+    /// this domain's own registry. One with none has the row its Reserve
+    /// retained (owner decision, #560, 2026-11-25): the roster row's admitted
+    /// PMF1 and release digest, the recorded TPS1 digest of its due member
+    /// (or of the first member) as the policy digest and zero floors and
+    /// UTC second. So an operator Abort is never refused for a release the
+    /// registry no longer holds, and the CAV1 is never partial.
     fn abort_trust_rows(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         scope: &str,
+        record: &CommunityPassRecordV1,
     ) -> Result<Vec<CommunityTrustViewRowV1>, Error> {
-        let plugins: BTreeSet<&str> = context
-            .profile
-            .as_input()
-            .roster
-            .iter()
-            .map(|row| row.implementation().plugin_id())
-            .collect();
+        let roster = context.profile.as_input().roster;
+        let mut plugins = BTreeMap::new();
+        for row in roster {
+            plugins
+                .entry(row.implementation().plugin_id())
+                .or_insert(row);
+        }
         let policy = CommunityStoreDomainV1::plugin_trust_policy(self, scope)?;
         let utc = u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
             .map_err(|_| Error::EvidenceUnavailable)?;
+        let members = &record.reserved.members;
         let mut rows = Vec::with_capacity(plugins.len());
-        for plugin_id in plugins {
-            if let Some(active) = CommunityStoreDomainV1::active_release(self, scope, plugin_id)? {
-                rows.push(CommunityTrustViewRowV1 {
+        for (plugin_id, row) in plugins {
+            let active = CommunityStoreDomainV1::active_release(self, scope, plugin_id)?;
+            rows.push(active.map_or_else(
+                || {
+                    let recorded = members
+                        .iter()
+                        .find(|member| {
+                            roster.get(member.roster_index).is_some_and(|candidate| {
+                                candidate.implementation().plugin_id() == plugin_id
+                            })
+                        })
+                        .or_else(|| members.first())
+                        .map_or_else(
+                            || Hash::from_bytes(policy.tps1_digest()),
+                            |member| member.trust_policy_snapshot_digest,
+                        );
+                    CommunityTrustViewRowV1 {
+                        scope: scope.to_owned(),
+                        plugin_id: plugin_id.to_owned(),
+                        policy_digest: recorded,
+                        policy_floor: 0,
+                        release_floor: 0,
+                        highest_trusted_utc_second: 0,
+                        active_manifest_digest: row.digests()[0],
+                        active_release_digest: Hash::from_bytes(
+                            *row.implementation().release_digest().as_bytes(),
+                        ),
+                    }
+                },
+                |active| CommunityTrustViewRowV1 {
                     scope: scope.to_owned(),
                     plugin_id: plugin_id.to_owned(),
                     policy_digest: Hash::from_bytes(policy.tps1_digest()),
@@ -489,8 +523,8 @@ impl MemoryCommunityDomainV1 {
                     highest_trusted_utc_second: utc,
                     active_manifest_digest: Hash::from_bytes(active.pmf1_digest()),
                     active_release_digest: Hash::from_bytes(active.release_digest()),
-                });
-            }
+                },
+            ));
         }
         Ok(rows)
     }
