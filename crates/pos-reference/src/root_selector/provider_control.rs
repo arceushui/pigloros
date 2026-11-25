@@ -62,9 +62,9 @@ fn derive(
     hasher.update(&attempt_id);
     hasher.update(&operation.wire_code().to_be_bytes());
     hasher.update(&[index]);
-    let mut identity = [0; 16];
-    identity.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-    identity
+    let digest = hasher.finalize();
+    // The first 16 bytes of the hash; no literal initialises the identity.
+    std::array::from_fn(|position| digest.as_bytes()[position])
 }
 
 /// BHC1 limit 16 as the provider reads it: the interval a pending response

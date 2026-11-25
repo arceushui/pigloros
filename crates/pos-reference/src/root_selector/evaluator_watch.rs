@@ -89,6 +89,14 @@ impl InFlightAttempt {
     }
 }
 
+/// Whether `revents` says the peer is gone: hang-up, error or an invalid
+/// descriptor. Written without `|` so that each flag is tested on its own.
+fn is_gone(revents: PollFlags) -> bool {
+    [PollFlags::HUP, PollFlags::ERR, PollFlags::NVAL]
+        .iter()
+        .any(|flag| revents.contains(*flag))
+}
+
 /// Whether `evaluator` closed its end entirely before `wake` became ready or
 /// closed. `timeout` bounds the wait; production waits indefinitely.
 fn wait_for_hang_up(
@@ -100,12 +108,8 @@ fn wait_for_hang_up(
         PollFd::new(evaluator, PollFlags::empty()),
         PollFd::new(wake, PollFlags::IN),
     ];
-    rustix::io::retry_on_intr(|| poll(&mut descriptors, timeout)).map(|_| {
-        descriptors[1].revents().is_empty()
-            && descriptors[0]
-                .revents()
-                .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
-    })
+    rustix::io::retry_on_intr(|| poll(&mut descriptors, timeout))
+        .map(|_| descriptors[1].revents().is_empty() && is_gone(descriptors[0].revents()))
 }
 
 /// Cancel the attempt once the evaluator hung up while it runs; report a

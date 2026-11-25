@@ -3209,6 +3209,7 @@ mod tests {
         CgroupPath, ObservationChallenge, ProviderLifecycleError, RuntimeSlotTarget,
         StaleUnitsObservation, StartedRuntimeObservation,
     };
+    use crate::selector_transport_test_fixture::derived_nonce;
 
     const FIXTURE_ADMISSION_TIME: u64 = 1_800_000_000;
 
@@ -3216,14 +3217,13 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(FIXTURE_ADMISSION_TIME)
     }
 
-    fn test_provider_request_admission<'a>(
+    fn test_request_admission<'a>(
         lease: &SelectorAdmissionLease<'a>,
         requirement: &crate::evaluator_protocol::SandboxRequirement,
+        in_flight: &'a InFlightAttempt,
     ) -> TestResult<SelectorProviderRequestAdmission<'a>> {
         let (selected, _) =
             selected_image_and_launch(&lease.admitted, requirement, FIXTURE_ADMISSION_TIME)?;
-        // A request that outlives the lease needs an attempt that does too.
-        let in_flight: &'static InFlightAttempt = Box::leak(Box::new(InFlightAttempt::default()));
         Ok(SelectorProviderRequestAdmission::new(
             lease,
             selected,
@@ -5363,7 +5363,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("requirement missing")?;
-        let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+        let in_flight = InFlightAttempt::default();
+        let mut request_admission = test_request_admission(&lease, requirement, &in_flight)?;
         let manifest = request_admission.selected_image.image.manifest();
         let identity = if kind == InstallationObjectKind::ROOT_IMAGE {
             manifest.root_image_blake3_digest
@@ -5464,7 +5465,8 @@ mod tests {
                 .sandbox_requirement
                 .as_ref()
                 .ok_or("requirement missing")?;
-            let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+            let in_flight = InFlightAttempt::default();
+            let mut request_admission = test_request_admission(&lease, requirement, &in_flight)?;
             request_admission.admission_time = clock;
             assert!(matches!(
                 transport.execute_staged(
@@ -5520,7 +5522,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("requirement missing")?;
-        let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+        let in_flight = InFlightAttempt::default();
+        let mut request_admission = test_request_admission(&lease, requirement, &in_flight)?;
         let (request_entered_tx, request_entered_rx) = std::sync::mpsc::channel();
         let (release_provider_tx, release_provider_rx) = std::sync::mpsc::channel();
         let (execution_tx, execution_rx) = std::sync::mpsc::channel();
@@ -5583,7 +5586,7 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
         if let Some(current) = successor_lease {
-            let mut stale_request = test_provider_request_admission(&lease, requirement)?;
+            let mut stale_request = test_request_admission(&lease, requirement, &in_flight)?;
             assert!(matches!(
                 transport.execute_staged(
                     &transport_fixture.provider,
@@ -5603,7 +5606,7 @@ mod tests {
             drop(stale_request);
             drop(lease);
             // A stale request's drop must not release the successor's slot.
-            let mut current_request = test_provider_request_admission(&current, requirement)?;
+            let mut current_request = test_request_admission(&current, requirement, &in_flight)?;
             assert!(current_request.begin().is_ok());
             current_request.entered();
         }
@@ -5916,7 +5919,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("requirement missing")?;
-        let mut provider_requests = test_provider_request_admission(&lease, requirement)?;
+        let in_flight = InFlightAttempt::default();
+        let mut provider_requests = test_request_admission(&lease, requirement, &in_flight)?;
         assert!(provider_requests.begin().is_ok());
         assert!(provider_requests.entry_proof.is_some());
         assert!(provider_requests.begin().is_err());
@@ -6079,12 +6083,18 @@ mod tests {
         });
         let selected =
             SelectedProviderTransport::new(ProviderTransport::from_path_for_test(&path)?);
-        let (cancel, cancel_bytes) = fixture
-            .provider
-            .cancel_request([5; 16], [6; 16], [7; 16], [8; 32])?;
-        let (reconcile, reconcile_bytes) = fixture
-            .provider
-            .reconcile_request([5; 16], [6; 16], [7; 16], [8; 32])?;
+        let (cancel, cancel_bytes) = fixture.provider.cancel_request(
+            [5; 16],
+            derived_nonce("selector tests"),
+            [7; 16],
+            [8; 32],
+        )?;
+        let (reconcile, reconcile_bytes) = fixture.provider.reconcile_request(
+            [5; 16],
+            derived_nonce("selector tests"),
+            [7; 16],
+            [8; 32],
+        )?;
         let unreachable = Some(ProviderControlError::Boundary(
             SelectorBoundaryError::SelectorUnavailable,
         ));

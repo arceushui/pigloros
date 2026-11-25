@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 
 use super::super::{read_frame, write_frame, Deadline};
 use super::*;
-use crate::selector_transport_test_fixture::authenticated_transport_fixture;
+use crate::selector_transport_test_fixture::{authenticated_transport_fixture, derived_nonce};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -14,19 +14,29 @@ struct Served {
     _directory: tempfile::TempDir,
 }
 
-/// A guest client bound to this process, and a provider thread running `script`.
-fn serve(
-    script: impl FnOnce(UnixListener) -> Result<(), String> + Send + 'static,
-) -> TestResult<Served> {
+/// A socket path in a fresh directory, bound and private to its owner.
+fn bind_socket() -> TestResult<(tempfile::TempDir, std::path::PathBuf, UnixListener)> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("provider.sock");
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    let owner = std::fs::metadata(&path)?.uid();
+    Ok((directory, path, listener))
+}
+
+/// A guest client for the socket at `path`, bound to this process.
+fn client_for(path: &Path) -> TestResult<GuestProviderClient> {
+    let owner = std::fs::metadata(path)?.uid();
     let pid = NonZeroU64::new(u64::from(std::process::id())).ok_or("pid zero")?;
-    let client = GuestProviderClient::bound_to_process(&path, owner, Ok, pid)?;
+    Ok(GuestProviderClient::bound_to_process(path, owner, Ok, pid)?)
+}
+
+/// A guest client bound to this process, and a provider thread running `script`.
+fn serve(
+    script: impl FnOnce(UnixListener) -> Result<(), String> + Send + 'static,
+) -> TestResult<Served> {
+    let (directory, path, listener) = bind_socket()?;
     Ok(Served {
-        client,
+        client: client_for(&path)?,
         thread: std::thread::spawn(move || script(listener)),
         _directory: directory,
     })
@@ -257,9 +267,10 @@ fn an_unreachable_provider_fails_cancel_and_reconcile_through_the_one_transport(
     let unreachable = Some(GuestControlError::Unreachable(
         SelectorBoundaryError::SelectorUnavailable,
     ));
-    let (cancel, cancel_bytes) = fixture
-        .provider
-        .cancel_request([5; 16], [6; 16], [7; 16], [8; 32])?;
+    let (cancel, cancel_bytes) =
+        fixture
+            .provider
+            .cancel_request([5; 16], derived_nonce("guest tests"), [7; 16], [8; 32])?;
     let cancelled = served.client.cancel(
         &fixture.provider,
         &cancel,
@@ -268,9 +279,12 @@ fn an_unreachable_provider_fails_cancel_and_reconcile_through_the_one_transport(
         Duration::from_secs(2),
     );
     assert_eq!(cancelled.err(), unreachable);
-    let (reconcile, reconcile_bytes) = fixture
-        .provider
-        .reconcile_request([5; 16], [6; 16], [7; 16], [8; 32])?;
+    let (reconcile, reconcile_bytes) = fixture.provider.reconcile_request(
+        [5; 16],
+        derived_nonce("guest tests"),
+        [7; 16],
+        [8; 32],
+    )?;
     let reconciled = served.client.reconcile(
         &fixture.provider,
         &reconcile,

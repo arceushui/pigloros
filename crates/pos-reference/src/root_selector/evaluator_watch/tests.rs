@@ -166,28 +166,38 @@ fn a_failed_poll_is_reported_and_cancels_nothing() -> TestResult {
     Ok(())
 }
 
-/// What `watch_evaluator` cancelled, for a scripted evaluator and attempt.
-fn cancelled(
+/// The evaluator end, the watcher's wake end, and the end that stays open:
+/// the peer's when the evaluator did not hang up (the wake then ends the
+/// watch), the wake's otherwise.
+fn streams(
     hung_up: bool,
-    granted: bool,
-    finished: bool,
-) -> Result<Vec<[u8; 32]>, Box<dyn std::error::Error>> {
+) -> Result<(UnixStream, UnixStream, UnixStream), Box<dyn std::error::Error>> {
     let (evaluator, peer) = UnixStream::pair()?;
     let (wake, woken) = UnixStream::pair()?;
+    let open = if hung_up { wake } else { peer };
+    Ok((evaluator, woken, open))
+}
+
+/// An attempt that was granted and finished as scripted.
+fn attempt(granted: bool, finished: bool) -> InFlightAttempt {
     let in_flight = InFlightAttempt::default();
-    if hung_up {
-        drop(peer);
-    }
     if granted {
         in_flight.granted(DIGEST);
     }
     if finished {
         in_flight.finish();
     }
-    // Without a hang-up, the wake ends the watch.
-    if !hung_up {
-        drop(wake);
-    }
+    in_flight
+}
+
+/// What `watch_evaluator` cancelled, for a scripted evaluator and attempt.
+fn cancelled(
+    hung_up: bool,
+    granted: bool,
+    finished: bool,
+) -> Result<Vec<[u8; 32]>, Box<dyn std::error::Error>> {
+    let (evaluator, woken, _open) = streams(hung_up)?;
+    let in_flight = attempt(granted, finished);
     let mut cancelled = Vec::new();
     watch_evaluator(
         &evaluator,
@@ -442,4 +452,18 @@ fn a_panicking_cancel_discards_the_execute_result_and_unwinds_the_caller() -> Te
     });
     assert_eq!(receiver.recv_timeout(Duration::from_secs(10)), Ok(true));
     Ok(())
+}
+
+#[test]
+fn each_poll_flag_that_means_the_peer_is_gone_counts_alone_and_combined() {
+    let gone = [PollFlags::HUP, PollFlags::ERR, PollFlags::NVAL];
+    for flag in gone {
+        assert!(is_gone(flag));
+        assert!(is_gone(flag | PollFlags::IN));
+    }
+    assert!(is_gone(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL));
+    assert!(is_gone(PollFlags::ERR | PollFlags::NVAL));
+    assert!(!is_gone(PollFlags::empty()));
+    assert!(!is_gone(PollFlags::IN));
+    assert!(!is_gone(PollFlags::IN | PollFlags::OUT));
 }

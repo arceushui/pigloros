@@ -10,18 +10,21 @@ use crate::sandbox_provider_protocol::SandboxAdmissionError;
 use crate::sandbox_provider_protocol::{ReconciliationEvidence, TerminalEvidenceCheck};
 use crate::selector::SelectorBoundaryError;
 use crate::selector_transport_test_fixture::{
-    authenticated_transport_fixture, TransportAdmissionFixture,
+    authenticated_transport_fixture, derived_nonce, TransportAdmissionFixture,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const REQUEST_ID: [u8; 16] = [5; 16];
-const NONCE: [u8; 16] = [6; 16];
 const ATTEMPT: [u8; 16] = [7; 16];
 const AGR1: [u8; 32] = [8; 32];
 const SPY1: [u8; 32] = [9; 32];
 const SAU1: [u8; 32] = [10; 32];
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+fn nonce() -> [u8; 16] {
+    derived_nonce("provider transport control tests")
+}
 
 fn accepted() -> ReconciliationEvidenceFields {
     ReconciliationEvidenceFields {
@@ -161,9 +164,10 @@ fn join(provider: Provider) -> TestResult<Vec<u8>> {
 #[test]
 fn reconcile_sends_the_exact_srq1_and_recomputes_the_tuple() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
-    let (request, bytes) = fixture
-        .provider
-        .reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, bytes) =
+        fixture
+            .provider
+            .reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let digest = ReconciliationEvidence::new(&accepted())?.digest();
     let server = provider(Some(sry1(&fixture, digest)?))?;
     let verified = server.transport.reconcile(
@@ -181,9 +185,10 @@ fn reconcile_sends_the_exact_srq1_and_recomputes_the_tuple() -> TestResult {
 #[test]
 fn reconcile_refuses_a_signed_digest_that_is_not_the_recomputed_one() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
-    let (request, bytes) = fixture
-        .provider
-        .reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, bytes) =
+        fixture
+            .provider
+            .reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let server = provider(Some(sry1(&fixture, [77; 32])?))?;
     let result = server.transport.reconcile(
         &fixture.provider,
@@ -209,7 +214,7 @@ fn cancel_sends_the_exact_scq1_and_authenticates_the_scy1() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let (request, bytes) = fixture
         .provider
-        .cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+        .cancel_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let server = provider(Some(scy1(&fixture)?))?;
     let verified =
         server
@@ -223,9 +228,10 @@ fn cancel_sends_the_exact_scq1_and_authenticates_the_scy1() -> TestResult {
 #[test]
 fn each_authenticated_spe1_code_maps_to_its_refusal() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
-    let (request, bytes) = fixture
-        .provider
-        .reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, bytes) =
+        fixture
+            .provider
+            .reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let expected = [
         (11, ProviderControlRefusal::Pending11, true),
         (12, ProviderControlRefusal::Busy12, true),
@@ -250,9 +256,10 @@ fn each_authenticated_spe1_code_maps_to_its_refusal() -> TestResult {
 #[test]
 fn an_spe1_bound_to_another_request_or_operation_is_evidence_failure() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
-    let (request, bytes) = fixture
-        .provider
-        .reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, bytes) =
+        fixture
+            .provider
+            .reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let mismatched = [
         spe1(&fixture, 3, [99; 16], request.request_digest, 15)?,
         spe1(&fixture, 3, REQUEST_ID, [99; 32], 15)?,
@@ -287,9 +294,10 @@ fn an_spe1_bound_to_another_request_or_operation_is_evidence_failure() -> TestRe
 #[test]
 fn unauthenticated_and_missing_answers_are_distinguished() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
-    let (request, bytes) = fixture
-        .provider
-        .reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, bytes) =
+        fixture
+            .provider
+            .reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let server = provider(Some(b"not cbor".to_vec()))?;
     let garbage = server
         .transport
@@ -315,7 +323,7 @@ fn a_foreign_provider_process_receives_no_request() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let (request, bytes) = fixture
         .provider
-        .cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+        .cancel_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let server = provider(None)?;
     let transport = server.transport.expecting(1, 1);
     let result = transport.cancel(&fixture.provider, &request, &bytes, None, TIMEOUT);
@@ -339,7 +347,7 @@ fn a_cancel_refusal_is_bound_to_operation_two() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let (request, bytes) = fixture
         .provider
-        .cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+        .cancel_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let answer = spe1(&fixture, 2, REQUEST_ID, request.request_digest, 12)?;
     let server = provider(Some(answer))?;
     let result = server
