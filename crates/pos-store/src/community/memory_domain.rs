@@ -264,6 +264,7 @@ impl MemoryCommunityDomainV1 {
                 pass_records: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 pass_horizons: None,
+                #[cfg(target_os = "linux")]
                 pass_aborts: BTreeMap::new(),
             })
         }

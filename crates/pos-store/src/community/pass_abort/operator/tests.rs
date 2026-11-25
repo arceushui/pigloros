@@ -9,10 +9,10 @@ use pos_core::community_lifecycle::{
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1,
     CommunityCurrentViewV1, CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error,
     CommunityMemberSlotsV1, CommunityMetadataPolicyV1, CommunityPassFrontierV1, CommunityPassKeyV1,
-    CommunityRecordKindsV1, CommunityReservationInputV1, CommunityReservationV1,
-    CommunitySharedCountsV1,
+    CommunityProfileMemberV1, CommunityRecordKindsV1, CommunityReservationInputV1,
+    CommunityReservationV1, CommunitySharedCountsV1,
 };
-use pos_core::{AuthorityTrustRootSealV1, Hash};
+use pos_core::{AuthorityTrustRootSealV1, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
 
 use super::{
@@ -33,7 +33,7 @@ use crate::community::{
 use crate::community_initialization_fixture::{
     hash, initial_head, initialize_target, metadata_authority, metadata_registry, profile_until,
     target, Bootstrapped, Fallible, Roster, DATA_LEAF, EXPIRES, GENERATION, HORIZON,
-    INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
+    INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW, SCHEMA,
 };
 
 /// The trust-root seal of the test composition.
@@ -65,6 +65,8 @@ struct Case {
     roster: Roster,
     domain: Bootstrapped,
     head: Hash,
+    /// A third roster member of a Plugin the registry holds no release of.
+    extra_plugin: Option<ImplementationKeyV1>,
 }
 
 impl Case {
@@ -82,6 +84,7 @@ impl Case {
             roster,
             domain,
             head,
+            extra_plugin: None,
         })
     }
 
@@ -94,6 +97,7 @@ impl Case {
             roster,
             domain,
             head: hash(0x30),
+            extra_plugin: None,
         })
     }
 
@@ -222,7 +226,18 @@ impl Case {
             CommunityPassAbortCallV1<'_>,
         ) -> T,
     ) -> Fallible<T> {
-        let rows = self.roster.rows()?;
+        let mut rows = self.roster.rows()?;
+        if let Some(implementation) = &self.extra_plugin {
+            rows.push(CommunityProfileMemberV1::new(
+                "Entry-C_1",
+                implementation,
+                hash(0x55),
+                SCHEMA,
+                hash(6),
+                self.roster.initializer(),
+                10,
+            )?);
+        }
         let profile = profile_until(&rows, HORIZON, hash(1), self.domain.world.catalogue)?;
         let policy = CommunityMetadataPolicyV1::new(*self.domain.policy.as_input())?;
         let context = CommunityQuarantineContextV1 {
@@ -694,5 +709,43 @@ fn a_refused_commit_leaves_the_pass_unresolved() -> TestResult {
         .domain()
         .pending_reservations
         .contains_key(&(target(), OPERATION)));
+    Ok(())
+}
+
+/// Owner decision on #560, 2026-11-25 (R6.5(4) erratum): a roster Plugin
+/// with no active release has the row its Reserve retained, so the Abort is
+/// never refused for it and its CAV1 is never partial. The registry has no
+/// release of the third member's Plugin; the CDP1 the call installs names it.
+#[test]
+fn a_plugin_with_no_active_release_has_its_reserve_time_row() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let missing = ImplementationKeyV1::new("no.release".into(), "host-v1".into(), hash(0x56))?;
+    case.extra_plugin = Some(missing);
+    case.abort(Reason::AuthenticatedCancellation)??;
+    let records = case.records()?;
+    let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
+    let rows = &view.as_input().trust_rows;
+    assert_eq!(rows.len(), 2);
+    let retained = rows
+        .iter()
+        .find(|row| row.plugin_id == "no.release")
+        .ok_or("no retained row")?;
+    assert_eq!(retained.policy_digest, hash(87));
+    assert_eq!(retained.active_manifest_digest, hash(0x55));
+    assert_eq!(retained.active_release_digest, hash(0x56));
+    assert_eq!(
+        (
+            retained.policy_floor,
+            retained.release_floor,
+            retained.highest_trusted_utc_second
+        ),
+        (0, 0, 0)
+    );
+    let current = rows
+        .iter()
+        .find(|row| row.plugin_id != "no.release")
+        .ok_or("no registry row")?;
+    assert_ne!(current.active_manifest_digest, hash(0x55));
     Ok(())
 }
