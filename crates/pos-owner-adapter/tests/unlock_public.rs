@@ -318,14 +318,14 @@ fn sign_count(bytes: &[u8]) -> Option<u32> {
 }
 
 /// Valid `SubjectKeyWrapV1` bytes for `SUBJECT` at epoch 1 under `rp_id`.
-fn wrap_fixture(rp_id: &str, salt: u8) -> TestResult<Vec<u8>> {
+fn wrap_fixture(rp_id: &str, salt_label: &str) -> TestResult<Vec<u8>> {
     let params = SubjectKeyWrapParamsV1 {
         subject_id: entity(SUBJECT),
         epoch: 1,
         rp_id: rp_id.to_owned(),
         credential_id: CREDENTIAL_ID.to_vec(),
         prf_input: derived("wrap fixture prf input"),
-        wrap_salt: derived(&format!("wrap fixture wrap salt {salt}")),
+        wrap_salt: derived(salt_label),
         subkey_salt: derived("wrap fixture subkey salt"),
         wrap_nonce: derived("wrap fixture wrap nonce"),
     };
@@ -549,7 +549,10 @@ fn an_update_writes_only_over_the_wrap_and_binding_it_opened() -> TestResult {
     let mut adapter = open(&fixture.lock, &mut fixture.store, 1)?;
     open_pending(&mut adapter)?;
     let wrap = fixture.read(&wrap_name(1))?;
-    fixture.put(&wrap_name(1), &wrap_fixture("localhost", 7)?)?;
+    fixture.put(
+        &wrap_name(1),
+        &wrap_fixture("localhost", "update replacement wrap salt")?,
+    )?;
     assert_eq!(
         adapter.persist_binding_update(&update(4, false)),
         Err(REGISTRY)
@@ -684,7 +687,10 @@ fn opening_refuses_a_wrap_outside_localhost_and_a_binding_of_another_subject_or_
 ) -> TestResult {
     let changes: [(&str, Change); 3] = [
         ("foreign RP", |fixture| {
-            fixture.put(&wrap_name(1), &wrap_fixture("example.com", 2)?)
+            fixture.put(
+                &wrap_name(1),
+                &wrap_fixture("example.com", "replacement wrap salt")?,
+            )
         }),
         ("foreign subject", |fixture| {
             let name = binding_name(1);
@@ -708,7 +714,10 @@ fn opening_refuses_a_wrap_outside_localhost_and_a_binding_of_another_subject_or_
     // The same replacement wrap under `localhost` passes the cross-check:
     // only the RP ID refused it above.
     let mut fixture = Fixture::enrolled(honest())?;
-    fixture.put(&wrap_name(1), &wrap_fixture("localhost", 2)?)?;
+    fixture.put(
+        &wrap_name(1),
+        &wrap_fixture("localhost", "replacement wrap salt")?,
+    )?;
     assert!(open(&fixture.lock, &mut fixture.store, 1).is_ok());
     Ok(())
 }
