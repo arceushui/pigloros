@@ -351,16 +351,25 @@ fn reuse() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
 fn other_operation(
     domain: &mut MemoryCommunityDomainV1,
 ) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
-    let state = domain.pass_states.get(&id(1)).ok_or("state")?;
-    let mut other = input()?;
-    other.selected_head = state.head;
-    other.prior_shared_counts = state.counters;
-    other.reservation_operation_id = [0x77; 16];
+    let mut other = other_call(domain)?;
     // A new materialization carries the ordinal burned for it just now.
     let burned = domain.burn_materialization_ordinal(&SEAL)?;
     if let Some(minted) = other.minted.as_mut() {
         minted.reference.producer_ordinal = burned;
     }
+    Ok(other)
+}
+
+/// A second operation of T over the head and counters the domain holds now,
+/// with no burn: its materialization still carries `reference()`'s ordinal.
+fn other_call(
+    domain: &MemoryCommunityDomainV1,
+) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
+    let state = domain.pass_states.get(&id(1)).ok_or("state")?;
+    let mut other = input()?;
+    other.selected_head = state.head;
+    other.prior_shared_counts = state.counters;
+    other.reservation_operation_id = [0x77; 16];
     bound(other).map_err(Box::<dyn std::error::Error>::from)
 }
 
@@ -1784,75 +1793,68 @@ fn the_recording_horizon_is_the_installed_one() -> TestResult {
 #[test]
 fn the_pass_facts_must_agree_with_each_other() -> TestResult {
     let domain = domain()?;
-    let member = |roster_index: usize| CommunityPassMemberDigestsV1 {
+    let member = |roster_index: usize, cmb1: u8| CommunityPassMemberDigestsV1 {
         roster_index,
-        cmb1_digest: hash(100 + u8::try_from(roster_index).unwrap_or(0)),
+        cmb1_digest: hash(cmb1),
         cin1_digest: hash(86),
         trust_policy_snapshot_digest: hash(87),
     };
-    let with = |edit: &dyn Fn(&mut CommunityReserveInputV1)| {
+    // A call whose members, trace rows, `F_p` and prepared input set agree
+    // with each other, so that a case fails only on the term it changes.
+    let with_members = |members: Vec<CommunityPassMemberDigestsV1>| {
         let mut call = input()?;
-        edit(&mut call);
-        Ok::<_, Box<dyn std::error::Error>>(domain.stage_reserve(call).err())
+        let rows = members.len() as u64 + 1;
+        let mut pairs: Vec<(Hash, Hash)> = members
+            .iter()
+            .map(|member| (member.cmb1_digest, member.cin1_digest))
+            .collect();
+        pairs.sort_by_key(|pair| pair.0);
+        call.request.prepared_input_set_digest = input_set(&pairs);
+        call.pass.members = members;
+        call.pass.trace_rows = rows;
+        call.failure_reserve = 2 * rows;
+        Ok::<_, Box<dyn std::error::Error>>(call)
     };
-    // Two members in order agree with three trace rows and six targets.
-    let mut two = input()?;
-    two.pass.members = vec![member(0), member(1)];
-    two.request.prepared_input_set_digest =
-        input_set(&[(hash(100), hash(86)), (hash(101), hash(86))]);
-    two.pass.trace_rows = 3;
-    two.failure_reserve = 6;
-    assert!(domain.stage_reserve(two).is_ok());
+    let refused = |call: CommunityReserveInputV1| domain.stage_reserve(call).err();
+    // Two members in order, one trace row and two targets more each.
+    assert!(domain
+        .stage_reserve(with_members(vec![member(0, 100), member(1, 101)])?)
+        .is_ok());
+    // No due member, with the trace rows, `F_p` and set of an empty pass.
     assert_eq!(
-        with(&|call| call.pass.members.clear())?,
+        refused(with_members(Vec::new())?),
         Some(Error::InvalidBinding)
     );
-    assert_eq!(
-        with(&|call| call.pass.trace_rows = 3)?,
-        Some(Error::InvalidBinding)
-    );
-    assert_eq!(
-        with(&|call| call.failure_reserve = 5)?,
-        Some(Error::InvalidBinding)
-    );
-    assert_eq!(
-        with(&|call| call.pass.failure_cohort_key = call.pass.metadata_key)?,
-        Some(Error::InvalidBinding)
-    );
-    // No due member, even with the trace rows and `F_p` of an empty pass.
-    let mut empty = input()?;
-    empty.pass.members.clear();
-    empty.pass.trace_rows = 1;
-    empty.failure_reserve = 2;
-    assert_eq!(
-        domain.stage_reserve(empty).err(),
-        Some(Error::InvalidBinding)
-    );
-    // A member row beyond the installed roster, and a key list that is
-    // short or long for it.
-    let mut beyond = input()?;
-    beyond.pass.members = vec![member(2)];
-    assert_eq!(
-        domain.stage_reserve(beyond).err(),
-        Some(Error::InvalidBinding)
-    );
-    for keys in [1_usize, 3] {
-        let mut call = input()?;
-        call.roster_quarantine_keys = (0..keys).map(|_| hash(50)).collect();
+    // Roster indices that repeat or descend, with distinct member digests.
+    for indices in [[1, 1], [1, 0]] {
         assert_eq!(
-            domain.stage_reserve(call).err(),
+            refused(with_members(vec![
+                member(indices[0], 100),
+                member(indices[1], 101)
+            ])?),
             Some(Error::InvalidBinding)
         );
     }
-    for indices in [[1, 1], [2, 1]] {
+    // A member row beyond the installed roster.
+    assert_eq!(
+        refused(with_members(vec![member(2, 100)])?),
+        Some(Error::InvalidBinding)
+    );
+    // Trace rows, `F_p` and the key IDs, each alone.
+    let mut rows = input()?;
+    rows.pass.trace_rows = 3;
+    assert_eq!(refused(rows), Some(Error::InvalidBinding));
+    let mut reserve = input()?;
+    reserve.failure_reserve = 5;
+    assert_eq!(refused(reserve), Some(Error::InvalidBinding));
+    let mut keys = input()?;
+    keys.pass.failure_cohort_key = keys.pass.metadata_key;
+    assert_eq!(refused(keys), Some(Error::InvalidBinding));
+    // A key list that is short or long for the installed roster.
+    for count in [1_usize, 3] {
         let mut call = input()?;
-        call.pass.members = vec![member(indices[0]), member(indices[1])];
-        call.pass.trace_rows = 3;
-        call.failure_reserve = 6;
-        assert_eq!(
-            domain.stage_reserve(call).err(),
-            Some(Error::InvalidBinding)
-        );
+        call.roster_quarantine_keys = (0..count).map(|_| hash(50)).collect();
+        assert_eq!(refused(call), Some(Error::InvalidBinding));
     }
     Ok(())
 }
@@ -2022,6 +2024,20 @@ fn a_minted_observation_carries_the_ordinal_just_burned() -> TestResult {
     let staged = domain.stage_reserve(minting(burned)?)?;
     domain.apply_reserve(&SEAL, staged)?;
     assert_eq!(domain.burned_materialization, None);
+    // A second minted Reserve (after an Abort, which code 7 would precede)
+    // that carries the consumed ordinal is refused and burns nothing.
+    let abort = domain.stage_abort(id(1), OPERATION, 0)?;
+    domain.apply_abort(&SEAL, &abort)?;
+    let mut again = other_call(&domain)?;
+    if let Some(minted) = again.minted.as_mut() {
+        minted.reference.producer_ordinal = burned;
+    }
+    assert_eq!(
+        domain.stage_reserve(again).err(),
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(domain.burned_materialization, None);
+    assert_eq!(domain.native_producer_ordinal, burned + 1);
     Ok(())
 }
 
@@ -2115,6 +2131,9 @@ fn an_invalid_request_or_reservation_is_refused_with_3() -> TestResult {
     }
     let mut call = input()?;
     call.reservation_sample_micros = i64::MAX as u64;
+    if let Some(minted) = call.minted.as_mut() {
+        minted.not_after_micros = top;
+    }
     assert_eq!(
         domain.stage_reserve(call).err(),
         Some(Error::InvalidBinding)
@@ -2257,9 +2276,17 @@ fn the_request_must_name_the_pass_members() -> TestResult {
     two.request.prepared_input_set_digest =
         input_set(&[(hash(110), hash(86)), (hash(120), hash(86))]);
     assert!(domain.stage_reserve(two.clone()).is_ok());
-    // The same digests in roster order are not the set's order.
+    // The roster order (120, 110) is accepted only because the writer sorts
+    // by member digest first. A set naming one member, and members that
+    // share a digest, are refused.
+    two.request.prepared_input_set_digest = input_set(&[(hash(110), hash(86))]);
+    assert_eq!(
+        domain.stage_reserve(two.clone()).err(),
+        Some(Error::InvalidBinding)
+    );
+    two.pass.members = vec![member(0, 110), member(1, 110)];
     two.request.prepared_input_set_digest =
-        input_set(&[(hash(120), hash(86)), (hash(110), hash(86))]);
+        input_set(&[(hash(110), hash(86)), (hash(110), hash(86))]);
     assert_eq!(domain.stage_reserve(two).err(), Some(Error::InvalidBinding));
     Ok(())
 }

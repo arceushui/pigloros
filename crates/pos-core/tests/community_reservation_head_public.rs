@@ -620,5 +620,14 @@ fn the_prepared_input_set_digest_is_the_domain_separated_pair_array() -> TestRes
         community_prepared_input_set_digest_v1(&many),
         Err(Error::BoundsExceeded)
     );
+    // Exactly 64 pairs are a set, and the empty set is the empty array.
+    assert!(community_prepared_input_set_digest_v1(&many[..64]).is_ok());
+    let mut empty = blake3::Hasher::new();
+    empty.update(b"PiglorOS.Community.PreparedInputSet.v1\0");
+    empty.update(&[0x80]);
+    assert_eq!(
+        community_prepared_input_set_digest_v1(&[])?,
+        Hash::from_bytes(*empty.finalize().as_bytes())
+    );
     Ok(())
 }

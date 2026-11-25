@@ -43,18 +43,18 @@
 //! anything, and `apply_reserve` refuses (`Conflict`) a token whose ordinals
 //! another burn or pass has moved since, then advances both. A minted
 //! materialization must carry the ordinal the step-5h burn made last, which
-//! no Reserve has consumed yet.
+//! no minted Reserve has consumed yet.
 //!
 //! A Reserve replay is refused here as well as by the pipeline's step 4a
 //! discovery: `pass_records` keeps every pass with its status after it
 //! resolves, so a recorded identity, pending or resolved, is a `Conflict`
-//! at stage and at apply, before the head and counters are compared. The
-//! discovery still answers a replay from its original outcome first; this
-//! refusal is the backstop.
+//! at stage, before the generation, head and counters are compared, and
+//! again at the apply. The discovery still answers a replay from its
+//! original outcome first; this refusal is the backstop.
 //!
-//! Neither apply re-runs the budget, caps, head or counters compares; a
-//! token staged before another operation changed them is for the pipeline
-//! to discard.
+//! No apply re-runs the budget, caps, head or counters compares; a token
+//! staged before another operation changed them is for the pipeline to
+//! discard.
 
 use pos_core::community_lifecycle::{
     community_prepared_input_set_digest_v1, CommunityGraphCountsV1,
@@ -248,34 +248,39 @@ impl MemoryCommunityDomainV1 {
     /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
-    /// Returns `InvalidBinding` when the minted rows exceed the pass rows;
+    /// In order. `InvalidBinding` when the minted rows exceed the pass rows,
     /// when the request's T, G, identity or expected head differs from the
-    /// call's; when the pass facts disagree (members, trace rows, `F_p`,
-    /// key IDs); when the request is not a valid CRI1 (3, also for a
-    /// requested horizon outside `1..=i64::MAX`), carries a prepared input
-    /// set digest other than the facts' pairs' or names a profile other than
-    /// the installed one; or when the roster keys or member rows do not fit
-    /// the installed roster. Then `EvidenceUnavailable` with no
-    /// installed horizons, `Conflict` for a reservation identity already
+    /// call's, when the request is not a valid CRI1 (a requested horizon
+    /// outside `1..=i64::MAX` too: a `run_pass` refusal never gives 2,
+    /// R10.4(2)), when its prepared input set digest is not the pass facts'
+    /// pairs', or when the pass facts disagree (members, trace rows, `F_p`,
+    /// key IDs). `EvidenceUnavailable` with no installed horizons.
+    /// `InvalidBinding` when the request names a profile other than the
+    /// installed one or the roster keys or member rows do not fit the
+    /// installed roster. `Conflict` for a reservation identity already
     /// recorded, resolved or not, and `PassUnresolved` (7) for another
-    /// unresolved pass of T. These come first, as R10.7 steps 4a and 4c
-    /// precede 5j; the byte-equal bound-content compare of R8.1(7) is the
-    /// call layer's. Then `EvidenceUnavailable` for a Timeline with no pass
-    /// state; `InvalidBinding` when T was initialized under another profile
-    /// than the request names; `EvidenceUnavailable` for a reused reference
-    /// no Reserve minted, and for a Logical
-    /// Head or chain that no longer matches the minted or the reused cut
-    /// (12); `EvidenceExpired` (13) when `H_g` does not outlast the
-    /// decision bound; then in the step-5j order `StaleGeneration` (5),
-    /// `StaleFrontier` (6) for a moved head or counters, a reused
-    /// observation of another generation or one that outlives less than
-    /// `H_g`, a minted observation whose records end before `H_g`, or a
-    /// budget the pending reservations now fill,
-    /// `Quarantined` (9), `CapacityExhausted` (14) and
-    /// `RecordingUnavailable` (19), and the budget read's error. A call that
-    /// names both or neither of a minted and a reused observation, or a
-    /// minted one whose nodes do not carry the ordinal the last 5h burn made
-    /// (not yet consumed), gives `InvalidBinding` once the state is found.
+    /// unresolved pass of T; these precede 5j, as R10.7 steps 4a and 4c do,
+    /// and the byte-equal bound-content compare of R8.1(7) is the call
+    /// layer's.
+    ///
+    /// Then `EvidenceUnavailable` for a Timeline with no pass state;
+    /// `InvalidBinding` when T was initialized under another profile than
+    /// the request names; and in the step-5j order `EvidenceUnavailable` for
+    /// a reused reference no Reserve minted and for a Logical Head or chain
+    /// that no longer matches the minted or the reused cut (12), with
+    /// `InvalidBinding` for a call that names both or neither of a minted
+    /// and a reused observation and for a minted observation that does not
+    /// carry the ordinal the last 5h burn made and no Reserve consumed;
+    /// `EvidenceExpired` (13) when `H_g` does not outlast the decision
+    /// bound; `StaleGeneration` (5); `StaleFrontier` (6) for a moved head or
+    /// counters, a reused observation of another generation or one that
+    /// outlives less than `H_g`, a minted observation whose records end
+    /// before `H_g`, or a budget the pending reservations now fill (the
+    /// budget read's error otherwise); `Quarantined` (9);
+    /// `CapacityExhausted` (14); `RecordingUnavailable` (19). Last,
+    /// `CapacityExhausted` (14) when an ordinal has no next value and
+    /// `InvalidBinding` when the CPR1 does not validate (an `H_r` outside
+    /// `1..=i64::MAX`).
     pub fn stage_reserve(
         &self,
         input: CommunityReserveInputV1,
@@ -356,12 +361,16 @@ impl MemoryCommunityDomainV1 {
         Ok((native, pass))
     }
 
-    /// Burn the next native producer ordinal for a minted materialization
-    /// (R10.7 step 5h, R9.7 step 4). This is the only step that burns an
+    /// Burn the next native producer ordinal for a minted materialization.
+    ///
+    /// This is R10.7 step 5h (R9.7 step 4), the only step that burns an
     /// ordinal on its own: a later refusal leaves it burned, and a reused
     /// observation never calls it. A minted Reserve must carry the ordinal
     /// burned last and not yet consumed (3), so its nodes cannot collide with
-    /// an earlier pass's producer ordinal.
+    /// an earlier pass's producer ordinal. A Reserve that fails after the
+    /// pipeline published the materialization's ARD1 rows leaves the burn
+    /// outstanding; only the pipeline's mandatory 5h re-burn keeps the
+    /// ordinal from being reused.
     ///
     /// # Errors
     /// Returns `CapacityExhausted` when the counter has no next ordinal; the
@@ -571,6 +580,24 @@ impl MemoryCommunityDomainV1 {
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedReserveV1,
     ) -> Result<(), Error> {
+        self.check_apply(&staged)?;
+        let (timeline, _) = staged.key;
+        self.native_producer_ordinal = staged.native_ordinal;
+        if staged.minted.is_some() {
+            // The burned ordinal is consumed by the materialization.
+            self.burned_materialization = None;
+        }
+        self.pending_reservations.insert(staged.key, staged.entry);
+        self.pass_records.insert(staged.key, staged.record);
+        self.pass_states.entry(timeline).and_modify(|state| {
+            state.highest_pass_ordinal = staged.pass_ordinal;
+            record_reserve(state, staged.minted);
+        });
+        Ok(())
+    }
+
+    /// The refusals of an apply, none of which changes the domain.
+    fn check_apply(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
         let (timeline, _) = staged.key;
         if self.pending_reservations.contains_key(&staged.key)
             || self.pass_records.contains_key(&staged.key)
@@ -595,37 +622,10 @@ impl MemoryCommunityDomainV1 {
         if floor.checked_add(1) != Some(staged.pass_ordinal)
             || self.native_producer_ordinal.checked_add(1) != Some(staged.native_ordinal)
         {
-            return Err(Error::Conflict);
+            Err(Error::Conflict)
+        } else {
+            Ok(())
         }
-        self.native_producer_ordinal = staged.native_ordinal;
-        if staged.minted.is_some() {
-            // The burned ordinal is consumed by the materialization.
-            self.burned_materialization = None;
-        }
-        self.pending_reservations.insert(staged.key, staged.entry);
-        self.pass_records.insert(staged.key, staged.record);
-        self.pass_states.entry(timeline).and_modify(|state| {
-            state.highest_pass_ordinal = staged.pass_ordinal;
-            let counts = state.generations.entry(state.generation).or_default();
-            counts.outcomes = counts.outcomes.saturating_add(1);
-            if let Some(minted) = staged.minted {
-                counts.materializations = counts.materializations.saturating_add(1);
-                state.counters = add_counts(state.counters, minted.additions);
-                state.observations.insert(minted.reference, minted.graph);
-                state.retained.insert(
-                    minted.reference,
-                    CommunityRetainedObservationV1 {
-                        generation: state.generation,
-                        not_after_micros: minted.not_after_micros,
-                        cut: minted.cut,
-                    },
-                );
-                state
-                    .scope_rows
-                    .insert(minted.scope_reference, minted.scope);
-            }
-        });
-        Ok(())
     }
 
     /// Check a Commit against its pending entry: it binds no more rows than
@@ -829,9 +829,10 @@ fn mint_reservation(
             })
         })
         .map(|reservation| *reservation.as_input())
-        // A type-unifying conversion: `H_r <= H_g <= i64::MAX` is guaranteed
-        // by the installation checks, so this is reached only by writing the
-        // installed horizons directly.
+        // The CPR1 constructor refuses an `H_r` outside `1..=i64::MAX` with 2;
+        // a `run_pass` refusal never gives 2 (R10.4(2)), so it is 3. The
+        // installation checks guarantee `H_r <= H_g <= i64::MAX`, so this is
+        // reached only by writing the installed horizons directly.
         .map_err(|_| Error::InvalidBinding)
 }
 
@@ -887,6 +888,30 @@ pub fn community_reserve_selection_v1(
         metadata_not_after_micros: fields.metadata_not_after_micros,
     })
     .map(|successor| successor.to_canonical_cbor())
+}
+
+/// One more retained outcome and, for a minted materialization, its
+/// additions to the counters, its closure terms and scope rows, the
+/// observation it retains for reuse and one more control operation.
+fn record_reserve(state: &mut CommunityPassStateV1, minted: Option<CommunityMintedObservationV1>) {
+    let counts = state.generations.entry(state.generation).or_default();
+    counts.outcomes = counts.outcomes.saturating_add(1);
+    if let Some(minted) = minted {
+        counts.materializations = counts.materializations.saturating_add(1);
+        state.counters = add_counts(state.counters, minted.additions);
+        state.observations.insert(minted.reference, minted.graph);
+        state.retained.insert(
+            minted.reference,
+            CommunityRetainedObservationV1 {
+                generation: state.generation,
+                not_after_micros: minted.not_after_micros,
+                cut: minted.cut,
+            },
+        );
+        state
+            .scope_rows
+            .insert(minted.scope_reference, minted.scope);
+    }
 }
 
 /// The counters with `added` on top, saturating like every counter.
