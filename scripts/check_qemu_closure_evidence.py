@@ -1311,12 +1311,13 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
     if evidence.line(f"{base}/sysctl") != value:
         raise EvidenceError(f"{name} did not run with net.core.fb_tunnels_only_for_init_net={value}")
     status = evidence.line(f"{base}/status")
-    stderr = evidence.text(f"{base}/stderr").strip()
+    stderr = evidence.text(f"{base}/stderr").strip(" \t\r\n")
     present = sorted(probe for probe in NETWORK_PROBE_FILES if (evidence.root / base / probe).exists())
     if status != "0":
+        silent = "" if stderr else " (empty: --quiet systemd-run logs a start-job or unit failure only at debug level)"
         raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
-                            f"stderr: {stderr[:400]!r}; probe files written: {present}; "
-                            f"journal in {base}/journal")
+                            f"stderr: {stderr[:400]!r}{silent}; probe files written: {present}; "
+                            f"the explanation is in {base}/journal")
     if stderr:
         raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr[:400]!r}")
     if present != sorted(NETWORK_PROBE_FILES):

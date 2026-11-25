@@ -1430,8 +1430,21 @@ class EvidenceTests(unittest.TestCase):
             self.verdict(change=incomplete)
         with self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr: 'warning'"):
             self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": "warning\n"}))
-        # Whitespace alone is no output.
-        self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": " \n"}))
+        # ASCII whitespace alone is no output, but other Unicode whitespace is output.
+        self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": " \t\r\n"}))
+        for text in ("\u00a0", "\u001c", "\u001f", "\u2028", "\u3000"):
+            with self.subTest(stderr=text), self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr"):
+                self.verdict(change=lambda f, text=text: f.update({"guest/network/fb-2/stderr": text + "\n"}))
+        # A failure that systemd-run logged only to the journal leaves stderr empty; say so.
+        def logged_only(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-1/{name}")
+            files["guest/network/fb-1/status"] = "1\n"
+            files["guest/network/fb-1/stderr"] = ""
+        with self.assertRaisesRegex(checker.EvidenceError,
+                                    r"stderr: '' \(empty: --quiet systemd-run logs .*; probe files written: \[\]; "
+                                    r"the explanation is in guest/network/fb-1/journal"):
+            self.verdict(change=logged_only)
         # A record with a missing run file or an unexpected file is named precisely, with the
         # probe files that exist.
         with self.assertRaisesRegex(
