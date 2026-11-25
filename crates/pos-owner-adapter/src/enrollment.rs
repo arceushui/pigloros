@@ -90,6 +90,8 @@ pub struct OwnerEnrollmentAdapter<'lock, S, R> {
     owner: SubjectOwnerExclusiveGuard<'lock>,
     context: EnrollmentContext,
     subject: EntityId,
+    /// The reserved wrap and binding names of this enrollment.
+    names: [SubjectKeyArtifactName; 2],
     store: S,
     random: R,
 }
@@ -127,19 +129,29 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
         let epoch = Inventory::read(lock)
             .and_then(|inventory| next_epoch(lock, &mut store, &owner_id, subject, &inventory))
             .map_err(BridgeError::Owner)?;
-        Ok(Self {
-            lock,
-            owner,
-            context: EnrollmentContext {
-                owner_id,
-                subject_id,
-                epoch,
-                owner_window,
-            },
-            subject,
-            store,
-            random,
-        })
+        let [wrap, binding] = [
+            SubjectKeyArtifactKind::Wrap,
+            SubjectKeyArtifactKind::Binding,
+        ]
+        .map(|kind| SubjectKeyArtifactName::new(kind, &owner_id, epoch));
+        wrap.zip(binding)
+            .map(<[_; 2]>::from)
+            .map(|names| Self {
+                lock,
+                owner,
+                context: EnrollmentContext {
+                    owner_id,
+                    subject_id,
+                    epoch,
+                    owner_window,
+                },
+                subject,
+                names,
+                store,
+                random,
+            })
+            // Unreachable: the owner is non-nil and the epoch is at least 1.
+            .ok_or(BridgeError::Owner(REGISTRY))
     }
 
     /// The context to pass to `OwnerBridge::enroll` with this adapter.
@@ -180,17 +192,6 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
             // Unreachable error: a validated binding always fits 4,096 bytes.
             .and_then(|binding| encode_subject_credential_binding(&binding, &mut buffer).ok())
             .map(|length| buffer[..length].to_vec())
-            .ok_or(REGISTRY)
-    }
-
-    /// The reserved wrap and binding names of this enrollment.
-    fn artifact_names(&self) -> Result<[SubjectKeyArtifactName; 2], OwnerError> {
-        let name =
-            |kind| SubjectKeyArtifactName::new(kind, &self.context.owner_id, self.context.epoch);
-        name(SubjectKeyArtifactKind::Wrap)
-            .zip(name(SubjectKeyArtifactKind::Binding))
-            .map(<[_; 2]>::from)
-            // Unreachable: open() derived a non-nil owner and the epoch is at least 1.
             .ok_or(REGISTRY)
     }
 
@@ -299,7 +300,6 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
         {
             return Err(REGISTRY);
         }
-        let names = self.artifact_names()?;
         let EnrollmentCandidate { root, wrap } = candidate;
         let root_material_digest = *root.material_digest().as_bytes();
         // Only the digest is needed from here on, so the root is wiped now.
@@ -315,12 +315,12 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
             data_next: 1,
             bootstrap_next: 1,
         };
-        if let Err(error) = self.stage(&names, [&wrap.to_bytes(), &binding], row) {
+        if let Err(error) = self.stage(&self.names, [&wrap.to_bytes(), &binding], row) {
             let attempt = Attempt {
                 subject: self.subject,
                 epoch,
                 store_file_id,
-                names: &names,
+                names: &self.names,
             };
             // A failed deletion leaves the staging record, so P5 recovery at
             // the next owner start finishes it; the staging error is returned.
