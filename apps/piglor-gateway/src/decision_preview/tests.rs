@@ -70,7 +70,8 @@ async fn send(
     if let Some(key) = key {
         builder = builder.header("idempotency-key", key);
     }
-    let request = builder.body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))?;
+    let request =
+        builder.body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))?;
     let response = app.clone().oneshot(request).await?;
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
@@ -326,7 +327,10 @@ async fn an_exact_retry_finishes_an_interrupted_preview() -> TestResult {
             .read_decision_preview(permit(gateway).await?, preview_id)
             .await,
     )?;
-    assert!(matches!(read.state, DecisionPreviewStateV1::Committed { .. }));
+    assert!(matches!(
+        read.state,
+        DecisionPreviewStateV1::Committed { .. }
+    ));
     assert_eq!(previews_events(gateway).await?, 2);
     served.gateway.shutdown().await?;
     drop(served);
@@ -349,7 +353,10 @@ async fn a_revoked_consent_refuses_retries_reads_and_fresh_requests() -> TestRes
     )?;
     let consent = served.consent;
     let claimed = request.clone();
-    on_host(&gateway, move |host| interrupted(host, &claimed, "k-2", consent, None)).await?;
+    on_host(&gateway, move |host| {
+        interrupted(host, &claimed, "k-2", consent, None)
+    })
+    .await?;
     let (status, _) = send(
         &served.app,
         "POST",

@@ -35,9 +35,8 @@ use std::{
 
 use pos_core::{
     store::{EventReadBounds, SeqRange},
-    CanonicalBytes, EntityId, ErasureHostErrorV1, Event, EventDraft, EventId,
-    GatewayRevisionKeyV1, GatewayRevisionKindV1, GatewayRevisionRecordV1, GatewayRevisionStateV1,
-    Kind, Seq,
+    CanonicalBytes, EntityId, ErasureHostErrorV1, Event, EventDraft, EventId, GatewayRevisionKeyV1,
+    GatewayRevisionKindV1, GatewayRevisionRecordV1, GatewayRevisionStateV1, Kind, Seq,
 };
 use pos_runtime::{
     match_score_v1, ErasureExecutionHostV1, PreviewClaimKeyV1, PreviewClaimV1,
@@ -535,8 +534,8 @@ fn bound_room(
 ) -> PreviewResult<EntityId> {
     let (_, revisions) =
         room_revisions(host, EntityId::from_ulid(reference.id)).map_err(room_error)?;
-    let event =
-        revision_at(&revisions, reference.revision.get()).ok_or(DecisionPreviewErrorV1::NotFound)?;
+    let event = revision_at(&revisions, reference.revision.get())
+        .ok_or(DecisionPreviewErrorV1::NotFound)?;
     let descriptor = descriptor_of(event).map_err(room_error)?;
     let provenance = revision_provenance_digest_v1(&descriptor.descriptor_hash(), event.id);
     let input = descriptor.input();

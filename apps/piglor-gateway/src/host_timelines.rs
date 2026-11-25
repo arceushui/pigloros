@@ -21,8 +21,7 @@ use pos_local_erasure_loader::local_principal::local_principal_authority_timelin
 use pos_runtime::ErasureExecutionHostV1;
 
 use crate::{
-    decision_preview::decision_previews_timeline,
-    local_principal::local_principal_consent_timeline,
+    decision_preview::decision_previews_timeline, local_principal::local_principal_consent_timeline,
 };
 
 /// The host Timelines of one store.
