@@ -81,6 +81,51 @@ class MemoryStoreBenchmarkCiPolicyTests(unittest.TestCase):
     def test_repository_workflows_pass(self) -> None:
         CHECKER.check_workflows(CI_WORKFLOW, BENCHMARK_WORKFLOW)
 
+    def test_benchmark_scope_tracks_build_inputs_without_test_only_trees(self) -> None:
+        paths = set(CHECKER.BENCHMARK_PATHS)
+        self.assertTrue(
+            {
+                "crates/pos-conformance/Cargo.toml",
+                "crates/pos-conformance/build.rs",
+                "crates/pos-conformance/src/**",
+                "fixtures/conformance/**",
+                "plugins/community/wit/pigloros-plugin.wit",
+                "crates/pos-core/Cargo.toml",
+                "crates/pos-core/src/**",
+                "crates/pos-core/tests/support/erasure.rs",
+                "crates/pos-crypto/Cargo.toml",
+                "crates/pos-crypto/src/**",
+                "crates/pos-plugin-content/Cargo.toml",
+                "crates/pos-plugin-content/resources/spdx-schema-2.3.1.json",
+                "crates/pos-plugin-content/src/**",
+                "crates/pos-plugin-release/Cargo.toml",
+                "crates/pos-plugin-release/src/**",
+                "crates/pos-store/Cargo.toml",
+                "crates/pos-store/benches/**",
+                "crates/pos-store/src/**",
+                ".cargo/config.toml",
+            }
+            <= paths
+        )
+        self.assertFalse(
+            {
+                "crates/pos-conformance/**",
+                "crates/pos-conformance/contracts/**",
+                "crates/pos-conformance/tests/**",
+                "crates/pos-conformance/vectors/**",
+                "crates/pos-core/**",
+                "crates/pos-core/tests/**",
+                "crates/pos-crypto/**",
+                "crates/pos-crypto/tests/**",
+                "crates/pos-reference/**",
+                "crates/pos-plugin-content/tests/**",
+                "crates/pos-plugin-release/tests/**",
+                "crates/pos-store/**",
+                "crates/pos-store/tests/**",
+            }
+            & paths
+        )
+
     def test_rejects_comparator_jobs_started_before_the_preflight_set(self) -> None:
         for job in ("test", "coverage"):
             for change in (
