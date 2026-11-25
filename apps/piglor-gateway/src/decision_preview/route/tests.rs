@@ -326,23 +326,24 @@ async fn exchange(app: &Router, request: Builder, body: Body) -> TestResult<Answ
     })
 }
 
-/// A JSON request of `actor`, when it names one.
-fn builder(method: &str, uri: &str, actor: Option<&str>) -> Builder {
-    let builder = Request::builder()
+/// A JSON request that names no actor.
+fn builder(method: &str, uri: &str) -> Builder {
+    Request::builder()
         .method(method)
         .uri(uri)
-        .header("content-type", "application/json");
-    match actor {
-        Some(actor) => builder.header(ACTOR_ENTITY_HEADER, actor),
-        None => builder,
-    }
+        .header("content-type", "application/json")
+}
+
+/// A JSON request of `actor`.
+fn acting(method: &str, uri: &str, actor: &str) -> Builder {
+    builder(method, uri).header(ACTOR_ENTITY_HEADER, actor)
 }
 
 /// `createDecisionPreview` of `body` by the fixture actor under `key`.
 async fn post_preview(app: &Router, key: &str, body: &Value) -> TestResult<Answer> {
     exchange(
         app,
-        builder("POST", PREVIEWS, Some(ACTOR)).header("idempotency-key", key),
+        acting("POST", PREVIEWS, ACTOR).header("idempotency-key", key),
         Body::from(body.to_string()),
     )
     .await
@@ -352,7 +353,7 @@ async fn post_preview(app: &Router, key: &str, body: &Value) -> TestResult<Answe
 async fn get_preview(app: &Router, preview_id: &str, actor: &str) -> TestResult<Answer> {
     exchange(
         app,
-        builder("GET", &format!("{PREVIEWS}/{preview_id}"), Some(actor)),
+        acting("GET", &format!("{PREVIEWS}/{preview_id}"), actor),
         Body::empty(),
     )
     .await
@@ -452,25 +453,25 @@ async fn the_release_composition_refuses_every_fresh_request() -> TestResult {
     versioned["schema_version"] = json!(2);
     for (sent_request, sent, status, code) in [
         (
-            builder("POST", PREVIEWS, Some(&stranger)).header("idempotency-key", "k-2"),
+            acting("POST", PREVIEWS, &stranger).header("idempotency-key", "k-2"),
             versioned.to_string(),
             StatusCode::BAD_REQUEST,
             "unsupported-version",
         ),
         (
-            builder("POST", PREVIEWS, Some(&stranger)),
+            acting("POST", PREVIEWS, &stranger),
             body.to_string(),
             StatusCode::BAD_REQUEST,
             "invalid-request",
         ),
         (
-            builder("POST", PREVIEWS, None).header("idempotency-key", "k-2"),
+            builder("POST", PREVIEWS).header("idempotency-key", "k-2"),
             body.to_string(),
             StatusCode::UNAUTHORIZED,
             "unauthenticated",
         ),
         (
-            builder("POST", PREVIEWS, Some(&stranger)).header("idempotency-key", "k-2"),
+            acting("POST", PREVIEWS, &stranger).header("idempotency-key", "k-2"),
             body.to_string(),
             StatusCode::FORBIDDEN,
             "unauthorized",
@@ -508,7 +509,7 @@ async fn the_release_composition_refuses_every_fresh_request() -> TestResult {
     drop(slots);
     // A read is decided before any lookup: without an actor it is `401`.
     let unknown = format!("{PREVIEWS}/{}", EntityId::new());
-    let anonymous = exchange(app, builder("GET", &unknown, None), Body::empty()).await?;
+    let anonymous = exchange(app, builder("GET", &unknown), Body::empty()).await?;
     assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
     assert!(!recorded(&served.gateway).await?);
     served.gateway.shutdown().await?;
@@ -671,7 +672,7 @@ async fn the_room_consent_is_checked_on_create_retry_and_read() -> TestResult {
     .await?;
     let revocation = exchange(
         &served.app,
-        builder("POST", "/v1/me/consent-revocations", Some(ACTOR)).header("idempotency-key", "r"),
+        acting("POST", "/v1/me/consent-revocations", ACTOR).header("idempotency-key", "r"),
         Body::from(json!({"consent_ref": served.consent.to_string()}).to_string()),
     )
     .await?;
