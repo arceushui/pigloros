@@ -223,8 +223,8 @@ network_probe() { # DIR
 # no bash, so `systemd-run bash` fails to find it. `stderr` holds systemd-run's
 # client-side errors (an executable that is not found, a bus error) and the
 # unit's own standard error. A start-job or unit failure that systemd-run does
-# not print can leave `stderr` empty: the unit's `journal` is then the
-# explanation. (--quiet suppresses informational output; whether it also hides
+# not print can leave `stderr` empty: look in the unit's `journal` then.
+# (--quiet suppresses informational output; whether it also hides
 # a start-job failure is not verified here.)
 network_case() { # NAME VALUE
   local dir="network/$1" status=0
