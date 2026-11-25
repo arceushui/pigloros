@@ -278,7 +278,8 @@ pub(crate) fn lookup_claim(
 /// installed EPF1 or outside the bound mode's servable set, then
 /// [`DecisionPreviewErrorV1::NotFound`] for any input that is unknown,
 /// foreign, not the acting persona's, digest-mismatched or erased. Stored
-/// content is decoded only by the commit command, after the consent check.
+/// Preference and OptionSpec content is decoded only by the commit command,
+/// after the consent check.
 pub(crate) fn admit_inputs(
     host: &mut ErasureExecutionHostV1,
     actor: EntityId,
@@ -503,7 +504,8 @@ fn current_binding(
 /// and the commit's re-validation.
 ///
 /// It answers the bound room's consent reference and the two input
-/// revisions. It decodes no content, so a corrupt input reaches the
+/// revisions. It decodes no Preference or OptionSpec content (it reads the
+/// room only for the consent reference), so a corrupt input reaches the
 /// internal-failure arm only in the commit command, after the step-10
 /// consent check.
 fn bound_records(
