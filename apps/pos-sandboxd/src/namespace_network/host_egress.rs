@@ -1024,9 +1024,7 @@ pub trait EgressControl {
     /// which it checks before each of its reads. The lock itself is taken
     /// without a bound, and a read in flight waits at most `RECEIVE_TIMEOUT`
     /// per datagram, so the caller's own remaining-time check bounds the
-    /// whole call. The `deadline` parameter is not in ADR-069 R14 §3.2, which
-    /// bounds the step by the release deadline without naming how; it is
-    /// recorded for the ADR errata queue.
+    /// whole call.
     ///
     /// # Errors
     /// Fails if the read is torn three times, `deadline` passed, a netlink

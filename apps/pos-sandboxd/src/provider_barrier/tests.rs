@@ -273,13 +273,16 @@ impl ObservedReadback for TestObserved {
         context: &ObservationContext<'_>,
     ) -> Result<ObservedUnit, ObservedReadbackUnavailable> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        // A Local attempt hands its network to the observation.
-        if matches!(
-            self.behaviour,
-            Observing::ReadsNetwork | Observing::NetworkFirst(_) | Observing::NetworkOnRecheck(_)
-        ) {
-            assert!(context.reads_network());
-        }
+        // Only a Local attempt hands its network to the observation.
+        assert_eq!(
+            context.reads_network(),
+            matches!(
+                self.behaviour,
+                Observing::ReadsNetwork
+                    | Observing::NetworkFirst(_)
+                    | Observing::NetworkOnRecheck(_)
+            )
+        );
         match (self.behaviour, call) {
             (Observing::NetworkFirst(class), 0) | (Observing::NetworkOnRecheck(class), 1..) => Err(
                 ObservedReadbackUnavailable(KernelObservationError::Network(class)),
@@ -503,6 +506,7 @@ impl crate::NetworkReadback for Unasked {
 async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::Local, Refusal::None, own_pid())?;
+    barrier.check.observed = TestObserved::new(Observing::ReadsNetwork)?;
     let launcher = launcher(&mut barrier)?;
     assert!(barrier.sent_release().is_none());
     barrier
@@ -1997,5 +2001,28 @@ async fn a_local_attempt_is_never_released_without_its_network() -> TestResult {
     assert_eq!(error.and_then(|error| error.barrier_failure()), None);
     // Nothing was consumed or sent.
     assert!(barrier.sent_release().is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_release_of_a_local_barrier_is_already_attempted_not_missing_its_network(
+) -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::Local, Refusal::Cancelled, own_pid())?;
+    barrier.check.observed = TestObserved::new(Observing::ReadsNetwork)?;
+    let launcher = launcher(&mut barrier)?;
+    let attempt = active(attempt, GENEROUS_MS);
+    assert!(barrier
+        .release(&attempt, cgroup_view(), Some(&Unasked))
+        .await
+        .is_err());
+    // Single use comes first: a second release without a network is refused
+    // as attempted, not as missing its network.
+    assert!(matches!(
+        barrier.release(&attempt, cgroup_view(), None).await.err(),
+        Some(BarrierError::AlreadyAttempted)
+    ));
+    drop(barrier);
+    assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
     Ok(())
 }

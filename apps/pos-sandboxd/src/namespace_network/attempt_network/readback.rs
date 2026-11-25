@@ -23,10 +23,6 @@
 //! lock before it checks the deadline, so the recheck's own remaining-time
 //! check is what bounds the whole readback. Steps 1 to 4 and 6 have no
 //! deadline of their own.
-//!
-//! The `NetworkReadback` port, its `deadline` parameter and its `Sync` bound
-//! are not in R14 §7, which writes `fn readback(&self)` on the connector;
-//! they are recorded for the ADR errata queue.
 
 use std::os::fd::{AsFd, BorrowedFd};
 use std::time::Instant;

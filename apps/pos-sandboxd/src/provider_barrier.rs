@@ -907,10 +907,8 @@ where
     ) -> Result<(), BarrierError> {
         require_multi_thread()?;
         self.require_attempt(attempt.admitted())
+            .and_then(|()| self.require_unused())
             .and_then(|()| self.require_network(network))?;
-        if self.attempted {
-            return Err(BarrierError::AlreadyAttempted);
-        }
         let main_pid = read_by(
             attempt.deadline(),
             self.identity.main_pid(attempt.unit_name()),
@@ -999,6 +997,16 @@ where
             adapter_identity: adapter,
             launch_parameter_digest: self.parameters.digest,
             expected_fdl1_digest: self.parameters.expected_fdl1_digest,
+        }
+    }
+
+    /// `ReadyV1` and `ReleaseV1` are single use: a barrier that attempted a
+    /// release refuses every later one as such, whatever it is handed.
+    const fn require_unused(&self) -> Result<(), BarrierError> {
+        if self.attempted {
+            Err(BarrierError::AlreadyAttempted)
+        } else {
+            Ok(())
         }
     }
 

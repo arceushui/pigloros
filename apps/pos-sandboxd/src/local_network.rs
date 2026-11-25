@@ -146,9 +146,9 @@ pub trait NetworkReadback {
     /// read takes the change lock before it checks the deadline, so the
     /// barrier's own remaining-time check bounds the whole readback.
     ///
-    /// This port, its `deadline` and its `Sync` bound are not in ADR-069 R14
-    /// §7, which puts `fn readback(&self)` on the connector; they are
-    /// recorded for the ADR errata queue.
+    /// This port, its `deadline` and its `Sync` bound deviate from ADR-069
+    /// R14 §7, which puts `fn readback(&self)` on the connector (Redmine
+    /// #1488).
     ///
     /// # Errors
     /// Fails as the [`ReadbackError`] class of whatever went wrong.
