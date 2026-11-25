@@ -24,8 +24,8 @@ use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFla
 use crate::control_framing::{self, ControlFrameError};
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxProvider, AuthenticatedSandboxProviderResult, PayloadDescriptor,
-    PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
-    SelectorGrantCommitment,
+    PayloadDirection, PayloadStreamValidator, ReconciliationEvidenceFields, SandboxAdmissionError,
+    SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderErrorCode, SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap, CommittedInstallationUpdate,
@@ -33,11 +33,74 @@ use crate::selector::installation::authority::{
 use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
 
+mod control;
+
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_AUDIT_RECORDS: usize = 256;
 const MAX_AUDIT_BYTES: usize = CONTROL_LIMIT;
 const ROOT_UID: u32 = 0;
+
+/// The closed class of an authenticated SPE1 answering SCQ1 or SRQ1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderControlRefusal {
+    /// SPE1 `11`: the provider's response was still pending.
+    Pending11,
+    /// SPE1 `12`: the control pool or the attempt's request ledger is full.
+    Busy12,
+    /// SPE1 `14`: the attempt cannot be proved clean now.
+    CleanupFailed14,
+    /// SPE1 `15`: the attempt and grant pair is unknown.
+    UnknownAttempt15,
+    /// SPE1 `16`: the request ID was reused with other bytes.
+    RequestIdReuse16,
+    /// Any other authenticated code.
+    Other,
+}
+
+impl ProviderControlRefusal {
+    /// Whether the same attempt may be asked again with a new request ID.
+    pub(crate) const fn is_retryable(self) -> bool {
+        matches!(self, Self::Pending11 | Self::Busy12 | Self::CleanupFailed14)
+    }
+
+    const fn from_code(code: SandboxProviderErrorCode) -> Self {
+        match code {
+            SandboxProviderErrorCode::SandboxUnavailable => Self::Pending11,
+            SandboxProviderErrorCode::AdmissionBusy => Self::Busy12,
+            SandboxProviderErrorCode::CleanupFailed => Self::CleanupFailed14,
+            SandboxProviderErrorCode::UnknownAttempt => Self::UnknownAttempt15,
+            SandboxProviderErrorCode::RequestIdentityConflict => Self::RequestIdReuse16,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Why one cancel or reconcile exchange yielded no authenticated success.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ProviderControlError {
+    /// The provider could not be reached or framed an answer incorrectly.
+    #[error("provider control exchange failed: {0}")]
+    Boundary(SelectorBoundaryError),
+    /// The provider answered with an authenticated SPE1.
+    #[error("provider refused the control request: {0:?}")]
+    Refused(ProviderControlRefusal),
+    /// The answer failed authentication or contradicted the selector.
+    #[error("provider control answer was rejected: {0}")]
+    Evidence(SandboxAdmissionError),
+}
+
+impl From<SelectorBoundaryError> for ProviderControlError {
+    fn from(error: SelectorBoundaryError) -> Self {
+        Self::Boundary(error)
+    }
+}
+
+impl From<SandboxAdmissionError> for ProviderControlError {
+    fn from(error: SandboxAdmissionError) -> Self {
+        Self::Evidence(error)
+    }
+}
 
 /// Rewindable staged payload used across authenticated provider retries.
 pub(crate) trait ReadSeek: Read + Seek {}
@@ -203,6 +266,25 @@ impl AuthenticatedProviderExecution {
     #[must_use]
     pub(crate) const fn agr1_digest(&self) -> [u8; 32] {
         self.agr1_digest
+    }
+
+    /// The digests the selector recomputes the reconciliation tuple from
+    /// (ADR-069 R15 §3.5): this grant, the terminal SPY1 and the last SAU1.
+    ///
+    /// `None` only when a retained frame carries no self-digest, which an
+    /// authenticated frame always does.
+    #[must_use]
+    pub(crate) fn accepted_evidence(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Option<ReconciliationEvidenceFields> {
+        let final_sau1 = self.frames.sau1().last()?;
+        Some(ReconciliationEvidenceFields {
+            attempt_id,
+            agr1_digest: self.agr1_digest,
+            terminal_spy1_digest: record_self_digest(self.frames.spy1())?,
+            final_sau1_digest: record_self_digest(final_sau1)?,
+        })
     }
 
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
@@ -664,39 +746,52 @@ impl ProviderTransport {
                 Deadline::new(timeout).map(|deadline| (request, bytes, deadline))
             })
             .and_then(|(request, bytes, deadline)| {
-                connect_before_deadline(&self.execute_endpoint, &deadline)
-                    .map(|connected| (request, bytes, deadline, connected))
+                self.exchange_on_execute_socket(&bytes, &deadline, |_| Ok(()))
+                    .map(|exchanged| (request, exchanged))
             })
-            .and_then(|(request, bytes, deadline, mut connected)| {
-                write_frame(&mut connected.stream, &bytes, &deadline)
+            .and_then(|(request, (response, process))| {
+                admitted
+                    .authenticate_describe_response(&response, &request)
+                    .map_err(artifact_invalid)
+                    .map(|()| process)
+            })
+            .and_then(|process| self.bind_admitted_process(process))
+    }
+
+    /// One request frame, write EOF, one response frame and read EOF on the
+    /// execute socket. `check` sees the connected provider process before any
+    /// byte is written.
+    fn exchange_on_execute_socket(
+        &self,
+        request: &[u8],
+        deadline: &Deadline,
+        check: impl FnOnce(ProviderProcessIdentity) -> Result<(), SelectorBoundaryError>,
+    ) -> Result<(Vec<u8>, ProviderProcessIdentity), SelectorBoundaryError> {
+        connect_before_deadline(&self.execute_endpoint, deadline)
+            .and_then(|connected| check(connected.process).map(|()| connected))
+            .and_then(|mut connected| {
+                write_frame(&mut connected.stream, request, deadline)
                     .map_err(selector_unavailable)
-                    .map(|()| (request, deadline, connected))
+                    .map(|()| connected)
             })
-            .and_then(|(request, deadline, connected)| {
+            .and_then(|connected| {
                 connected
                     .stream
                     .shutdown(std::net::Shutdown::Write)
                     .map_err(selector_unavailable)
-                    .map(|()| (request, deadline, connected))
-            })
-            .and_then(|(request, deadline, mut connected)| {
-                read_frame(&mut connected.stream, &deadline)
-                    .map_err(selector_unavailable)
-                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
-                    .map(|response| (request, deadline, connected, response))
-            })
-            .and_then(|(request, deadline, mut connected, response)| {
-                ensure_eof(&mut connected.stream, &deadline)
-                    .map_err(selector_unavailable)
-                    .map(|()| (request, connected, response))
-            })
-            .and_then(|(request, connected, response)| {
-                admitted
-                    .authenticate_describe_response(&response, &request)
-                    .map_err(artifact_invalid)
                     .map(|()| connected)
             })
-            .and_then(|connected| self.bind_admitted_process(connected.process))
+            .and_then(|mut connected| {
+                read_frame(&mut connected.stream, deadline)
+                    .map_err(selector_unavailable)
+                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
+                    .map(|response| (response, connected))
+            })
+            .and_then(|(response, mut connected)| {
+                ensure_eof(&mut connected.stream, deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (response, connected.process))
+            })
     }
 
     /// Complete one committed live update over the exact admitted control process.
@@ -1556,6 +1651,17 @@ fn record_magic(bytes: &[u8]) -> Result<String, ReceiveFailure> {
         return Err(ReceiveFailure::Invalid);
     };
     Ok(magic.clone())
+}
+
+/// The trailing self-digest of one `[unsigned, digest, ..]` record frame.
+fn record_self_digest(bytes: &[u8]) -> Option<[u8; 32]> {
+    let Ok(Value::Array(wrapper)) = ciborium::from_reader::<Value, _>(bytes) else {
+        return None;
+    };
+    match wrapper.get(1) {
+        Some(Value::Bytes(digest)) => digest.as_slice().try_into().ok(),
+        _ => None,
+    }
 }
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ReceiveFailure> {
