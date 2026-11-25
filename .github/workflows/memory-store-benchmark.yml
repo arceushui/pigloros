@@ -31,7 +31,6 @@ on:
       - crates/pos-store/benches/**
       - crates/pos-store/src/**
       - scripts/compare_memory_store_benchmarks.py
-      - scripts/test_compare_memory_store_benchmarks.py
   pull_request:
     paths:
       - .github/workflows/memory-store-benchmark.yml
@@ -58,7 +57,6 @@ on:
       - crates/pos-store/benches/**
       - crates/pos-store/src/**
       - scripts/compare_memory_store_benchmarks.py
-      - scripts/test_compare_memory_store_benchmarks.py
   schedule:
     - cron: 17 4 * * 1
   workflow_dispatch:

@@ -795,6 +795,7 @@ class WorkflowTriggerTests(unittest.TestCase):
             "crates/pos-reference/src/lib.rs",
             "crates/pos-conformance/tests/bundle_contract_public.rs",
             "crates/pos-conformance/vectors/sandbox-provider-v1/spm1.cbor",
+            "scripts/test_compare_memory_store_benchmarks.py",
         )
         for event in ("push", "pull_request"):
             with self.subTest(event=event):

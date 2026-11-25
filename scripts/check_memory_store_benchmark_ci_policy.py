@@ -91,7 +91,6 @@ BENCHMARK_PATHS = [
     "crates/pos-store/benches/**",
     "crates/pos-store/src/**",
     "scripts/compare_memory_store_benchmarks.py",
-    "scripts/test_compare_memory_store_benchmarks.py",
 ]
 BENCHMARK_TRIGGERS = {
     "push": {"branches": ["main"], "paths": BENCHMARK_PATHS},
