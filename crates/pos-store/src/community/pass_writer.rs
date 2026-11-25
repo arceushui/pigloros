@@ -199,22 +199,24 @@ impl MemoryCommunityDomainV1 {
     /// when the record's CPK1 Timeline or generation, or its predecessor
     /// head, differs from the call's T, G or `selected_head`; when the pass
     /// facts disagree (members, trace rows, `F_p`, key IDs); when the CPR1
-    /// profile is not the installed one or not the one T was initialized
-    /// under; when the roster keys or member rows do not fit the installed
-    /// roster; or when the record's `H_g` or `H_r` differs from the writer's
-    /// own. Then `EvidenceUnavailable` with no
+    /// profile is not the installed one; when the roster keys or member rows
+    /// do not fit the installed roster; or when the record's `H_g` or `H_r`
+    /// differs from the writer's own. Then `EvidenceUnavailable` with no
     /// installed horizons, `Conflict` for a reservation identity already
     /// recorded, resolved or not, and `PassUnresolved` (7) for another
     /// unresolved pass of T. These come first, as R10.7 steps 4a and 4c
     /// precede 5j; the byte-equal bound-content compare of R8.1(7) is the
     /// call layer's. Then `EvidenceUnavailable` for a Timeline with no pass
-    /// state, for a reused reference no Reserve minted, and for a Logical
+    /// state; `InvalidBinding` when T was initialized under another profile
+    /// than the request names; `EvidenceUnavailable` for a reused reference
+    /// no Reserve minted, and for a Logical
     /// Head or chain that no longer matches the minted or the reused cut
     /// (12); `EvidenceExpired` (13) when `H_g` does not outlast the
     /// decision bound; then in the step-5j order `StaleGeneration` (5),
     /// `StaleFrontier` (6) for a moved head or counters, a reused
     /// observation of another generation or one that outlives less than
-    /// `H_g`, or a budget the pending reservations now fill,
+    /// `H_g`, a minted observation whose records end before `H_g`, or a
+    /// budget the pending reservations now fill,
     /// `Quarantined` (9), `CapacityExhausted` (14) and
     /// `RecordingUnavailable` (19), and the budget read's error. A call that
     /// names both or neither of a minted and a reused observation gives
@@ -343,9 +345,16 @@ impl MemoryCommunityDomainV1 {
             retained.generation != input.generation
                 || retained.not_after_micros < writer.horizons.generation_micros
         });
+        // A minted observation's records end at `H_g` at the earliest too:
+        // the caller's horizon is judged, then kept for a later reuse.
+        let mint_short = input
+            .minted
+            .as_ref()
+            .is_some_and(|minted| minted.not_after_micros < writer.horizons.generation_micros);
         if state.head != input.selected_head
             || state.counters != input.prior_shared_counts
             || reuse_stale
+            || mint_short
         {
             return Err(Error::StaleFrontier);
         }

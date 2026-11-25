@@ -1764,7 +1764,7 @@ fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
     let mut domain = domain()?;
     let mut call = input()?;
     if let Some(minted) = call.minted.as_mut() {
-        minted.not_after_micros = OUTCOME + 500;
+        minted.not_after_micros = GENERATION_HORIZON + 500;
     }
     let staged = domain.stage_reserve(call)?;
     domain.apply_reserve(&SEAL, staged)?;
@@ -1772,7 +1772,7 @@ fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
     domain.apply_commit(&SEAL, commit)?;
     let state = domain.pass_states.get(&id(1)).ok_or("state")?;
     let retained = state.retained.get(&reference()).ok_or("retained")?;
-    assert_eq!(retained.not_after_micros, OUTCOME + 500);
+    assert_eq!(retained.not_after_micros, GENERATION_HORIZON + 500);
     assert_eq!(retained.generation, GENERATION);
     assert_eq!(retained.cut.through_seq, 0);
     assert!(!state.observations.contains_key(&reference()));
@@ -1815,6 +1815,26 @@ fn the_decision_bound_and_the_cut_come_before_the_generation_compare() -> TestRe
     assert_eq!(
         domain.stage_reserve(bound(stale)?).err(),
         Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A minted observation's records must reach `H_g`, like a reused one's:
+/// one microsecond short gives 6, equal passes.
+#[test]
+fn a_minted_observation_must_reach_the_state_horizon() -> TestResult {
+    let domain = domain()?;
+    let minting = |not_after_micros: u64| {
+        let mut call = input()?;
+        if let Some(minted) = call.minted.as_mut() {
+            minted.not_after_micros = not_after_micros;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(call)
+    };
+    assert!(domain.stage_reserve(minting(GENERATION_HORIZON)?).is_ok());
+    assert_eq!(
+        domain.stage_reserve(minting(GENERATION_HORIZON - 1)?).err(),
+        Some(Error::StaleFrontier)
     );
     Ok(())
 }
