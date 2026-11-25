@@ -239,8 +239,9 @@ const fn identity_error(refusal: &RecheckRefusal) -> KernelObservationError {
 }
 
 /// Why the recheck's observation failed (ADR-069 R9 §4.6.1): its manager
-/// read failed (8), the deadline passed during that read (10), or the
-/// observation itself could not be made (6).
+/// read failed (8), the deadline passed during that read (10), the
+/// observation itself could not be made (6), or it found the unit's network
+/// namespace changed (7, through [`unavailable_or_changed`]).
 fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
     match unavailable.0 {
         KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),

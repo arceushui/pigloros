@@ -412,8 +412,8 @@ pub fn in_namespace<R: Send>(
     })
 }
 
-/// A thread that could not be spawned is an I/O failure, `EAGAIN` unless the
-/// operating system gave another error.
+/// Any I/O error is a netlink I/O failure with its OS error, or `EAGAIN` when
+/// it has none. The failure to spawn a thread for [`in_namespace`] is one.
 impl From<std::io::Error> for NetlinkError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(Errno::from_io_error(&error).unwrap_or(Errno::AGAIN))

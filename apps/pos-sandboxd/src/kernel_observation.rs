@@ -1034,7 +1034,7 @@ fn observe_unit_in(
         .ok_or(KernelObservationError::IdentityChanged)?;
     let facts = anchor.read(context, main_pid, paths.work)?;
     let provider_namespaces = *provider.namespaces();
-    require_isolated(&facts, &provider_namespaces, network)?;
+    require_isolated(&facts, provider.namespaces(), network)?;
     let (device, inode) = context.cgroup.identity;
     let cgroup = KernelIdentity::of(device, inode)?;
     let (work, handle) = facts

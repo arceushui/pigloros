@@ -384,9 +384,9 @@ and no route off `lo`. `deploy/sysctl.d/60-piglor-sandbox.conf` is the drop-in
 that sets it; installing it is deployment's job, and nothing in this repository
 installs it yet. The #444 QEMU guest does not set the key either: the #444
 work wires the drop-in into the guest (`guest.nix`, a boot-sysctl expectation
-of 1, the pinned hashes) when this lands. The runtime reads the sysctl at startup, before it connects the
-bus, and exits without binding its sockets (admission closed) when the value
-is below 1 or cannot be read. After `ReadyV1`, the first kernel observation
+of 1, the pinned hashes) when this lands. The runtime reads the sysctl at
+startup, before it connects the bus, and exits without binding its sockets
+(admission closed) when the value is below 1 or cannot be read. After `ReadyV1`, the first kernel observation
 enters the unit's retained `ns/net` descriptor and reads its links and main
 table; any other link, any route off `lo` (a blackhole, prohibit or
 unreachable route counts), or a failed read is KOE1 status 2. At the release
