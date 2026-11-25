@@ -102,8 +102,9 @@ impl<C> EstablishedNetwork<C> {
 pub enum SetupClass {
     /// A creation, transport or resource refusal: TME1 `launch-failure` 6.
     /// It leaves no owned state, and so no quarantine, unless the setup had
-    /// begun installing and its removal failed: then `removal` says so, and
-    /// `cleanup.result` 1 and a quarantine follow (R14 N7).
+    /// begun installing and its removal failed: then
+    /// [`SetupError::removal`] says so, and `cleanup.result` 1 and a
+    /// quarantine follow (R14 N7).
     Creation,
     /// The provider contradicted its own state or lifecycle: the O6 fallback,
     /// code 2 with quarantine (R14 N9, N11 and N15).
@@ -193,8 +194,9 @@ pub trait LocalNetworkPort {
     /// exactly `endpoints`, the attempt's admitted LPS1 endpoints.
     ///
     /// # Errors
-    /// Fails, leaving nothing behind, if the namespace, veth pair or firewall
-    /// cannot be created or read back.
+    /// Fails if the namespace, veth pair or firewall cannot be created or
+    /// read back, leaving nothing behind unless it could not remove what it
+    /// had installed, which [`SetupError::removal`] then reports.
     fn establish(
         &self,
         attempt_id: [u8; 16],
