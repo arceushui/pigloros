@@ -2012,6 +2012,49 @@ fn recovery_reverifies_the_active_attempt_and_its_acknowledgements() -> Result<(
     Ok(())
 }
 
+#[test]
+fn acknowledgement_replay_is_idempotent_and_conflicting_identity_is_refused(
+) -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let graph = active_graph(vec![target], None)?;
+    let request = graph.request.reference();
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
+    let acknowledgement_value = acknowledgement(request, target, reference(171))?;
+
+    let admitted = coordinator.acknowledge(request, acknowledgement_value)?;
+    let admitted_manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    assert_eq!(
+        coordinator.acknowledge(request, acknowledgement_value)?,
+        admitted
+    );
+    assert_eq!(
+        graph
+            .adapter
+            .current_manifest(request)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest(),
+        admitted_manifest
+    );
+    assert_eq!(
+        coordinator.acknowledge(request, acknowledgement(request, target, reference(172))?),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        graph
+            .adapter
+            .current_manifest(request)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest(),
+        admitted_manifest
+    );
+    Ok(())
+}
+
 /// A request whose attempt 0 ends in a partial failure (one positive and
 /// one negative acknowledgement, one receipt) and whose retry is active
 /// with one positive acknowledgement: two attempts, three

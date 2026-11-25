@@ -917,17 +917,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             trust: active.admission.trust(),
         })
         .and_then(|provenance| {
-            if active
-                .admitted
-                .values()
-                .any(|existing| existing == &provenance)
-            {
-                return Ok(record.state.clone());
-            }
-            if active
-                .admitted
-                .contains_key(&(provenance.obligation(), provenance.owner()))
-            {
+            let identity = (provenance.obligation(), provenance.owner());
+            if let Some(existing) = active.admitted.get(&identity) {
+                if existing == &provenance {
+                    return Ok(record.state.clone());
+                }
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             self.port
