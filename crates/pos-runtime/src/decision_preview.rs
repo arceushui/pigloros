@@ -237,7 +237,12 @@ const fn is_weight_micro(weight_micro: i64) -> bool {
 
 fn distinct<T: Ord>(items: impl IntoIterator<Item = T>) -> bool {
     let mut seen = BTreeSet::new();
-    items.into_iter().all(|item| seen.insert(item))
+    for item in items {
+        if !seen.insert(item) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The Recommendation of a validated input (ADR-140 P5).
@@ -416,7 +421,7 @@ pub struct PreviewClaimV1 {
     pub consent_ref: EntityId,
     /// The raw EPF1 digest at admission.
     pub profile_digest: [u8; 32],
-    /// The GMP1 digest of the binding the claim commits under.
+    /// The digest of the execution-mode binding the claim commits under.
     pub mode_profile_digest: [u8; 32],
 }
 
