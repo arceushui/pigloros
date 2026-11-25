@@ -166,7 +166,10 @@ REPLY_FILES = {"devices-before", "reply", "stderr", "status", "timing", "devices
 # appear in the unit's, or the other values prove nothing.
 NETWORK_CASES = {"fb-0": "0", "fb-1": "1", "fb-2": "2"}
 NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWORK_CASES}
-NETWORK_FILES = {"sysctl", "netns", "links", "addrs", "routes4", "routes6", "status"}
+# Each case holds the run's own files; the probe's files exist only if its unit
+# got as far as writing them, so a failed case still has an explaining record.
+NETWORK_RUN_FILES = {"sysctl", "status", "stderr", "journal"}
+NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
 LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
 # The modules guest.nix loads, and the fallback device each creates in a new
 # network namespace while the sysctl is 0 (ipip, sit, ip6_tunnel, ip_gre).
@@ -439,8 +442,12 @@ class Evidence:
         if {path.name for path in network.iterdir()} != NETWORK_ENTRIES:
             raise EvidenceError("guest/network/ does not hold exactly the ADR-069 R14 records")
         for name in NETWORK_CASES:
-            if {path.name for path in (network / name).iterdir()} != NETWORK_FILES:
-                raise EvidenceError(f"malformed network record: {name}")
+            found = {path.name for path in (network / name).iterdir()}
+            if found not in (NETWORK_RUN_FILES, NETWORK_RUN_FILES | NETWORK_PROBE_FILES):
+                raise EvidenceError(
+                    f"malformed network record {name}: missing "
+                    f"{sorted(NETWORK_RUN_FILES - found)}, unexpected {sorted(found - NETWORK_RUN_FILES - NETWORK_PROBE_FILES)}"
+                    f", probe files {sorted(found & NETWORK_PROBE_FILES)}")
 
     def _verify_manifest(self) -> None:
         """A sealed artifact must match its manifest, file for file."""
@@ -1232,8 +1239,15 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
     base = f"guest/network/{name}"
     if evidence.line(f"{base}/sysctl") != value:
         raise EvidenceError(f"{name} did not run with net.core.fb_tunnels_only_for_init_net={value}")
-    if evidence.line(f"{base}/status") != "0":
-        raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete")
+    status = evidence.line(f"{base}/status")
+    stderr = evidence.text(f"{base}/stderr")
+    if status != "0":
+        raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
+                            f"stderr: {stderr.strip()[:400]!r}; journal in {base}/journal")
+    if stderr:
+        raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr.strip()[:400]!r}")
+    if not (evidence.root / base / "netns").exists():
+        raise EvidenceError(f"the {name} PrivateNetwork= unit completed but wrote no probe files")
     netns = evidence.line(f"{base}/netns")
     if not re.fullmatch(r"net:\[[0-9]+\]", netns) or netns == init[0]:
         raise EvidenceError(f"the {name} unit did not run in a network namespace of its own")
