@@ -14,11 +14,11 @@ Principal (see [Local Principal](#local-principal)): `GatewayAuthenticationAdapt
 implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, and
 `GatewayAuthorization` evaluates the pinned Principal, consent, capability, delegation, expiry
 and revocation state. A host without a provisioned Local Principal answers every protected
-operation `401 unauthenticated`. The other Wave 9 resource
-families (Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections, ensembles,
-Replays, evidence, exports and erasure) are Draft operations of the contract that their owner
-tickets (#303 to #309) will serve; consent revocation is served (#309, see
-[Consents](#consents)). WebSocket streaming remains deferred.
+operation `401 unauthenticated`. Scenario Rooms (#303), Preferences and OptionSpecs (#304),
+Decision Previews (#305), consent revocation and erasure (#309, see [Consents](#consents)) are
+served; the other Wave 9 resource families (simulated actions, Projections, ensembles, Replays,
+evidence and exports) are Draft operations of the contract that their owner tickets (#306 to
+#308) will serve. WebSocket streaming remains deferred.
 
 ## Run
 

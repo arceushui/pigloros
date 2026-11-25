@@ -34,7 +34,7 @@
       "type": "urn:pigloros:gateway:v1:problem:idempotency-conflict",
       "title": "Idempotency conflict",
       "status": 409,
-      "detail": "the key was used for a different request",
+      "detail": "the Idempotency-Key was used for a different request",
       "instance": "/v1/decision-previews",
       "code": "idempotency-conflict",
       "schema_id": "urn:pigloros:gateway:v1:schema:problem",

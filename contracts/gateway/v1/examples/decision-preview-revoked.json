@@ -34,7 +34,7 @@
       "type": "urn:pigloros:gateway:v1:problem:revoked",
       "title": "Revoked",
       "status": 403,
-      "detail": "the bound room's consent was revoked",
+      "detail": "authority revoked",
       "instance": "/v1/decision-previews",
       "code": "revoked",
       "schema_id": "urn:pigloros:gateway:v1:schema:problem",

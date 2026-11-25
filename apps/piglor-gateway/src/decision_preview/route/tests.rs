@@ -21,7 +21,10 @@ use crate::{
         tests::{on_host, previews_events, seam, seed, served, store_path, Served, OTHER_ACTOR},
         InFlightSlotV1, MAX_IN_FLIGHT_PER_PRINCIPAL,
     },
-    executor::decision_preview::tests::{erase, interrupted, seeded, ACTOR, PRINCIPAL},
+    executor::decision_preview::{
+        tests::{erase, interrupted, seeded, ACTOR, PRINCIPAL},
+        MAX_ADMISSIONS_PER_MINUTE,
+    },
     local_principal::local_gateway,
     mode_profile::{test_attach_host, test_binding, GatewayModeProfileIdV1},
     operation::ACTOR_ENTITY_HEADER,
@@ -434,8 +437,9 @@ async fn recorded(gateway: &Gateway) -> TestResult<bool> {
 /// ADR-140 D1 and the C3 test plan: on the release composition a
 /// well-formed, authorized fresh request is `409 incompatible-profile`, and
 /// its `400`, `401`, `403`, `415` and `429` answers come before the gate.
-/// The body and the key are refused before the authority decision, so an
-/// actor no grant covers still gets the `400`. Nothing is recorded.
+/// The body, its content type and the key are refused before the authority
+/// decision, so an actor no grant covers still gets the `400` and `415`.
+/// Nothing is recorded.
 #[tokio::test]
 async fn the_release_composition_refuses_every_fresh_request() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -481,7 +485,7 @@ async fn the_release_composition_refuses_every_fresh_request() -> TestResult {
                 .method("POST")
                 .uri(PREVIEWS)
                 .header("content-type", "text/plain")
-                .header(ACTOR_ENTITY_HEADER, ACTOR)
+                .header(ACTOR_ENTITY_HEADER, &stranger)
                 .header("idempotency-key", "k-2"),
             body.to_string(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -847,6 +851,69 @@ async fn concurrent_requests_under_one_key_commit_one_preview() -> TestResult {
     );
     assert_eq!(second.status, StatusCode::ACCEPTED);
     assert_eq!(previews_events(&served.gateway).await?, 2);
+    served.gateway.shutdown().await?;
+    drop(served);
+    Ok(())
+}
+
+/// P11 through the router: a fresh request that would leave no room for its
+/// two Events is the permanent `429`, not retryable and without
+/// `Retry-After`, while an exact retry of an earlier preview is answered.
+#[tokio::test]
+async fn a_full_store_refuses_a_fresh_request_for_good() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let served = served(&directory).await?;
+    let body = body_of(&seed(&served).await?);
+    let mut gateway = seam(&served.gateway);
+    gateway.limits.max_events_per_timeline = 3;
+    let app = app_of(gateway);
+    let admitted = post_preview(&app, "k-1", &body).await?;
+    assert_eq!(admitted.status, StatusCode::ACCEPTED, "{}", admitted.body);
+    let full = post_preview(&app, "k-2", &body).await?;
+    assert_eq!(
+        (full.status, text(&full.body, "/code")?),
+        (StatusCode::TOO_MANY_REQUESTS, "resource-limit-exceeded")
+    );
+    assert_eq!(full.body["retryable"], false);
+    assert_eq!(full.retry_after, None);
+    let retried = post_preview(&app, "k-1", &body).await?;
+    assert_eq!(
+        (retried.status, &retried.bytes),
+        (StatusCode::ACCEPTED, &admitted.bytes)
+    );
+    assert_eq!(previews_events(&served.gateway).await?, 2);
+    served.gateway.shutdown().await?;
+    drop(served);
+    Ok(())
+}
+
+/// D11 through the router: the 33rd new claim of a Principal in one window
+/// is a retryable `429` whose `Retry-After` header states the whole seconds
+/// left in the window; an exact retry is not counted and is still answered.
+#[tokio::test]
+async fn the_per_minute_quota_answers_retry_after_on_the_wire() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let served = served(&directory).await?;
+    let body = body_of(&seed(&served).await?);
+    let app = seam_app(&served);
+    for index in 0..MAX_ADMISSIONS_PER_MINUTE {
+        let admitted = post_preview(&app, &format!("k-{index}"), &body).await?;
+        assert_eq!(admitted.status, StatusCode::ACCEPTED, "{}", admitted.body);
+    }
+    let limited = post_preview(&app, "k-over", &body).await?;
+    assert_eq!(
+        (limited.status, text(&limited.body, "/code")?),
+        (StatusCode::TOO_MANY_REQUESTS, "resource-limit-exceeded")
+    );
+    assert_eq!(limited.body["retryable"], true);
+    let seconds = limited
+        .retry_after
+        .as_deref()
+        .ok_or("the quota states Retry-After")?
+        .parse::<u64>()?;
+    assert!((1..=60).contains(&seconds), "{seconds}");
+    let retried = post_preview(&app, "k-0", &body).await?;
+    assert_eq!(retried.status, StatusCode::ACCEPTED, "{}", retried.body);
     served.gateway.shutdown().await?;
     drop(served);
     Ok(())

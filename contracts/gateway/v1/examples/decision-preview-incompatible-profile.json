@@ -34,7 +34,7 @@
       "type": "urn:pigloros:gateway:v1:problem:incompatible-profile",
       "title": "Incompatible profile",
       "status": 409,
-      "detail": "this deployment serves no Air-Gapped profile",
+      "detail": "the profile is not servable in this mode or has no installed EPF1",
       "instance": "/v1/decision-previews",
       "code": "incompatible-profile",
       "schema_id": "urn:pigloros:gateway:v1:schema:problem",

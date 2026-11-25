@@ -39,7 +39,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | Term | Module | Meaning |
 |---|---|---|
 | **Decision Preview** | Gateway `createDecisionPreview` / `getDecisionPreview` (#305) over `pos-runtime` | The user-facing loop: client-supplied preferences and options → scoring → recommendation → calibration, served by `createDecisionPreview` and `getDecisionPreview` (#305, ADR-140) over the `pos-runtime` Match Score. It is not a bundled scenario or demo binary. |
-| **Scenario Room** | planned Wave 9 client contract | A user-configured simulation context with explicit inputs and reproducible Fork identity. No current Rust type or Gateway route is allowed to imply that this contract already exists. It is never a hard-coded product scenario. |
+| **Scenario Room** | Gateway `POST /v1/scenario-rooms` (#303), `pos-runtime` | A user-configured simulation context with explicit inputs and reproducible Fork identity, served as immutable revisions by the Scenario Room routes (#303, ADR-041 amendment). It is never a hard-coded product scenario. |
 | **OptionSpec** | Gateway `POST /v1/option-specs` (#304) | One user- or client-supplied side of a decision: a label, tags, lean hint, and optional coordinates, served as immutable revisions by the OptionSpec routes (#304). |
 | **Preference** | external client, `pos-plugin-persona` | A named dimension weight in `[-1.0, 1.0]` expressing affinity (e.g. `nature=0.8`). |
 | **PersonaModel** | `plugins/persona` | In-process validation primitive: scores an option string by averaging matching preference dimensions and normalizing the result. It is no longer the public Match Score, which is `pigloros.match-score.v1` in `pos-runtime` (ADR-140). |

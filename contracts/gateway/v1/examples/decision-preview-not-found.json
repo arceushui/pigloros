@@ -16,7 +16,7 @@
       "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
       "title": "Not found or unavailable",
       "status": 404,
-      "detail": "not found or unavailable",
+      "detail": "resource not found",
       "instance": "/v1/decision-previews/{preview_id}",
       "code": "not-found-or-unavailable",
       "schema_id": "urn:pigloros:gateway:v1:schema:problem",

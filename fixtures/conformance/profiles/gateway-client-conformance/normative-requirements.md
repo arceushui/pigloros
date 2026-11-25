@@ -238,7 +238,9 @@ are 0.
   `400` `erasure-scope-retained` problem and an erasure ID that is not a ULID is `400`
   `invalid-request`; on `authorized-rooms` a Decision Preview request without `profile_id` is
   `400` `invalid-request` and one of `schema_version` 2 the `400` `unsupported-version`
-  problem, both before the authority decision (#305).
+  problem, both before the authority decision (#305). Every request carries an `Idempotency-Key`
+  (section 3), so the missing-key `400` of ADR-140 P32 cannot be sent; the body without
+  `profile_id` exercises the same refusal before the decision instead.
 - **resource-exhaustion** (`resource-limit`): 64 root Timelines are created and the 65th is the
   `429` `resource-limit-exceeded` problem; on `authorized-erasure-held` another erasure request
   of the subject is the retryable `429` `resource-limit-exceeded` problem.

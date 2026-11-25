@@ -33,7 +33,7 @@
       "type": "urn:pigloros:gateway:v1:problem:invalid-request",
       "title": "Invalid request",
       "status": 400,
-      "detail": "Idempotency-Key is required",
+      "detail": "an Idempotency-Key header of 1 to 128 visible ASCII characters is required",
       "instance": "/v1/decision-previews",
       "code": "invalid-request",
       "schema_id": "urn:pigloros:gateway:v1:schema:problem",

@@ -412,6 +412,9 @@ fn refusal(error: DecisionPreviewErrorV1) -> Response {
         DecisionPreviewErrorV1::Gateway(error) => return error.into_response(),
         DecisionPreviewErrorV1::NotFound => return not_found(),
         DecisionPreviewErrorV1::QuotaExceeded { retry_after } => return quota_exceeded(retry_after),
+        // A revision load answers only `InvalidRecord`, `Unavailable` or
+        // `ModeBindingStale`, so the conflict and parent-head arms of
+        // `revision::store_failure` cannot occur here.
         DecisionPreviewErrorV1::Revisions(error) => return crate::revision::store_failure(error),
         DecisionPreviewErrorV1::Store(error) => return store_failure(error),
         DecisionPreviewErrorV1::Internal => return internal(),
@@ -436,7 +439,7 @@ fn refusal(error: DecisionPreviewErrorV1) -> Response {
         DecisionPreviewErrorV1::StoreFull => (
             Code::ResourceLimitExceeded,
             StatusCode::TOO_MANY_REQUESTS,
-            "the store holds its most Decision Previews; a retry cannot succeed",
+            "the store holds its maximum number of Decision Previews; a retry cannot succeed",
             false,
         ),
         DecisionPreviewErrorV1::TopologyUnavailable => (
