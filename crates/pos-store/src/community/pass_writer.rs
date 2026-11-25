@@ -155,6 +155,11 @@ pub struct CommunityReserveInputV1 {
     /// the installed one. The writer mints the CPR1 from it with the
     /// ordinals it allocates; the requested evidence horizon is not
     /// compared, the writer's own `H_r` is the CPR1's.
+    ///
+    /// Its `prepared_input_set_digest` is not checked against the pass
+    /// facts' member digests: the accepted text defines no preimage for it
+    /// (it says only that every CIN1 digest is in the prepared input set), and
+    /// the check follows once an erratum defines one.
     pub request: CommunityReservationRequestInputV1,
     /// What the pass record keeps beyond the CPR1: the quote and the digests
     /// of its members (R8.1(7), R15.3(2)).
