@@ -69,9 +69,9 @@ use crate::{
     ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
     LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
-    RequestedConfigurationProperty, ServeError, ServedProxy, StdioChannelError,
-    SystemdTransientUnitReadback, TransientServiceUnitName, TransientUnitLaunchInputs,
-    TransientUnitRequest, UnitStdio,
+    RequestedConfigurationProperty, ServeError, ServedProxy, SetupClass, SetupError,
+    StdioChannelError, SystemdTransientUnitReadback, TransientServiceUnitName,
+    TransientUnitLaunchInputs, TransientUnitRequest, UnitStdio,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -424,8 +424,8 @@ pub enum ExecuteError {
     #[error("a replayed exchange is unavailable")]
     ReplayUnavailable(#[source] NetworkCaptureStoreError),
     /// The Local network could not be established.
-    #[error("the Local network could not be established")]
-    Network(#[source] Box<dyn Error + Send + Sync>),
+    #[error(transparent)]
+    Network(NetworkSetupFailure),
     /// A systemd operation did not finish within its bound.
     #[error("a systemd operation did not finish within its bound")]
     HostTimeout,
@@ -482,21 +482,42 @@ impl ExecuteError {
     /// TME1 `launch-failure` of an execution refused before its unit start
     /// by the recheck immediately before it (1), for its output reservation
     /// (3 or 5) or its standard channels (4), ADR-069 R9 §4.6.1 and R10
-    /// §4.7 and §4.1, or whose unit could not be pinned (2, R9 §4.6.7).
-    /// `None` for every other error: the terminal records give those their
-    /// own codes.
+    /// §4.7 and §4.1, whose unit could not be pinned (2, R9 §4.6.7), whose
+    /// Local network or FD 3 channel could not be set up (6) or whose Replay
+    /// exchange is unavailable (7, ADR-069 R14 §3.4). `None` for every other
+    /// error: the terminal records give those their own codes, and a network
+    /// contradiction or any Bind variant but `Namespace` and `Channel` takes
+    /// the O6 fallback (code 2, quarantine).
     #[must_use]
     pub fn launch_failure(&self) -> Option<LaunchFailure> {
         self.pre_start_refusal().or_else(|| self.unpinned_unit())
     }
 
     /// The launch failure of an execution refused before its unit start
-    /// (1, 3, 4 or 5).
+    /// (1, 3, 4, 5, 6 or 7).
     fn pre_start_refusal(&self) -> Option<LaunchFailure> {
         match self {
             Self::Recheck(_) | Self::RootIdentity => Some(LaunchFailure::PreStartRecheckFailed),
             Self::OutputReservation(refused) => Some(LaunchFailure::from(*refused)),
             Self::StdioChannel(_) => Some(LaunchFailure::StdioChannelFailed),
+            _ => self.setup_refusal(),
+        }
+    }
+
+    /// The launch failure of a network or Replay setup refused after AGR1
+    /// and before the unit start (6 or 7, ADR-069 R14 §3.4): creation,
+    /// transport and resource refusals only. Contradictions of the
+    /// provider's own state have none, and fall back to O6.
+    const fn setup_refusal(&self) -> Option<LaunchFailure> {
+        match self {
+            Self::HostService(_)
+            | Self::Bind(LocalProxyBindError::Namespace | LocalProxyBindError::Channel) => {
+                Some(LaunchFailure::NetworkSetupFailed)
+            }
+            Self::Network(failure) if matches!(failure.class, SetupClass::Creation) => {
+                Some(LaunchFailure::NetworkSetupFailed)
+            }
+            Self::ReplayUnavailable(_) => Some(LaunchFailure::ReplayUnavailable),
             _ => None,
         }
     }
@@ -519,6 +540,25 @@ impl ExecuteError {
         match self {
             Self::Start(start) => Some(start),
             _ => None,
+        }
+    }
+}
+
+/// A Local network that could not be set up, with the class its port gave
+/// the failure (ADR-069 R14 §3.4).
+#[derive(Debug, thiserror::Error)]
+#[error("the Local network could not be established")]
+pub struct NetworkSetupFailure {
+    class: SetupClass,
+    #[source]
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl NetworkSetupFailure {
+    fn new<E: SetupError + Send + Sync + 'static>(error: E) -> Self {
+        Self {
+            class: error.setup_class(),
+            source: Box::new(error),
         }
     }
 }
@@ -1219,7 +1259,7 @@ where
                 .map_err(ExecuteError::HostService)?;
             let established = network
                 .establish(attempt.attempt_id(), &admitted_endpoints(&admission))
-                .map_err(|error| ExecuteError::Network(Box::new(error)))?;
+                .map_err(|error| ExecuteError::Network(NetworkSetupFailure::new(error)))?;
             // A bad admission, namespace or channel never reaches the start.
             let checked = attempt.check_local(*admission, established, channel)?;
             (
