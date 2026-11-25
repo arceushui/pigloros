@@ -84,6 +84,9 @@ pub(super) struct CommunityPassStateV1 {
 /// What a later Reserve needs to reuse a minted observation (R9.2, R9.7).
 #[derive(Clone)]
 pub(super) struct CommunityRetainedObservationV1 {
+    /// The generation that minted it: a reuse is of the same `(T, G)`
+    /// (R9.2).
+    pub(super) generation: [u8; 16],
     /// The earliest `evidence_not_after` of its records.
     pub(super) not_after_micros: u64,
     /// The cut it observed, which T must still be at.
