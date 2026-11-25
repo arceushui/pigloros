@@ -65,11 +65,11 @@ let
   # glibc.static with crt-static (not pkgsStatic, which would build a musl
   # rustc and std from source): the adapter only uses std, so the result has
   # no PT_INTERP. buildRustPackage always passes `--target`, so RUSTFLAGS
-  # reaches neither build scripts nor proc macros; as an environment variable
-  # it replaces, not merges with, any rustflags in a cargo config. All of this
-  # is unverified until the first QEMU run: build-images.sh refuses an
-  # adapter that is not a loadable static ELF file of the architecture. The
-  # static pos-sandboxd launcher is built by the piece that uses it.
+  # should reach neither build scripts nor proc macros; as an environment
+  # variable it replaces, not merges with, any rustflags in a cargo config.
+  # build-images.sh refuses an adapter that is not a loadable static ELF file
+  # of the architecture. The static pos-sandboxd launcher is built by the
+  # piece that uses it.
   adapter = rustPlatform.buildRustPackage {
     pname = "pos-sandbox-evidence-adapter";
     version = "0";
@@ -81,8 +81,10 @@ let
       "--bin"
       "pos-sandbox-evidence-adapter"
     ];
-    buildInputs = [ pkgs.glibc.static ];
-    env.RUSTFLAGS = "-C target-feature=+crt-static";
+    # Not buildInputs: the wrapper would then put the static libc.a ahead of
+    # libc.so for the dynamically linked build scripts, which then segfault
+    # (the first QEMU run, 2026-11-25). Only the final link gets the path.
+    env.RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=-L${pkgs.glibc.static}/lib";
     auditable = false;
     doCheck = false;
     meta.mainProgram = "pos-sandbox-evidence-adapter";
