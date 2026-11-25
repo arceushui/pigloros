@@ -627,6 +627,14 @@ fn derivation_refuses_every_shape_outside_the_table() {
             timeline: target(),
             control_operation_id: [0; 16],
         },
+        Operation::PassAbort {
+            timeline: zero,
+            reservation_operation_id: CONTROL,
+        },
+        Operation::PassAbort {
+            timeline: target(),
+            reservation_operation_id: [0; 16],
+        },
     ] {
         assert_eq!(Request::derive(&invalid), Err(Error::InvalidBinding));
     }

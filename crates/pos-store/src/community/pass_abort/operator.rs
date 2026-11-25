@@ -8,32 +8,36 @@
 //! 2. the FAE1, the administrative decision and the one trusted-clock
 //!    reservation (12);
 //! 3. the metadata `write` decision (12), which every CNE1 read or write
-//!    needs, the retry lookup by `(T, reservation_operation_id)` (12 for a
+//!    needs, and the retry lookup by `(T, reservation_operation_id)` (12 for a
 //!    pass nobody reserved; 4 for a Committed pass, other bound content or
-//!    another principal) and, for a first Abort, the live-call refusal (15);
-//! 4. the generation (5) and head (6) fences, and the metadata horizon (13);
+//!    another principal; 13 for a retry at or after the pass's `H_r`) and,
+//!    for a first Abort, the live-call refusal (15);
+//! 4. the generation (5) and head (6) fences, the guard that the head is
+//!    still the initialization head (12, until A5 commits a pass) and the
+//!    metadata horizon (13);
 //! 5. the records: the CAB1, the CAV1 (whose one authority row is the abort
 //!    decision's chain) and the CAU1 with the abort decision and the
-//!    metadata `write` decision as its two rows (R15.1(5)), all
-//!    sealed under the pass's one metadata key, which the Abort then closes;
+//!    metadata `write` decision as its two rows (R15.1(5)), all sealed under
+//!    the pass's one metadata key, which the Abort then closes;
 //! 6. the writer's decision-bound check, then one commit: the pending
 //!    erasure entry is replaced (an Abort registers no row), the pass moves
 //!    to Aborted and the retry index and the inventory generation advance
 //!    once. No producer ordinal is allocated and no CSI1 row changes.
 
+use std::collections::BTreeMap;
+
 use pos_core::community_lifecycle::{
     community_recipient_identity_digest_v1, CommunityAbortReasonV1, CommunityArtifactOperationV1,
     CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityAuthorityViewRowV1,
     CommunityClockBoundV1, CommunityCurrentViewInputV1, CommunityCurrentViewV1,
-    CommunityDecisionRowV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
-    CommunityPassFrontierV1, CommunityReservationV1, CommunityScopeMembersV1,
+    CommunityDecisionRowV1, CommunityGenerationAdmissionV1, CommunityKeyIntentV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
+    CommunityMetadataScopeV1, CommunityPassFrontierV1, CommunityScopeMembersV1,
     CommunityTrustViewRowV1,
 };
 use pos_core::{
     AuthorityGranteeV1, AuthorityTrustRootSealV1, AuthorizationRequestV1, Hash, TimelineId,
 };
-use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 use super::super::lifecycle_authority::{
@@ -42,9 +46,8 @@ use super::super::lifecycle_authority::{
 };
 use super::super::memory_domain::MemoryCommunityDomainV1;
 use super::super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
-use super::super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1};
+use super::super::pass_record::CommunityPassRecordV1;
 use super::super::planner::key_rows;
-use super::super::private_hash::private_digest;
 use super::super::quarantine::{current_floor, CommunityQuarantineContextV1};
 use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
@@ -135,6 +138,29 @@ enum PreparedAbortV1 {
     Staged(Box<StagedPassAbortV1>, CommunityAuthorityCallV1),
 }
 
+/// The facts every staging step reads.
+struct StageInputsV1<'a> {
+    call: CommunityPassAbortCallV1<'a>,
+    bound: PassAbortBoundV1,
+    authenticated: &'a CommunityAuthorityCallV1,
+    administrative: &'a CommunityAuthorityAdmissionV1,
+    write: &'a MetadataWriteV1,
+}
+
+/// What a first Abort read from the CSI1 and the CAB1 it derived.
+struct StageFactsV1 {
+    /// The CMA1 anchor `(T, G)` every metadata record's CSM1 names.
+    anchor: (TimelineId, [u8; 16]),
+    /// The CNE1 address of the CSI1 read.
+    selection_address: Hash,
+    /// The NMP1 `metadata_not_after_micros`.
+    metadata_horizon: u64,
+    /// The canonical CAB1 and `H(CAB1)`.
+    abort: (Zeroizing<Vec<u8>>, Hash),
+    /// The inventory generation read.
+    inventory_generation: u64,
+}
+
 impl MemoryCommunityDomainV1 {
     /// Abort an unresolved pass by authenticated cancellation (reason 0) or
     /// before retirement (reason 4), or return the original outcome of a
@@ -159,16 +185,24 @@ impl MemoryCommunityDomainV1 {
     /// }
     /// ```
     ///
+    /// The metadata horizon check compares the call's decision bound, up to
+    /// 32 s after its sample, with `metadata_not_after`. An Abort in the last
+    /// 32 s before it therefore gives 13 and the pass stays unresolved
+    /// (ADR-129 R15 O6; as A4e-1's `SetReason`).
+    ///
     /// # Errors
     /// In the A5.5 order: `InvalidBinding` for a reason other than 0 or 4 or
-    /// a zero identity; `EvidenceUnavailable` for every authority failure, a
-    /// pass nobody reserved, an unbootstrapped domain, a pass metadata key
-    /// that is missing and a writer at or after the decision bound;
-    /// `Conflict` for a Committed pass, a retry with other bound content or
-    /// by another principal; `OperationActive` while the pass's call is
-    /// live; `StaleGeneration` and `StaleFrontier` for a moved generation or
-    /// head; `EvidenceExpired` when the decision bound is after the
-    /// metadata horizon; and the codec refusals.
+    /// a zero identity or reservation; `EvidenceUnavailable` for every
+    /// authority failure, a pass nobody reserved, an unbootstrapped domain, a
+    /// Timeline whose head is not its initialization head, a missing pass
+    /// metadata key and a writer at or after the decision bound; `Conflict`
+    /// for a Committed pass, a retry with other bound content or by another
+    /// principal; `EvidenceExpired` for a retry at or after the pass's
+    /// `H_r`; `OperationActive` while the pass's call is live;
+    /// `StaleGeneration` and `StaleFrontier` for a moved generation or head;
+    /// `EvidenceExpired` when the decision bound is after the metadata
+    /// horizon; `CapacityExhausted` when the pass metadata key cannot seal;
+    /// and the codec refusals.
     pub fn abort_pass(
         &mut self,
         seal: &'static AuthorityTrustRootSealV1,
@@ -209,8 +243,8 @@ impl MemoryCommunityDomainV1 {
         let bound = PassAbortBoundV1::new(call.reason, None, Vec::new());
         let key = (call.timeline, call.reservation_operation_id);
         match self.lookup_pass_abort(key.0, key.1, &bound)? {
-            PassAbortLookupV1::Original => self
-                .original_abort(key, &administrative)
+            PassAbortLookupV1::Original(original) => self
+                .original_abort(key, original, &administrative, &authenticated)
                 .map(PreparedAbortV1::Original),
             PassAbortLookupV1::First(record) => self
                 .stage_pass_abort(
@@ -261,14 +295,17 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// A retry's original receipt: the decision's principal must be the
-    /// original leaf grant's grantee (A5.3(6)), and the retained CAB1 must
-    /// still open under the pass metadata key as the receipt's.
+    /// original leaf grant's grantee (A5.3(6)), the call's sample must be
+    /// before the pass's `H_r` (discovery of expired evidence gives 13,
+    /// R13.2(4)), and the retained CAB1 must still open under the pass
+    /// metadata key as the receipt's.
     fn original_abort(
         &self,
         key: (TimelineId, [u8; 16]),
+        original: &CommittedPassAbortV1,
         administrative: &CommunityAuthorityAdmissionV1,
+        authenticated: &CommunityAuthorityCallV1,
     ) -> Result<CommunityPassAbortReceiptV1, Error> {
-        let original = self.pass_aborts.get(&key).ok_or(Error::Conflict)?;
         let grantee = CommunityStoreDomainV1::load_authority(self, original.leaf_grant_id)?
             .chain()
             .grants()
@@ -280,6 +317,9 @@ impl MemoryCommunityDomainV1 {
             ))
         {
             return Err(Error::Conflict);
+        }
+        if authenticated.at_time().as_micros() >= original.evidence_not_after_micros {
+            return Err(Error::EvidenceExpired);
         }
         self.keys
             .get(&original.metadata_key)
@@ -300,7 +340,12 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// Stage the CAB1, CAV1 and CAU1 of a first Abort.
+    /// The fences of a first Abort and its CAB1: the generation (5), the
+    /// head (6) and the initialization-head guard (12), then the metadata
+    /// horizon (13), as A5.5 step 4 and A4e-1 order them.
+    ///
+    /// A first Abort at or after the pass's `H_r` still commits its CAB1
+    /// (R15.2(3a), N17).
     fn stage_pass_abort(
         &self,
         context: CommunityQuarantineContextV1<'_>,
@@ -308,6 +353,16 @@ impl MemoryCommunityDomainV1 {
         record: &CommunityPassRecordV1,
         inputs: &StageInputsV1<'_>,
     ) -> Result<StagedPassAbortV1, Error> {
+        let reservation = record.reserved.reservation;
+        let (anchor, selection, selection_address) = self.read_selection(context)?;
+        let (generation, head) = current_floor(&selection, inputs.call.timeline)?;
+        if generation != reservation.pass_key.generation() {
+            return Err(Error::StaleGeneration);
+        }
+        if head != reservation.predecessor_head_digest {
+            return Err(Error::StaleFrontier);
+        }
+        self.require_initial_head(inputs.call.timeline, generation, head)?;
         let metadata_horizon = context
             .binding
             .metadata_policy
@@ -316,89 +371,131 @@ impl MemoryCommunityDomainV1 {
         if inputs.authenticated.decision_bound().as_micros() > metadata_horizon {
             return Err(Error::EvidenceExpired);
         }
-        let key = (inputs.call.timeline, inputs.call.reservation_operation_id);
-        let (anchor, selection, selection_address) = self.read_selection(context)?;
-        let (generation, head) = current_floor(&selection, key.0)?;
-        let reserved = &record.reserved;
-        let pass_key = reserved.reservation.pass_key;
-        // A Sealed pass is aborted once Seal's record carries its CPS1
-        // digest (A4d); until then it cannot name the sealed result.
-        if record.status == CommunityPassStatusV1::Sealed {
-            return Err(Error::EvidenceUnavailable);
-        }
-        if generation != pass_key.generation() {
-            return Err(Error::StaleGeneration);
-        }
-        if head != reserved.reservation.predecessor_head_digest {
-            return Err(Error::StaleFrontier);
-        }
-        let (abort, abort_digest) = CommunityReservationV1::new(reserved.reservation)
-            .map(|reservation| {
-                private_digest(
-                    b"PiglorOS.Community.CPR1.v1",
-                    &[reservation.to_canonical_cbor().as_slice()],
-                )
-            })
-            .and_then(|reservation_digest| {
-                abort_record(AbortFieldsV1 {
-                    pass_key,
-                    reservation_digest,
-                    sealed_result_digest: None,
-                    reason: inputs.call.reason,
-                    failure_evidence_digest: None,
-                    quarantine_delta_digest: None,
-                    evidence_not_after_micros: reserved.reservation.evidence_not_after_micros,
-                })
-            })?;
-        let inventory_generation = CommunityStoreDomainV1::inventory_generation(self);
-        let vault = self
-            .keys
-            .get(&reserved.metadata_key)
-            .ok_or(Error::EvidenceUnavailable)?;
-        let view = self.abort_view(
+        let abort = abort_record(&AbortFieldsV1 {
+            reservation,
+            sealed_result_digest: record.sealed_result_digest,
+            reason: inputs.call.reason,
+            failure_evidence_digest: None,
+            quarantine_delta_digest: None,
+        })?;
+        self.stage_abort_records(
             context,
             lifecycle,
             record,
             inputs,
-            vault.intent(),
-            inventory_generation,
-        )?;
-        let evidence = abort_evidence(
-            self.store_incarnation,
-            lifecycle,
-            record,
-            inputs,
-            abort_digest,
-            &view,
-            inventory_generation,
-        )?;
-        let scope = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
-            store_incarnation: self.store_incarnation,
-            metadata_anchor_timeline: anchor.0,
-            metadata_anchor_generation: anchor.1,
-            protection_operation_id: reserved.metadata_key,
-            scope_members: CommunityScopeMembersV1::from_members(&[]),
-            metadata_not_after_micros: metadata_horizon,
-        })?;
-        Ok(StagedPassAbortV1 {
-            key,
-            committed: CommittedPassAbortV1 {
-                bound: inputs.bound.clone(),
-                abort: abort.clone(),
-                abort_digest,
-                leaf_grant_id: inputs.administrative.leaf_grant_id(),
-                metadata_key: reserved.metadata_key,
-                records: Vec::new(),
+            StageFactsV1 {
+                anchor,
+                selection_address,
+                metadata_horizon,
+                abort,
+                inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
             },
-            scope,
-            plaintexts: [
-                (CommunityMetadataSchemaV1::Cab1, abort),
-                (CommunityMetadataSchemaV1::Cav1, view.to_canonical_cbor()),
-                (CommunityMetadataSchemaV1::Cau1, evidence),
-            ],
-            read_selection: selection_address,
-            inventory_generation,
-        })
+        )
+    }
+
+    /// Fail closed unless `head` is the generation's initialization head.
+    ///
+    /// The CAV1 below states the `Initial` frontier with no head ref, which
+    /// is true only until a pass commits. A5 (Commit) replaces this guard
+    /// with the committed frontier and the head's CMI1 reference
+    /// (R15.1(5)).
+    fn require_initial_head(
+        &self,
+        timeline: TimelineId,
+        generation: [u8; 16],
+        head: Hash,
+    ) -> Result<(), Error> {
+        self.initializations
+            .iter()
+            .filter(|((initialized, _), _)| *initialized == timeline)
+            .find_map(|(_, committed)| {
+                self.keys
+                    .get(&committed.metadata_key)
+                    .zip(committed.records.last())
+                    .and_then(|(vault, sealed)| vault.open(sealed).ok())
+                    .and_then(|bytes| {
+                        CommunityGenerationAdmissionV1::from_canonical_cbor(&bytes).ok()
+                    })
+                    .filter(|admission| admission.as_input().generation == generation)
+                    .map(|admission| admission.as_input().initial_selected_head_digest)
+            })
+            .filter(|initial| *initial == head)
+            .map(|_| ())
+            .ok_or(Error::EvidenceUnavailable)
+    }
+
+    /// Stage the CAB1, CAV1 and CAU1 and the CSM1 that seals them.
+    ///
+    /// The CSM1 cover is the one the Reserve seals its CNE1 records under:
+    /// the CMA1 anchor `(T, G)`, the pass metadata key's protection ID, no
+    /// scope members and the NMP1 metadata horizon.
+    fn stage_abort_records(
+        &self,
+        context: CommunityQuarantineContextV1<'_>,
+        lifecycle: &CommunityLifecycleAuthorityV1,
+        record: &CommunityPassRecordV1,
+        inputs: &StageInputsV1<'_>,
+        facts: StageFactsV1,
+    ) -> Result<StagedPassAbortV1, Error> {
+        let metadata_key = record.reserved.metadata_key;
+        self.keys
+            .get(&metadata_key)
+            .ok_or(Error::EvidenceUnavailable)
+            .and_then(|vault| {
+                self.abort_view(
+                    context,
+                    lifecycle,
+                    record,
+                    inputs,
+                    vault.intent(),
+                    facts.inventory_generation,
+                )
+            })
+            .and_then(|view| {
+                abort_evidence(
+                    self.store_incarnation,
+                    lifecycle,
+                    record,
+                    inputs,
+                    facts.abort.1,
+                    &view,
+                    facts.inventory_generation,
+                )
+                .map(|evidence| (view, evidence))
+            })
+            .and_then(|(view, evidence)| {
+                CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
+                    store_incarnation: self.store_incarnation,
+                    metadata_anchor_timeline: facts.anchor.0,
+                    metadata_anchor_generation: facts.anchor.1,
+                    protection_operation_id: metadata_key,
+                    scope_members: CommunityScopeMembersV1::from_members(&[]),
+                    metadata_not_after_micros: facts.metadata_horizon,
+                })
+                .map(|scope| StagedPassAbortV1 {
+                    key: (inputs.call.timeline, inputs.call.reservation_operation_id),
+                    committed: CommittedPassAbortV1 {
+                        bound: inputs.bound.clone(),
+                        abort: facts.abort.0.clone(),
+                        abort_digest: facts.abort.1,
+                        evidence_not_after_micros: record
+                            .reserved
+                            .reservation
+                            .evidence_not_after_micros,
+                        leaf_grant_id: inputs.administrative.leaf_grant_id(),
+                        metadata_key,
+                        records: Vec::new(),
+                    },
+                    scope,
+                    plaintexts: [
+                        (CommunityMetadataSchemaV1::Cab1, facts.abort.0),
+                        (CommunityMetadataSchemaV1::Cav1, view.to_canonical_cbor()),
+                        (CommunityMetadataSchemaV1::Cau1, evidence),
+                    ],
+                    read_selection: facts.selection_address,
+                    inventory_generation: facts.inventory_generation,
+                })
+            })
     }
 
     /// The CAV1 of the Abort, read inside its guard (R15.1(5)): T's current
@@ -415,32 +512,40 @@ impl MemoryCommunityDomainV1 {
         inventory_generation: u64,
     ) -> Result<CommunityCurrentViewV1, Error> {
         let pass_key = record.reserved.reservation.pass_key;
-        let authority_rows = self.authority_rows(inputs)?;
-        let trust_rows = self.abort_trust_rows(context, lifecycle.trust_scope(), record)?;
-        CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
-            CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                store_incarnation: self.store_incarnation,
-                timeline: pass_key.timeline(),
-                generation: pass_key.generation(),
-                inventory_generation,
-                frontier: CommunityPassFrontierV1::Initial,
-                selected_head: None,
-                scope_rows: vec![],
-                authority_rows,
-                trust_rows,
-                key_rows: key_rows(&[key]),
-                clock_latch,
-            })
+        self.authority_rows(inputs).and_then(|authority_rows| {
+            self.abort_trust_rows(context, lifecycle.trust_scope(), record)
+                .and_then(|trust_rows| {
+                    CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
+                        CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                            store_incarnation: self.store_incarnation,
+                            timeline: pass_key.timeline(),
+                            generation: pass_key.generation(),
+                            inventory_generation,
+                            frontier: CommunityPassFrontierV1::Initial,
+                            selected_head: None,
+                            scope_rows: vec![],
+                            authority_rows,
+                            trust_rows,
+                            key_rows: key_rows(&[key]),
+                            clock_latch,
+                        })
+                    })
+                })
         })
     }
 
     /// The administrative decision's authority row, at the head and epoch
     /// its decision read.
     ///
-    /// The metadata decision's chain is not a second row: a CAV1 holds one
-    /// row per authority coordinate, and two chains read at one head share
-    /// it, so the metadata decision is recorded in the CAU1's decision rows
-    /// only, as an initialization records it.
+    /// The metadata decision's chain is not a second row. A CAV1 holds
+    /// strictly ascending `(authority_timeline, head_seq, epoch)` rows, so
+    /// two chains read at one head cannot both be in it. This is the first
+    /// operation whose CAU1 decision rows are a strict superset of its CAV1
+    /// authority rows: in an initialization the two come from the same list
+    /// of decisions, and the metadata `write` decision appears in neither (it
+    /// enters through the key's `authority_request_digest`). R15.1(5) puts
+    /// the metadata `write` decision in this CAU1's rows, so the CAU1 holds
+    /// both decisions and the CAV1 only the abort decision's chain.
     fn authority_rows(
         &self,
         inputs: &StageInputsV1<'_>,
@@ -466,7 +571,8 @@ impl MemoryCommunityDomainV1 {
     /// PMF1 and release digest, the recorded TPS1 digest of its due member
     /// (or of the first member) as the policy digest and zero floors and
     /// UTC second. So an operator Abort is never refused for a release the
-    /// registry no longer holds, and the CAV1 is never partial.
+    /// registry no longer holds, and the CAV1 is never partial. The set is
+    /// never empty: a CDP1 roster has at least one row.
     fn abort_trust_rows(
         &self,
         context: CommunityQuarantineContextV1<'_>,
@@ -480,66 +586,83 @@ impl MemoryCommunityDomainV1 {
                 .entry(row.implementation().plugin_id())
                 .or_insert(row);
         }
-        let policy = CommunityStoreDomainV1::plugin_trust_policy(self, scope)?;
-        let utc = u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
-            .map_err(|_| Error::EvidenceUnavailable)?;
         let members = &record.reserved.members;
-        let mut rows = Vec::with_capacity(plugins.len());
-        for (plugin_id, row) in plugins {
-            let active = CommunityStoreDomainV1::active_release(self, scope, plugin_id)?;
-            rows.push(active.map_or_else(
-                || {
-                    let recorded = members
-                        .iter()
-                        .find(|member| {
-                            roster.get(member.roster_index).is_some_and(|candidate| {
-                                candidate.implementation().plugin_id() == plugin_id
-                            })
+        CommunityStoreDomainV1::plugin_trust_policy(self, scope).and_then(|policy| {
+            u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
+                .ok()
+                .ok_or(Error::EvidenceUnavailable)
+                .and_then(|utc| {
+                    plugins
+                        .into_iter()
+                        .map(|(plugin_id, row)| {
+                            CommunityStoreDomainV1::active_release(self, scope, plugin_id).map(
+                                |active| {
+                                    active.map_or_else(
+                                        || CommunityTrustViewRowV1 {
+                                            scope: scope.to_owned(),
+                                            plugin_id: plugin_id.to_owned(),
+                                            policy_digest: members
+                                                .iter()
+                                                .find(|member| {
+                                                    roster.get(member.roster_index).is_some_and(
+                                                        |candidate| {
+                                                            candidate.implementation().plugin_id()
+                                                                == plugin_id
+                                                        },
+                                                    )
+                                                })
+                                                .or_else(|| members.first())
+                                                .map_or_else(
+                                                    || Hash::from_bytes(policy.tps1_digest()),
+                                                    |member| member.trust_policy_snapshot_digest,
+                                                ),
+                                            policy_floor: 0,
+                                            release_floor: 0,
+                                            highest_trusted_utc_second: 0,
+                                            active_manifest_digest: row.digests()[0],
+                                            active_release_digest: Hash::from_bytes(
+                                                *row.implementation().release_digest().as_bytes(),
+                                            ),
+                                        },
+                                        |active| CommunityTrustViewRowV1 {
+                                            scope: scope.to_owned(),
+                                            plugin_id: plugin_id.to_owned(),
+                                            policy_digest: Hash::from_bytes(policy.tps1_digest()),
+                                            policy_floor: policy
+                                                .ptr1_floor()
+                                                .map_or(0, |(floor, _)| floor),
+                                            release_floor: policy
+                                                .prv1_floor()
+                                                .map_or(0, |(floor, _)| floor),
+                                            highest_trusted_utc_second: utc,
+                                            active_manifest_digest: Hash::from_bytes(
+                                                active.pmf1_digest(),
+                                            ),
+                                            active_release_digest: Hash::from_bytes(
+                                                active.release_digest(),
+                                            ),
+                                        },
+                                    )
+                                },
+                            )
                         })
-                        .or_else(|| members.first())
-                        .map_or_else(
-                            || Hash::from_bytes(policy.tps1_digest()),
-                            |member| member.trust_policy_snapshot_digest,
-                        );
-                    CommunityTrustViewRowV1 {
-                        scope: scope.to_owned(),
-                        plugin_id: plugin_id.to_owned(),
-                        policy_digest: recorded,
-                        policy_floor: 0,
-                        release_floor: 0,
-                        highest_trusted_utc_second: 0,
-                        active_manifest_digest: row.digests()[0],
-                        active_release_digest: Hash::from_bytes(
-                            *row.implementation().release_digest().as_bytes(),
-                        ),
-                    }
-                },
-                |active| CommunityTrustViewRowV1 {
-                    scope: scope.to_owned(),
-                    plugin_id: plugin_id.to_owned(),
-                    policy_digest: Hash::from_bytes(policy.tps1_digest()),
-                    policy_floor: policy.ptr1_floor().map_or(0, |(floor, _)| floor),
-                    release_floor: policy.prv1_floor().map_or(0, |(floor, _)| floor),
-                    highest_trusted_utc_second: utc,
-                    active_manifest_digest: Hash::from_bytes(active.pmf1_digest()),
-                    active_release_digest: Hash::from_bytes(active.release_digest()),
-                },
-            ));
-        }
-        Ok(rows)
+                        .collect()
+                })
+        })
     }
 
     /// The atomic Abort commit (R15.1(8)): the inventory generation and the
     /// CSI1 the operation read are compared, the pending erasure entry is
-    /// replaced (an Abort registers no row), and only then are the CAB1,
-    /// CAV1 and CAU1 sealed under the pass metadata key, which closes, the
-    /// retry index retained and the inventory generation advanced once.
+    /// found, and the records are sealed under the pass metadata key. Only
+    /// then is the entry replaced (an Abort registers no row), the retry
+    /// index retained, the inventory generation advanced once and the key
+    /// closed: every earlier step can still refuse, and a refusal leaves the
+    /// pass unresolved with its key open.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` when either compared value moved or the
     /// pass metadata key is missing, `InvalidBinding` when the pass holds no
-    /// pending entry and `CapacityExhausted` when the key cannot seal; each
-    /// leaves the pass unresolved.
+    /// pending entry and `CapacityExhausted` when the key cannot seal.
     fn commit_pass_abort(
         &mut self,
         seal: &'static AuthorityTrustRootSealV1,
@@ -561,45 +684,44 @@ impl MemoryCommunityDomainV1 {
         }
         let token = self.stage_abort(staged.key.0, staged.key.1, 0)?;
         staged.committed.records = self.seal_abort_records(&staged)?;
-        self.apply_abort(seal, &token)?;
-        self.inventory_generation += 1;
-        let receipt = CommunityPassAbortReceiptV1 {
-            timeline: staged.key.0,
-            reservation_operation_id: staged.key.1,
-            abort_digest: staged.committed.abort_digest,
-            abort: staged.committed.abort.clone(),
-        };
-        self.pass_aborts.insert(staged.key, staged.committed);
-        Ok(receipt)
+        self.apply_abort(seal, &token).map(|()| {
+            self.close_pass_metadata_key(staged.committed.metadata_key);
+            self.inventory_generation += 1;
+            let receipt = CommunityPassAbortReceiptV1 {
+                timeline: staged.key.0,
+                reservation_operation_id: staged.key.1,
+                abort_digest: staged.committed.abort_digest,
+                abort: staged.committed.abort.clone(),
+            };
+            self.pass_aborts.insert(staged.key, staged.committed);
+            receipt
+        })
     }
 
-    /// Seal the staged records under the pass metadata key and close it:
-    /// the pass is terminal, so the key never encrypts again.
+    /// Seal the staged records under the pass metadata key, which stays
+    /// open for the caller to close once the Abort commits.
     fn seal_abort_records(
         &mut self,
         staged: &StagedPassAbortV1,
     ) -> Result<Vec<SealedMetadataV1>, Error> {
-        let vault = self
-            .keys
+        self.keys
             .get_mut(&staged.committed.metadata_key)
-            .ok_or(Error::EvidenceUnavailable)?;
-        let sealed = staged
-            .plaintexts
-            .iter()
-            .map(|(schema, plaintext)| vault.seal(&staged.scope, *schema, plaintext))
-            .collect::<Result<Vec<_>, Error>>()?;
-        vault.close();
-        Ok(sealed)
+            .ok_or(Error::EvidenceUnavailable)
+            .and_then(|vault| {
+                staged
+                    .plaintexts
+                    .iter()
+                    .map(|(schema, plaintext)| vault.seal(&staged.scope, *schema, plaintext))
+                    .collect()
+            })
     }
-}
 
-/// The facts every staging step reads.
-struct StageInputsV1<'a> {
-    call: CommunityPassAbortCallV1<'a>,
-    bound: PassAbortBoundV1,
-    authenticated: &'a CommunityAuthorityCallV1,
-    administrative: &'a CommunityAuthorityAdmissionV1,
-    write: &'a MetadataWriteV1,
+    /// The pass is terminal: its metadata key never encrypts again.
+    fn close_pass_metadata_key(&mut self, protection_id: [u8; 16]) {
+        if let Some(vault) = self.keys.get_mut(&protection_id) {
+            vault.close();
+        }
+    }
 }
 
 /// Step 1: reason 0 `AuthenticatedCancellation` or 4 `RetiringGeneration`.

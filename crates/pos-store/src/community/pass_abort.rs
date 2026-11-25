@@ -17,7 +17,7 @@ mod operator;
 
 use pos_core::community_lifecycle::{
     CommunityAbortInputV1, CommunityAbortReasonV1, CommunityAbortV1,
-    CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1,
+    CommunityLifecycleErrorV1 as Error, CommunityReservationInputV1, CommunityReservationV1,
 };
 use pos_core::{Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -74,6 +74,9 @@ pub(super) struct CommittedPassAbortV1 {
     pub(super) abort: Zeroizing<Vec<u8>>,
     /// `H(CAB1)`.
     pub(super) abort_digest: Hash,
+    /// The CAB1's `evidence_not_after_micros`, the pass's `H_r`: a retry at
+    /// or after it is discovery of expired evidence (R13.2(4), 13).
+    pub(super) evidence_not_after_micros: u64,
     /// The administrative decision's leaf grant, whose grantee is the
     /// original principal (A5.3(6)).
     pub(super) leaf_grant_id: Hash,
@@ -85,8 +88,8 @@ pub(super) struct CommittedPassAbortV1 {
 
 /// What the retry lookup found.
 pub(super) enum PassAbortLookupV1<'a> {
-    /// An identical retry: the original is in the retry index.
-    Original,
+    /// An identical retry: the original Abort.
+    Original(&'a CommittedPassAbortV1),
     /// A first Abort of this unresolved pass.
     First(&'a CommunityPassRecordV1),
 }
@@ -115,7 +118,7 @@ impl MemoryCommunityDomainV1 {
                 .pass_aborts
                 .get(&(timeline, reservation_operation_id))
                 .filter(|original| original.bound == *bound)
-                .map(|_| PassAbortLookupV1::Original)
+                .map(PassAbortLookupV1::Original)
                 .ok_or(Error::Conflict),
             CommunityPassStatusV1::Reserved | CommunityPassStatusV1::Sealed => {
                 first_abort(record).map(|()| PassAbortLookupV1::First(record))
@@ -137,29 +140,35 @@ const fn first_abort(record: &CommunityPassRecordV1) -> Result<(), Error> {
 /// The fields of a CAB1 the host derives (R8.3(2)).
 #[derive(Clone, Copy)]
 pub(super) struct AbortFieldsV1 {
-    pub(super) pass_key: CommunityPassKeyV1,
-    pub(super) reservation_digest: Hash,
+    /// The reservation, whose CPK1 and horizon the CAB1 copies and whose
+    /// digest `H(CPR1)` it binds.
+    pub(super) reservation: CommunityReservationInputV1,
     pub(super) sealed_result_digest: Option<Hash>,
     pub(super) reason: CommunityAbortReasonV1,
     pub(super) failure_evidence_digest: Option<Hash>,
     pub(super) quarantine_delta_digest: Option<Hash>,
-    pub(super) evidence_not_after_micros: u64,
 }
 
 /// The canonical CAB1 and `H(CAB1)`.
-pub(super) fn abort_record(fields: AbortFieldsV1) -> Result<(Zeroizing<Vec<u8>>, Hash), Error> {
-    CommunityAbortV1::new(CommunityAbortInputV1 {
-        pass_key: fields.pass_key,
-        reservation_digest: fields.reservation_digest,
-        sealed_result_digest: fields.sealed_result_digest,
-        reason: fields.reason,
-        failure_evidence_digest: fields.failure_evidence_digest,
-        quarantine_delta_digest: fields.quarantine_delta_digest,
-        evidence_not_after_micros: fields.evidence_not_after_micros,
-    })
-    .map(|record| {
-        let bytes = record.to_canonical_cbor();
-        let digest = private_digest(b"PiglorOS.Community.CAB1.v1", &[bytes.as_slice()]);
-        (bytes, digest)
-    })
+///
+/// `H(CPR1)` is [`CommunityReservationV1::digest`], the one definition Seal
+/// (CPS1 `reservation_digest`) and Commit share.
+pub(super) fn abort_record(fields: &AbortFieldsV1) -> Result<(Zeroizing<Vec<u8>>, Hash), Error> {
+    CommunityReservationV1::new(fields.reservation)
+        .and_then(|reservation| {
+            CommunityAbortV1::new(CommunityAbortInputV1 {
+                pass_key: fields.reservation.pass_key,
+                reservation_digest: reservation.digest(),
+                sealed_result_digest: fields.sealed_result_digest,
+                reason: fields.reason,
+                failure_evidence_digest: fields.failure_evidence_digest,
+                quarantine_delta_digest: fields.quarantine_delta_digest,
+                evidence_not_after_micros: fields.reservation.evidence_not_after_micros,
+            })
+        })
+        .map(|record| {
+            let bytes = record.to_canonical_cbor();
+            let digest = private_digest(b"PiglorOS.Community.CAB1.v1", &[bytes.as_slice()]);
+            (bytes, digest)
+        })
 }
