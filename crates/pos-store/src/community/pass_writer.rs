@@ -301,9 +301,8 @@ impl MemoryCommunityDomainV1 {
         self.recheck_reserve(&input, state, horizons)?;
         // The Reserve allocates its native producer ordinal and its pass
         // ordinal in its own transaction (annex §4). Nothing is burned here.
-        let ordinals = self.next_ordinals(state)?;
         let outcome = horizons.horizons.outcome_micros;
-        let reservation = mint_reservation(&input, &cri1, ordinals, outcome)?;
+        let (reservation, ordinals) = self.reservation_for(&input, &cri1, state, outcome)?;
         let facts = input.pass;
         // The materialization's rows bind in the Reserve transaction; the
         // entry holds only the rest and `F_p` (R13.1(4)).
@@ -334,6 +333,19 @@ impl MemoryCommunityDomainV1 {
             native_ordinal: ordinals.0,
             pass_ordinal: ordinals.1,
         })
+    }
+
+    /// The CPR1 of a Reserve and the ordinals it allocated: the next native
+    /// producer ordinal and the next pass ordinal of T.
+    fn reservation_for(
+        &self,
+        input: &CommunityReserveInputV1,
+        cri1: &CommunityReservationRequestV1,
+        state: &CommunityPassStateV1,
+        outcome: u64,
+    ) -> Result<(CommunityReservationInputV1, (u64, u64)), Error> {
+        let ordinals = self.next_ordinals(state)?;
+        mint_reservation(input, cri1, ordinals, outcome).map(|reservation| (reservation, ordinals))
     }
 
     /// The next native producer ordinal (the burned counter's) and the next
@@ -590,6 +602,13 @@ impl MemoryCommunityDomainV1 {
         staged: CommunityStagedReserveV1,
     ) -> Result<(), Error> {
         self.check_apply_reserve(&staged)?;
+        self.publish_reserve(staged);
+        Ok(())
+    }
+
+    /// Publish a checked Reserve: its ordinals, the burn its materialization
+    /// consumes, the entry, the record and the pass state.
+    fn publish_reserve(&mut self, staged: CommunityStagedReserveV1) {
         let (timeline, _) = staged.key;
         self.native_producer_ordinal = staged.native_ordinal;
         if staged.minted.is_some() {
@@ -602,15 +621,19 @@ impl MemoryCommunityDomainV1 {
             state.highest_pass_ordinal = staged.pass_ordinal;
             record_reserve(state, staged.minted);
         });
-        Ok(())
     }
 
-    /// The cheap re-validation of an apply: the identity is not recorded
-    /// (`Conflict`), T has no other pending reservation (`PassUnresolved`),
-    /// has pass state (`EvidenceUnavailable`) and the ordinals staged are
-    /// still the next ones (`Conflict`).
+    /// The cheap re-validation of an apply: the identity checks, then the
+    /// ordinals staged are still the next ones (`Conflict`).
     fn check_apply_reserve(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
-        let key = staged.key;
+        self.check_apply_identity(staged.key)?;
+        self.check_ordinals(staged)
+    }
+
+    /// The identity is not recorded (`Conflict`), T has no other pending
+    /// reservation (`PassUnresolved`) and has pass state
+    /// (`EvidenceUnavailable`).
+    fn check_apply_identity(&self, key: (TimelineId, [u8; 16])) -> Result<(), Error> {
         let (timeline, _) = key;
         if self.pending_reservations.contains_key(&key) || self.pass_records.contains_key(&key) {
             return Err(Error::Conflict);
@@ -623,19 +646,25 @@ impl MemoryCommunityDomainV1 {
         {
             return Err(Error::PassUnresolved);
         }
-        let floor = self
+        if !self.pass_states.contains_key(&timeline) {
+            return Err(Error::EvidenceUnavailable);
+        }
+        Ok(())
+    }
+
+    /// The ordinals staged are still the next ones: another burn or pass in
+    /// between makes the token stale (`Conflict`).
+    fn check_ordinals(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
+        let next_pass = self
             .pass_states
-            .get(&timeline)
-            .map(|state| state.highest_pass_ordinal)
-            .ok_or(Error::EvidenceUnavailable)?;
-        // The ordinals staged must still be the next ones: another burn or
-        // pass in between makes the token stale.
-        if floor.checked_add(1) != Some(staged.pass_ordinal)
-            || self.native_producer_ordinal.checked_add(1) != Some(staged.native_ordinal)
+            .get(&staged.key.0)
+            .and_then(|state| state.highest_pass_ordinal.checked_add(1));
+        if next_pass == Some(staged.pass_ordinal)
+            && self.native_producer_ordinal.checked_add(1) == Some(staged.native_ordinal)
         {
-            Err(Error::Conflict)
-        } else {
             Ok(())
+        } else {
+            Err(Error::Conflict)
         }
     }
 
