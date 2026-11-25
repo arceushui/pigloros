@@ -833,7 +833,11 @@ impl MemoryCommunityDomainV1 {
                 key.close();
                 cohort_key.close();
                 StagedInitializationV1 {
-                    pass_state: CommunityPassStateV1::initialized(history, &graph),
+                    pass_state: CommunityPassStateV1::initialized(
+                        operation.generation,
+                        history,
+                        &graph,
+                    ),
                     key: (operation.timeline(), operation.call.form.operation_id),
                     committed: CommittedInitializationV1 {
                         profile_digest: operation.context.installation.profile.digest(),

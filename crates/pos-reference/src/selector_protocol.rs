@@ -999,14 +999,13 @@ fn grant_matches_execute_request(
         && grant.expected_launch_policy_digest == spx.authority.lps1_digest
 }
 
-/// The receipt binds at most one NXT1 digest per planned exchange, and none
-/// unless the adapter was released (ADR-069 R16 N13 and the residual clause
-/// of R16 §3.3 change C): no exchange can happen before `release1-digest` is
-/// bound.
+/// A receipt binds no more NXT1 digests than planned exchanges, and none
+/// before the release (ADR-069 R16 N13).
 ///
-/// The check is mode-independent, so it is stricter than R16 requires for
-/// every non-Local mode, `Replay` with empty plans included. 1492-b (R16 §7)
-/// owns the checks for non-empty plans.
+/// No exchange can happen before `release1-digest` is bound: the residual
+/// clause of R16 §3.3 change C. The check is mode-independent, so it is
+/// stricter than R16 requires for the non-Local modes without a replay source.
+/// 1492-b (R16 §7) owns the checks for non-empty plans.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
@@ -3293,6 +3292,8 @@ mod tests {
         assert!(!relations(&evidence, &grant, &receipt, &spx));
         receipt.network_transcript_digests.clear();
         assert!(transcripts_fit_plans(&receipt, &spx));
+        // More transcripts than plans, after the release.
+        receipt.release1_digest = Some([8; 32]);
         receipt.network_transcript_digests = vec![[1; 32], [7; 32]];
         assert!(!transcripts_fit_plans(&receipt, &spx));
         Ok(())

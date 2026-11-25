@@ -486,7 +486,9 @@ impl ExecuteError {
     /// §4.7 and §4.1, whose unit could not be pinned (2, R9 §4.6.7), whose
     /// Local network or FD 3 channel could not be set up (6) or whose Replay
     /// exchange is unavailable (7, ADR-069 R14 §3.4). `None` for every other
-    /// error: the terminal records give those their own codes.
+    /// error: the terminal records give those their own codes, and a network
+    /// contradiction or any Bind variant but `Namespace` and `Channel` takes
+    /// the O6 fallback (code 2, quarantine).
     #[must_use]
     pub fn launch_failure(&self) -> Option<LaunchFailure> {
         self.pre_start_refusal().or_else(|| self.unpinned_unit())

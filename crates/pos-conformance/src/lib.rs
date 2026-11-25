@@ -40,6 +40,7 @@ mod non_interference;
 mod non_interference_report;
 mod plugin_trust_bridge;
 mod profile_contract;
+mod provider_conformance;
 mod provider_contract;
 mod report_attestation;
 pub mod run_evidence_archive;
@@ -163,6 +164,12 @@ pub use profile_contract::{
     IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
     SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
     CONFORMANCE_PROFILE_MAGIC_V1, DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
+};
+pub use provider_conformance::{
+    evaluate, run_suite, verify_gate, CaseRecord, CaseVerdict, ExpectedPublicOutcome,
+    FailureReason, GateError, ObservedAttempt, ObservedPublic, ProviderConformanceCase,
+    ProviderRun, ProviderRunError, ProviderUnderTest, ReportArchitecture, SuiteReport,
+    CONCURRENT_ATTEMPTS_V1,
 };
 pub use provider_contract::{
     ArtifactDescriptorV1, FixtureFamilyV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
