@@ -2,12 +2,14 @@
 //!
 //! A host Timeline is a root that only the host creates, under an identity
 //! no client can claim: the Local Principal's Consent Timeline and its
-//! authority Timeline, and the Erasure Host Timeline (ELHT1) once
-//! `provision-local-erasure` has recorded the store's erasure store
-//! identity. No client route reaches one: a read, a signal or action append
-//! and a Fork-admission parent naming one are answered exactly as for a
-//! Timeline the store does not hold, and none of them counts against the
-//! client root-Timeline ceiling.
+//! authority Timeline, the `decision-previews` Timeline (ADR-140 P10), and
+//! the Erasure Host Timeline (ELHT1) once `provision-local-erasure` has
+//! recorded the store's erasure store identity. No client route reaches
+//! one: a read, a signal or action append and a Fork-admission parent naming
+//! one are answered exactly as for a Timeline the store does not hold, and
+//! none of them counts against the client root-Timeline ceiling. The
+//! `decision-previews` identity is listed whether or not the store holds it
+//! yet; it is not an ELB1 host Timeline (ADR-140 C17).
 //!
 //! The set is read once, when the Gateway's executor takes ownership of the
 //! host. The erasure store identity is write-once and only
@@ -18,7 +20,10 @@ use pos_core::{ErasureHostErrorV1, TimelineId};
 use pos_local_erasure_loader::local_principal::local_principal_authority_timeline;
 use pos_runtime::ErasureExecutionHostV1;
 
-use crate::local_principal::local_principal_consent_timeline;
+use crate::{
+    decision_preview::decision_previews_timeline,
+    local_principal::local_principal_consent_timeline,
+};
 
 /// The host Timelines of one store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +55,7 @@ impl HostTimelinesV1 {
         [
             local_principal_consent_timeline(),
             local_principal_authority_timeline(),
+            decision_previews_timeline(),
         ]
         .into_iter()
         .chain(self.erasure_host)
@@ -60,6 +66,7 @@ impl HostTimelinesV1 {
     pub(crate) fn contains(self, timeline: TimelineId) -> bool {
         timeline == local_principal_consent_timeline()
             || timeline == local_principal_authority_timeline()
+            || timeline == decision_previews_timeline()
             || self.erasure_host == Some(timeline)
     }
 }
@@ -76,8 +83,8 @@ mod tests {
     fn contains_exactly_the_listed_roots() {
         let erasure_host = TimelineId::new();
         for (host_timelines, count) in [
-            (HostTimelinesV1::new(None), 2),
-            (HostTimelinesV1::new(Some(erasure_host)), 3),
+            (HostTimelinesV1::new(None), 3),
+            (HostTimelinesV1::new(Some(erasure_host)), 4),
         ] {
             let roots = host_timelines.roots();
             assert_eq!(roots.len(), count);

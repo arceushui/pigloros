@@ -43,6 +43,7 @@ use pos_core::{
     GatewayRevisionDraftV1, GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1,
     GatewayRevisionKeyV1, GatewayRevisionKindV1, GatewayRevisionRecordV1, GatewayRevisionStateV1,
 };
+use pos_runtime::{PreferenceWeightV1, PreviewOptionV1};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use ulid::Ulid;
@@ -457,6 +458,41 @@ pub(crate) fn content_bytes<F: GatewayRevisionFamilyV1>(
         entity_text(subject),
         entries,
     ))
+}
+
+/// The weights of stored Preference content, as the Match Score reads them.
+///
+/// The content is decoded without re-validating its bounds, so an
+/// out-of-bounds weight reaches the refusal of
+/// [`pos_runtime::match_score_v1`] (ADR-140 test plan); `None` for content
+/// that does not decode.
+pub(crate) fn preview_weights(content: &[u8]) -> Option<Vec<PreferenceWeightV1>> {
+    ciborium::from_reader::<ContentV1<WeightV1>, _>(content)
+        .ok()
+        .map(|ContentV1(.., weights)| {
+            weights
+                .into_iter()
+                .map(|WeightV1(dimension, weight_micro)| PreferenceWeightV1 {
+                    dimension,
+                    weight_micro,
+                })
+                .collect()
+        })
+}
+
+/// The options of stored `OptionSpec` content in authored order, as the
+/// Match Score reads them: their keys and tags (ADR-140 P2 leaves out the
+/// label, the lean hint and the coordinates); `None` for content that does
+/// not decode.
+pub(crate) fn preview_options(content: &[u8]) -> Option<Vec<PreviewOptionV1>> {
+    ciborium::from_reader::<ContentV1<OptionV1>, _>(content)
+        .ok()
+        .map(|ContentV1(.., options)| {
+            options
+                .into_iter()
+                .map(|OptionV1(key, _, tags, _, _)| PreviewOptionV1 { key, tags })
+                .collect()
+        })
 }
 
 /// The provenance digest of `record`.
