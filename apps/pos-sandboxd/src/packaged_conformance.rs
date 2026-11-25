@@ -113,18 +113,28 @@ impl ConformanceCase {
         let [image, certificate, description, adapter, adapter_arguments @ ..] = arguments else {
             return Err(ConformanceError::Usage);
         };
-        let key_description = description.to_str().ok_or(ConformanceError::Usage)?;
-        let adapter_arguments = adapter_arguments
-            .iter()
-            .map(|argument| argument.to_str().map(str::to_owned))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(ConformanceError::Usage)?;
+        Self::read(
+            [image, certificate, adapter],
+            description,
+            adapter_arguments,
+        )
+    }
+
+    /// Read the three files and convert the text arguments.
+    fn read(
+        [image, certificate, adapter]: [&OsString; 3],
+        description: &OsString,
+        adapter_arguments: &[OsString],
+    ) -> Result<Self, ConformanceError> {
         Ok(Self {
             image: fs::read(image)?,
             certificate: fs::read(certificate)?,
-            key_description: key_description.to_owned(),
+            key_description: text(description)?,
             adapter: fs::read(adapter)?,
-            adapter_arguments,
+            adapter_arguments: adapter_arguments
+                .iter()
+                .map(text)
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -193,6 +203,14 @@ fn prepare(
                 .map(|directory| (admission, directory))
                 .map_err(ConformanceError::Registry)
         })
+}
+
+/// One command-line argument as text.
+fn text(argument: &OsString) -> Result<String, ConformanceError> {
+    argument
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(ConformanceError::Usage)
 }
 
 /// The tokio runtime the driver runs on: one thread, with I/O and timers.
