@@ -918,11 +918,11 @@ fn validate_evidence(
         trs1_digest: grant.authority.trs1_digest,
         rvs1_digest: grant.authority.rvs1_digest,
     };
-    if !result_matches_evidence(result, grant, receipt)
-        || !grant_matches_execute_request(grant, &spx, &expected_grant_authority)
-        || !receipt_matches_grant(receipt, grant, &expected_receipt_authority)
-        || !transcripts_fit_plans(receipt, &spx)
-    {
+    if !evidence_relations_hold(
+        (result, grant, receipt),
+        &spx,
+        (&expected_grant_authority, &expected_receipt_authority),
+    ) {
         return Err(AdapterError::ProtocolFailure);
     }
     result
@@ -951,6 +951,22 @@ fn validate_evidence(
         return Err(AdapterError::ProtocolFailure);
     }
     Ok(())
+}
+
+/// The SPY1, AGR1 and SPR1 agree with one another and with the SPX1.
+fn evidence_relations_hold(
+    (result, grant, receipt): (
+        &SandboxProviderResult,
+        &AdmissionGrant,
+        &SandboxProviderReceipt,
+    ),
+    spx: &SandboxExecuteRequest,
+    (expected_grant, expected_receipt): (&AdmissionAuthority, &ReceiptAuthority),
+) -> bool {
+    result_matches_evidence(result, grant, receipt)
+        && grant_matches_execute_request(grant, spx, expected_grant)
+        && receipt_matches_grant(receipt, grant, expected_receipt)
+        && transcripts_fit_plans(receipt, spx)
 }
 
 fn result_matches_evidence(
