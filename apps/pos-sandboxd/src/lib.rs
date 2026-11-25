@@ -346,9 +346,10 @@ pub use lifecycle::{
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{
-    BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
-    HostServiceStream, LocalNetworkPort, LocalProxyBindError, NetworkRemovalFailure,
-    RefusingConnector, RemoveNetwork, ServeError, ServedProxy, SetupClass, SetupError,
+    BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, FailClosedSetup,
+    HostServiceChannel, HostServiceStream, LocalNetworkPort, LocalProxyBindError,
+    NetworkRemovalFailure, RefusingConnector, RemoveNetwork, ServeError, ServedProxy, SetupClass,
+    SetupError,
 };
 #[cfg(target_os = "linux")]
 pub use namespace_network::netlink;

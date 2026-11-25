@@ -438,4 +438,8 @@ fn a_refusing_connector_removes_nothing() {
 fn the_fail_closed_setup_error_is_a_creation_failure_that_removed_nothing() {
     assert_eq!(FailClosedSetup.setup_class(), SetupClass::Creation);
     assert_eq!(FailClosedSetup.removal(), None);
+    assert_eq!(
+        FailClosedSetup.to_string(),
+        "the fail-closed Local network cannot fail"
+    );
 }
