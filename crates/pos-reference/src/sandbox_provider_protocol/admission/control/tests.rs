@@ -2,17 +2,20 @@ use ciborium::value::Value;
 
 use super::*;
 use crate::selector_transport_test_fixture::{
-    authenticated_transport_fixture, TransportAdmissionFixture,
+    authenticated_transport_fixture, derived_nonce, TransportAdmissionFixture,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const REQUEST_ID: [u8; 16] = [5; 16];
-const NONCE: [u8; 16] = [6; 16];
 const ATTEMPT: [u8; 16] = [7; 16];
 const AGR1: [u8; 32] = [8; 32];
 const SPY1: [u8; 32] = [9; 32];
 const SAU1: [u8; 32] = [10; 32];
+
+fn nonce() -> [u8; 16] {
+    derived_nonce("admission control tests")
+}
 
 fn accepted() -> ReconciliationEvidenceFields {
     ReconciliationEvidenceFields {
@@ -92,9 +95,9 @@ fn flip_last_byte(mut bytes: Vec<u8>) -> Vec<u8> {
 fn requests_bind_the_active_policy_and_round_trip_their_canonical_bytes() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
-    let (cancel, cancel_bytes) = provider.cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (cancel, cancel_bytes) = provider.cancel_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let (reconcile, reconcile_bytes) =
-        provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+        provider.reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     assert_eq!(
         SandboxCancelRequest::from_canonical_cbor(&cancel_bytes)?,
         cancel
@@ -106,7 +109,7 @@ fn requests_bind_the_active_policy_and_round_trip_their_canonical_bytes() -> Tes
     assert_ne!(cancel_bytes, reconcile_bytes);
     assert_eq!(cancel.request, reconcile.request);
     assert_eq!(cancel.request.request_id, REQUEST_ID);
-    assert_eq!(cancel.request.nonce, NONCE);
+    assert_eq!(cancel.request.nonce, nonce());
     assert_eq!(cancel.request.apt1_digest, provider.policy.policy_digest());
     assert_eq!(cancel.request.policy_epoch, provider.policy.policy_epoch());
     assert_eq!((cancel.attempt_id, cancel.agr1_digest), (ATTEMPT, AGR1));
@@ -118,10 +121,10 @@ fn requests_refuse_each_zero_identity() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
     let zero_inputs = [
-        ([0; 16], NONCE, ATTEMPT, AGR1),
-        (REQUEST_ID, [0; 16], ATTEMPT, AGR1),
-        (REQUEST_ID, NONCE, [0; 16], AGR1),
-        (REQUEST_ID, NONCE, ATTEMPT, [0; 32]),
+        ([0; 16], nonce(), ATTEMPT, AGR1),
+        (REQUEST_ID, nonce().map(|byte| byte ^ byte), ATTEMPT, AGR1),
+        (REQUEST_ID, nonce(), [0; 16], AGR1),
+        (REQUEST_ID, nonce(), ATTEMPT, [0; 32]),
     ];
     for (request_id, nonce, attempt, agr1) in zero_inputs {
         assert_eq!(
@@ -144,7 +147,7 @@ fn requests_refuse_each_zero_identity() -> TestResult {
 fn cancel_authentication_accepts_only_the_signed_answer_to_the_request() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
-    let (request, _) = provider.cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, _) = provider.cancel_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let signed = scy1(&fixture, REQUEST_ID, 1, key_id(&fixture))?;
     for accepted_spy1 in [None, Some(SPY1)] {
         let verified = provider.authenticate_cancel_response(&signed, &request, accepted_spy1)?;
@@ -197,7 +200,7 @@ fn cancel_authentication_accepts_only_the_signed_answer_to_the_request() -> Test
 fn reconcile_recomputes_the_tuple_when_the_selector_accepted_the_terminal() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
-    let (request, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, _) = provider.reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let signed = sry1(&fixture, REQUEST_ID, recomputed_digest()?, key_id(&fixture))?;
     let verified =
         provider.authenticate_reconcile_response(&signed, &request, Some(&accepted()))?;
@@ -213,7 +216,7 @@ fn reconcile_recomputes_the_tuple_when_the_selector_accepted_the_terminal() -> T
 fn reconcile_refuses_a_validly_signed_digest_that_is_not_the_recomputed_one() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
-    let (request, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, _) = provider.reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let mut changed = recomputed_digest()?;
     changed[31] ^= 1;
     let signed = sry1(&fixture, REQUEST_ID, changed, key_id(&fixture))?;
@@ -232,7 +235,7 @@ fn reconcile_refuses_a_validly_signed_digest_that_is_not_the_recomputed_one() ->
 fn reconcile_refuses_accepted_digests_that_do_not_name_the_requested_attempt() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
-    let (request, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, _) = provider.reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let signed = sry1(&fixture, REQUEST_ID, recomputed_digest()?, key_id(&fixture))?;
     let other_attempt = ReconciliationEvidenceFields {
         attempt_id: [70; 16],
@@ -259,7 +262,7 @@ fn reconcile_refuses_accepted_digests_that_do_not_name_the_requested_attempt() -
 fn reconcile_checks_the_signature_before_the_request_identities() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
-    let (request, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (request, _) = provider.reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let digest = recomputed_digest()?;
     let signed = sry1(&fixture, REQUEST_ID, digest, key_id(&fixture))?;
     assert_eq!(
@@ -301,13 +304,13 @@ fn a_foreign_key_id_is_refused_before_the_signature_is_verified() -> TestResult 
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
     let foreign = || Value::Text("foreign".to_owned());
-    let (cancel, _) = provider.cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (cancel, _) = provider.cancel_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let cancelled = flip_last_byte(scy1(&fixture, REQUEST_ID, 1, foreign())?);
     assert_eq!(
         provider.authenticate_cancel_response(&cancelled, &cancel, None),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
-    let (reconcile, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let (reconcile, _) = provider.reconcile_request(REQUEST_ID, nonce(), ATTEMPT, AGR1)?;
     let reconciled = flip_last_byte(sry1(&fixture, REQUEST_ID, recomputed_digest()?, foreign())?);
     assert_eq!(
         provider.authenticate_reconcile_response(&reconciled, &reconcile, None),
