@@ -152,7 +152,7 @@ GUEST_FILES = {
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
     "mountfsd-service-properties", "mountfsd-socket-properties", "manager-environment",
-    "pid1-namespaces", "cases",
+    "pid1-namespaces", "cases", "network",
 }
 DRIVER_CASES = ("positive", "tampered", "wrong-key", "verity-d")
 MOUNTED_CASES = ("positive", "tampered")
@@ -160,6 +160,29 @@ DRIVER_FILES = {"arguments", "report", "driver-stderr", "driver-status", "timing
                 "devices-after", "runtime-after"}
 HELD_FILES = {"devices-held", "mountinfo-held", "dm-table-held", "readback"}
 REPLY_FILES = {"devices-before", "reply", "stderr", "status", "timing", "devices-after"}
+# ADR-069 R14: the network of a PrivateNetwork= unit under each value of
+# net.core.fb_tunnels_only_for_init_net. Value 0 is the control: the fallback
+# tunnel devices the loaded modules create in the init namespace must then
+# appear in the unit's, or the other values prove nothing.
+NETWORK_CASES = {"fb-0": "0", "fb-1": "1", "fb-2": "2"}
+NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWORK_CASES}
+# Each case holds the run's own files; the probe's files exist only if its unit
+# got as far as writing them, so a failed case still has an explaining record.
+NETWORK_RUN_FILES = {"sysctl", "status", "stderr", "journal"}
+NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
+LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
+# The modules guest.nix loads, and the fallback device each creates in a new
+# network namespace while the sysctl is 0 (ipip, sit, ip6_tunnel, ip_gre).
+TUNNEL_MODULES = {"ipip", "sit", "ip6_tunnel", "ip_gre"}
+FALLBACK_DEVICES = {"tunl0", "sit0", "ip6tnl0", "gre0"}
+ROUTE_KINDS = {"local", "broadcast", "multicast", "unicast", "unreachable", "blackhole", "prohibit", "throw"}
+ROUTES4_ALLOWED = {"kinds": {"local": {"127.0.0.0/8", "127.0.0.1"},
+                             "broadcast": {"127.0.0.0", "127.255.255.255"}},
+                   "unicast": set(), "main": set(), "required": {"127.0.0.0/8"}, "src": {"127.0.0.1"}}
+ROUTES6_ALLOWED = {"kinds": {"local": {"::1", "::1/128"}, "multicast": {"ff00::/8"}},
+                   "unicast": {"::1", "::1/128"}, "main": {"::1", "::1/128"}, "required": {"::1", "::1/128"},
+                   "src": {"::1"}}
+LINK_NAME = re.compile(r"[0-9]+: ([^\s:@]+)(?:@\S+)?: ")
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
 PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
@@ -387,6 +410,7 @@ class Evidence:
                 missing, extra = sorted(expected - found), sorted(found - expected)
                 raise EvidenceError(f"{name}/ files differ: missing {missing}, unexpected {extra}")
         self._inventory_cases()
+        self._inventory_network()
         found = {path.name for path in (self.root / "host" / "images").iterdir()}
         if found != HOST_IMAGE_FILES:
             raise EvidenceError(f"host/images/ differs: {sorted(found)}")
@@ -412,6 +436,22 @@ class Evidence:
                 raise EvidenceError(f"malformed case record: {name}: {sorted(found)}")
         if {path.name for path in (cases / "mountfsd-reply").iterdir()} != REPLY_FILES:
             raise EvidenceError("malformed case record: mountfsd-reply")
+
+    def _inventory_network(self) -> None:
+        network = self.root / "guest" / "network"
+        if {path.name for path in network.iterdir()} != NETWORK_ENTRIES:
+            raise EvidenceError("guest/network/ does not hold exactly the ADR-069 R14 records")
+        for name in NETWORK_CASES:
+            found = {path.name for path in (network / name).iterdir()}
+            # The run's own files must all exist; the probe's may be any subset, because a
+            # failed `ip` leaves the files it had already created. check_network_case then
+            # judges status and stderr before it requires the whole probe.
+            missing = sorted(NETWORK_RUN_FILES - found)
+            unexpected = sorted(found - NETWORK_RUN_FILES - NETWORK_PROBE_FILES)
+            if missing or unexpected:
+                raise EvidenceError(
+                    f"malformed network record {name}: missing {missing}, unexpected {unexpected}, "
+                    f"probe files {sorted(found & NETWORK_PROBE_FILES)}")
 
     def _verify_manifest(self) -> None:
         """A sealed artifact must match its manifest, file for file."""
@@ -1108,6 +1148,153 @@ def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
 
 
 
+def link_names(evidence: Evidence, name: str) -> list[str]:
+    names = []
+    for line in evidence.text(name).splitlines():
+        match = LINK_NAME.match(line)
+        if not match:
+            raise EvidenceError(f"malformed {name} line: {line!r}")
+        names.append(match.group(1))
+    return names
+
+
+def address_set(evidence: Evidence, name: str) -> set[tuple[str, str, str]]:
+    addresses = set()
+    for line in evidence.text(name).splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[2] not in ("inet", "inet6"):
+            raise EvidenceError(f"malformed {name} line: {line!r}")
+        # `ip` prints a linked device as NAME@PEER.
+        addresses.add((fields[1].split("@")[0], fields[2], fields[3]))
+    return addresses
+
+
+# The fields `ip route` prints after a loopback route's destination, with the
+# values each may take; `linkdown` stands alone, `src` is the family's own
+# loopback address and `metric` is a short ASCII number. Anything else (`via`,
+# `gateway`, `nhid`, `encap`, `nexthop`, a global scope ...) is not the
+# loopback's own, and no field or flag may appear twice.
+ROUTE_FIELDS = {"dev": {"lo"}, "table": {"local", "main"}, "proto": {"kernel"}, "scope": {"host", "link"},
+                "src": None, "metric": None, "pref": {"medium"}}
+ROUTE_FLAGS = {"linkdown"}
+METRIC_DIGITS = 10
+
+
+def route_fields(fields: list[str], src: set[str]) -> dict[str, str] | None:
+    """The `key value` pairs and flags of a route's tail, or None if any is foreign or repeated."""
+    pairs, index = {}, 0
+    while index < len(fields):
+        key = fields[index]
+        if key in pairs:
+            return None
+        if key in ROUTE_FLAGS:
+            pairs[key] = ""
+            index += 1
+            continue
+        if key not in ROUTE_FIELDS or index + 1 >= len(fields):
+            return None
+        value = fields[index + 1]
+        allowed = src if key == "src" else ROUTE_FIELDS[key]
+        if allowed is None:
+            valid = value.isascii() and value.isdigit() and len(value) <= METRIC_DIGITS
+        else:
+            valid = value in allowed
+        if not valid:
+            return None
+        pairs[key] = value
+        index += 2
+    return pairs
+
+
+def require_loopback_routes(evidence: Evidence, name: str, family: dict) -> list[str]:
+    """Every route is one of the loopback's own, and the host route is there.
+
+    A route is `[KIND] DESTINATION` and then only the fields of ROUTE_FIELDS,
+    each at most once, with `dev lo`. A kinded route (`local`, `broadcast`,
+    `multicast`) is in the local table. IPv6 may also hold the `::1` host route
+    without a kind in the main table, which some kernels print with no `table`
+    field; the same route unkinded in the local table is refused, because the
+    kernel always names a local-table route's kind.
+    """
+    routes = evidence.text(name).splitlines()
+    seen = set()
+    for line in routes:
+        fields = line.split()
+        if not fields:
+            raise EvidenceError(f"{name} holds a blank line")
+        kind = fields[0] if fields[0] in ROUTE_KINDS else None
+        destination = fields[1 if kind else 0] if len(fields) > 1 else ""
+        pairs = route_fields(fields[(2 if kind else 1):], family["src"])
+        allowed = family["kinds"].get(kind, set()) if kind else family["unicast"]
+        if kind:
+            table_ok = pairs is not None and pairs.get("table") == "local"
+        else:
+            table_ok = pairs is not None and pairs.get("table") in (None, "main")
+        if pairs is None or pairs.get("dev") != "lo" or destination not in allowed or not table_ok \
+                or (not kind and destination not in family["main"]):
+            raise EvidenceError(f"{name} holds a route other than the loopback's own: {line!r}")
+        seen.add(destination)
+    if not seen & family["required"]:
+        raise EvidenceError(f"{name} lacks the loopback host route: {routes}")
+    return routes
+
+
+def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[str, list[str]]) -> dict:
+    base = f"guest/network/{name}"
+    if evidence.line(f"{base}/sysctl") != value:
+        raise EvidenceError(f"{name} did not run with net.core.fb_tunnels_only_for_init_net={value}")
+    status = evidence.line(f"{base}/status")
+    stderr = evidence.text(f"{base}/stderr").strip(" \t\r\n")
+    present = sorted(probe for probe in NETWORK_PROBE_FILES if (evidence.root / base / probe).exists())
+    if status != "0":
+        silent = "" if stderr else " (empty: systemd-run printed nothing)"
+        raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
+                            f"stderr: {stderr[:400]!r}{silent}; probe files written: {present}; "
+                            f"look in {base}/journal")
+    if stderr:
+        raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr[:400]!r}")
+    if present != sorted(NETWORK_PROBE_FILES):
+        raise EvidenceError(f"the {name} PrivateNetwork= unit completed but wrote only {present}")
+    netns = evidence.line(f"{base}/netns")
+    if not re.fullmatch(r"net:\[[0-9]+\]", netns) or netns == init[0]:
+        raise EvidenceError(f"the {name} unit did not run in a network namespace of its own")
+    links = link_names(evidence, f"{base}/links")
+    addresses = address_set(evidence, f"{base}/addrs")
+    extra = [link for link in links if link != "lo"]
+    if links.count("lo") != 1 or len(set(links)) != len(links) or not addresses >= LOOPBACK_ADDRESSES:
+        raise EvidenceError(f"the {name} unit lacks exactly one lo with 127.0.0.1/8 and ::1/128: "
+                            f"{links} {sorted(addresses)}")
+    if value == "0":
+        # The control: the fallback device of every loaded tunnel module
+        # appears, and each is one the host has too.
+        if not FALLBACK_DEVICES <= set(extra) or any(link not in init[1] for link in extra):
+            raise EvidenceError(f"with value 0 the unit lacks the host's fallback tunnel devices: {links}")
+    elif extra or addresses != LOOPBACK_ADDRESSES:
+        raise EvidenceError(f"the {name} unit holds more than lo with 127.0.0.1/8 and ::1/128: "
+                            f"{links} {sorted(addresses)}")
+    return {"links": links, "addresses": sorted(addresses),
+            "routes4": require_loopback_routes(evidence, f"{base}/routes4", ROUTES4_ALLOWED),
+            "routes6": require_loopback_routes(evidence, f"{base}/routes6", ROUTES6_ALLOWED)}
+
+
+def check_network(evidence: Evidence) -> dict:
+    """ADR-069 R14: the unit holds only lo whenever the sysctl is at least 1."""
+    # The packaged default: the kernel's own 0, which R14 changes through
+    # a host sysctl.d drop-in that #1488-b ships.
+    if evidence.line("guest/network/boot-sysctl") != "0":
+        raise EvidenceError("the packaged guest does not boot with net.core.fb_tunnels_only_for_init_net=0")
+    modules = {line.split()[0] for line in evidence.text("guest/network/modules").splitlines() if line.split()}
+    if not TUNNEL_MODULES <= modules:
+        raise EvidenceError(f"the tunnel modules are not loaded: {sorted(TUNNEL_MODULES - modules)}")
+    init_netns = evidence.line("guest/network/init-netns")
+    init_links = link_names(evidence, "guest/network/init-links")
+    if not FALLBACK_DEVICES <= set(init_links):
+        raise EvidenceError("the init namespace has no fallback tunnel device to compare with")
+    return {"boot_sysctl": 0, "init_links": init_links, "modules": sorted(TUNNEL_MODULES),
+            **{name: check_network_case(evidence, name, value, (init_netns, init_links))
+               for name, value in NETWORK_CASES.items()}}
+
+
 def sha256_file(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1173,6 +1360,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "verity_d": check_verity_d(evidence, paths["systemd"]),
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
         "mount_image_cases": check_cases(evidence, paths, (der, description), untrusted),
+        "private_network": check_network(evidence),
     }
 
 
