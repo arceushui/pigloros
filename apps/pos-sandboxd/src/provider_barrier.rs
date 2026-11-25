@@ -50,6 +50,7 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use rustix::{
     fs::{statx, AtFlags, StatxFlags, CWD},
+    io::Errno,
     net::{
         socketpair,
         sockopt::{set_socket_timeout, Timeout},
@@ -66,7 +67,7 @@ use crate::{
     CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
     KernelObservationError, LaunchBarrier, LauncherInvocation, NetworkReadback, ObservationContext,
     ObservedUnit, ReadbackError, ReleaseBarrierError, ReleaseBinding, ReleaseOutcome,
-    ReleaseRecheck, RuntimeAttestationSigner, TransientServiceUnitName,
+    ReleaseRecheck, RuntimeAttestationSigner, TransientServiceUnitName, UnitNetworkError,
 };
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -245,11 +246,15 @@ fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefus
     match unavailable.0 {
         KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
         KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
-        // A Local network that reads back as other state is a change (R14
-        // §3.2): barrier failure 7. A transport failure is 6.
-        KernelObservationError::Network(ReadbackError::Changed) => {
-            RecheckRefusal::ObservationChanged
-        }
+        // The unit's network namespace now holds more than `lo` (R14 N12), or
+        // a Local network reads back as other state (R14 §3.2): barrier
+        // failure 7, as are a namespace that is gone and a unit whose
+        // identity moved under the observation (R14 §3.2, error classes). A
+        // transport failure is 6.
+        KernelObservationError::UnitNetwork(UnitNetworkError::Changed)
+        | KernelObservationError::Network(ReadbackError::Changed)
+        | KernelObservationError::IdentityChanged
+        | KernelObservationError::Namespace(Errno::NOENT) => RecheckRefusal::ObservationChanged,
         _ => RecheckRefusal::RecheckObservation(unavailable),
     }
 }

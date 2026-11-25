@@ -398,20 +398,29 @@ fn acknowledge<I>(
 /// namespace; the calling thread's namespace never changes.
 ///
 /// # Errors
-/// Fails if the thread cannot enter the namespace or panics.
+/// Fails if the thread cannot be spawned, cannot enter the namespace or
+/// panics.
 pub fn in_namespace<R: Send>(
     namespace: BorrowedFd<'_>,
     work: impl FnOnce() -> R + Send,
 ) -> Result<R, NetlinkError> {
     std::thread::scope(|scope| {
-        scope
-            .spawn(move || -> Result<R, NetlinkError> {
+        std::thread::Builder::new()
+            .spawn_scoped(scope, move || -> Result<R, NetlinkError> {
                 move_into_link_name_space(namespace, Some(LinkNameSpaceType::Network))?;
                 Ok(work())
             })
-            .join()
-            .unwrap_or(Err(NetlinkError::Panicked))
+            .map_err(NetlinkError::from)
+            .and_then(|thread| thread.join().unwrap_or(Err(NetlinkError::Panicked)))
     })
+}
+
+/// A thread that could not be spawned is an I/O failure, `EAGAIN` unless the
+/// operating system gave another error.
+impl From<std::io::Error> for NetlinkError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(Errno::from_io_error(&error).unwrap_or(Errno::AGAIN))
+    }
 }
 
 /// Every link of the session's namespace.

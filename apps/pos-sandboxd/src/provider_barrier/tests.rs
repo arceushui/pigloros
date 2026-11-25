@@ -215,7 +215,10 @@ fn observation(main_pid: u32) -> TestResult<KernelObservation> {
         [7; 32],
         false,
     );
-    let readback = crate::KernelObservedReadback::new(provider);
+    let readback = crate::KernelObservedReadback::new(
+        provider,
+        crate::test_fixtures::FakeUnitNetwork::isolated(),
+    );
     let observed = readback.observe(&unit, &context)?;
     Ok(observed.observation().clone())
 }
@@ -241,6 +244,8 @@ enum Observing {
     NetworkFirst(crate::ReadbackError),
     /// The recheck fails to read the Local network back.
     NetworkOnRecheck(crate::ReadbackError),
+    /// The unit network check refuses, from the `n`th observation on.
+    UnitNetwork(UnitNetworkError, usize),
 }
 
 struct TestObserved {
@@ -288,6 +293,9 @@ impl ObservedReadback for TestObserved {
             (Observing::Invalid, _) => Ok(ObservedUnit::new(
                 &self.first.clone().with_main_pid_for_test(0),
             )),
+            (Observing::UnitNetwork(error, from), call) if call >= from => Err(
+                ObservedReadbackUnavailable(KernelObservationError::UnitNetwork(error)),
+            ),
             (Observing::ReadsUnit, _) => unit()
                 .map(|_| ObservedUnit::new(&self.first))
                 .map_err(ObservedReadbackUnavailable),
@@ -1550,6 +1558,46 @@ mod kernel_observation {
         Ok(())
     }
 
+    /// R14 N12: a unit network namespace that holds more than `lo` is KOE1
+    /// status 2 at the first observation, whichever way the check failed,
+    /// and at the recheck a change is 7 and a transport failure is 6.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_unit_network_check_refuses_the_release_by_class() -> TestResult {
+        for error in [UnitNetworkError::Transport, UnitNetworkError::Changed] {
+            let (evidence, released) =
+                observed_with(Observing::UnitNetwork(error, 0), Behaviour::Normal).await?;
+            assert!(matches!(
+                released,
+                Err(BarrierError::Refused(RecheckRefusal::FirstObservation(_)))
+            ));
+            assert!(evidence.observation().is_none());
+            assert!(evidence.release().is_none());
+        }
+        let (evidence, released) = observed_with(
+            Observing::UnitNetwork(UnitNetworkError::Changed, 1),
+            Behaviour::Normal,
+        )
+        .await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::ObservationChanged))
+        ));
+        assert!(evidence.observation().is_some());
+        assert!(evidence.release().is_none());
+        let (evidence, released) = observed_with(
+            Observing::UnitNetwork(UnitNetworkError::Transport, 1),
+            Behaviour::Normal,
+        )
+        .await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::RecheckObservation(_)))
+        ));
+        assert!(evidence.observation().is_some());
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unavailable_first_observation_keeps_only_the_ready_digest() -> TestResult {
         let (evidence, released) = observed_with(Observing::Unavailable, Behaviour::Normal).await?;
@@ -1676,7 +1724,10 @@ mod kernel_observation {
         let provider = crate::ProviderNamespaces::for_test(crate::NamespaceSet::for_test_shifted(
             own.namespaces(),
         ));
-        let readback = crate::KernelObservedReadback::new(provider);
+        let readback = crate::KernelObservedReadback::new(
+            provider,
+            crate::test_fixtures::FakeUnitNetwork::isolated(),
+        );
         let check = AuthorityCheck::new(
             root_check(Refusal::None, &attempt),
             readback,
@@ -1905,4 +1956,33 @@ async fn an_adapter_unobservable_beneath_the_unit_root_is_refused_before_ready()
     );
     assert!(barrier.sent_release().is_none());
     Ok(())
+}
+
+#[test]
+fn a_recheck_observation_that_found_other_state_is_a_change_and_the_rest_is_unavailable() {
+    use rustix::io::Errno;
+
+    let refusal = |error| recheck_observation(ObservedReadbackUnavailable(error));
+    for changed in [
+        KernelObservationError::IdentityChanged,
+        KernelObservationError::Namespace(Errno::NOENT),
+        KernelObservationError::Network(crate::ReadbackError::Changed),
+        KernelObservationError::UnitNetwork(UnitNetworkError::Changed),
+    ] {
+        assert!(
+            matches!(refusal(changed), RecheckRefusal::ObservationChanged),
+            "{changed:?}"
+        );
+    }
+    for unavailable in [
+        KernelObservationError::Namespace(Errno::IO),
+        KernelObservationError::Network(crate::ReadbackError::Transport),
+        KernelObservationError::UnitNetwork(UnitNetworkError::Transport),
+        KernelObservationError::Exited,
+    ] {
+        assert!(
+            matches!(refusal(unavailable), RecheckRefusal::RecheckObservation(_)),
+            "{unavailable:?}"
+        );
+    }
 }

@@ -82,6 +82,7 @@ fn a_local_attempts_observation_records_the_readback_and_hands_it_the_deadline()
         &this_unit(),
         &context(&cgroup, false)?.with_network(&fake, deadline),
         &provider,
+        &isolated(),
     )?;
     assert_eq!(fake.deadline(), Some(deadline));
     assert_eq!(observed.observation().network(), Some(&readback()));
@@ -100,6 +101,7 @@ fn another_mode_reads_no_network_back() -> TestResult {
         &this_unit(),
         &context(&cgroup, false)?,
         &foreign_provider()?,
+        &isolated(),
     )?;
     assert_eq!(observed.observation().network(), None);
     assert_eq!(
@@ -119,6 +121,7 @@ fn a_readback_that_fails_fails_the_observation_with_its_class() -> TestResult {
             &this_unit(),
             &context(&cgroup, false)?.with_network(&fake, Instant::now()),
             &provider,
+            &isolated(),
         );
         assert_eq!(failed.err(), Some(KernelObservationError::Network(class)));
     }

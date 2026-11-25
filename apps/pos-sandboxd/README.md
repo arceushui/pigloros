@@ -374,10 +374,23 @@ Kernel requirements: network namespaces (`CONFIG_NET_NS`), veth
 `bitwise`, `cmp`, `immediate` and `ct` expressions (`CONFIG_NF_TABLES`,
 `CONFIG_NF_TABLES_INET`, `CONFIG_NFT_CT`) and conntrack, and IPv6. The
 provider needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` and a writable `/run/netns`.
-The kernel should not create fallback tunnel devices in new namespaces
-(`net.core.fb_tunnels_only_for_init_net=1` when the `sit`, `ipip`, `gre` or
-`ip6_tunnel` modules are loaded), because the read-back accepts only the
-loopback and the attempt's veth end.
+The host must set `net.core.fb_tunnels_only_for_init_net` to at least 1
+(ADR-069 R14 N12), so that the kernel creates no fallback tunnel devices
+(`sit0`, `tunl0`, `gre0`, ...) in new namespaces when the `sit`, `ipip`,
+`ip_gre`, `ip6_tunnel` or `ip_vti` modules are loaded: the attempt read-back
+accepts only the loopback and the attempt's veth end, and every unit's
+`PrivateNetwork=true` namespace, in every execution mode, must hold only `lo`
+and no route off `lo`. `deploy/sysctl.d/60-piglor-sandbox.conf` is the drop-in
+that sets it; installing it is deployment's job, and nothing in this repository
+installs it yet. The #444 QEMU guest does not set the key either: the #444
+work wires the drop-in into the guest (`guest.nix`, a boot-sysctl expectation
+of 1, the pinned hashes) when this lands. The runtime reads the sysctl at startup, before it connects the
+bus, and exits without binding its sockets (admission closed) when the value
+is below 1 or cannot be read. After `ReadyV1`, the first kernel observation
+enters the unit's retained `ns/net` descriptor and reads its links and main
+table; any other link, any route off `lo` (a blackhole, prohibit or
+unreachable route counts), or a failed read is KOE1 status 2. At the release
+recheck a transport failure is barrier failure 6 and a changed namespace is 7.
 
 Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
 an IPv6 endpoint is admitted only when it is an address of the host itself,

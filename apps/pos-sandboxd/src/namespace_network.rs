@@ -28,6 +28,7 @@ mod pinned;
 mod plan;
 mod route;
 mod rule_codec;
+mod unit_network;
 
 pub use attempt_network::{
     AttemptNetworkError, EgressProbe, EgressProbeError, InvalidEgressProbe, LocalEgressProbe,
@@ -41,6 +42,9 @@ pub use host_egress::{
 pub use pinned::NetworkNamespaces;
 pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};
 pub use rule_codec::{decode_firewall_rule, encode_firewall_rule, UndecodableRule};
+pub use unit_network::{
+    fb_tunnels_isolated, NetlinkUnitNetwork, UnitNetworkCheck, UnitNetworkError, FB_TUNNELS_SYSCTL,
+};
 
 /// The name of one attempt's network namespace: `piglor-` followed by the
 /// attempt identity in lowercase hexadecimal.

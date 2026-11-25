@@ -36,6 +36,7 @@
 
 use std::fs::File;
 use std::future::Future;
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -55,12 +56,12 @@ use super::endpoint::{open_parent, DIRECTORY_OPEN, RESOLVE, SANDBOX_STATE};
 use super::port::ExecutePort;
 use super::{ProviderRuntimeError, RuntimeAuthority};
 use crate::{
-    reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle, CleanupBudget, ControlFloor,
-    EgressProbe, EgressPropertyProbe, HostEgress, LocalEgressProbe, NamespacedLocalNetwork,
-    NetlinkNamespaceControl, NetworkNamespaces, NetworkRange, OrphanNetworkCleanup,
-    ProviderNamespaces, RestartReconciliationError, StagingDirectory, StagingLedger, StagingLimits,
-    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
-    SystemdTransientUnitTransport,
+    fb_tunnels_isolated, reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle,
+    CleanupBudget, ControlFloor, EgressProbe, EgressPropertyProbe, HostEgress, LocalEgressProbe,
+    NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkRange,
+    OrphanNetworkCleanup, ProviderNamespaces, RestartReconciliationError, StagingDirectory,
+    StagingLedger, StagingLimits, SystemdAttemptRecovery, SystemdAttemptRegistry,
+    SystemdAttemptRegistryError, SystemdTransientUnitTransport, FB_TUNNELS_SYSCTL,
 };
 
 /// The staging directory's name beneath `/run/pigloros/sandbox`.
@@ -143,6 +144,7 @@ pub(super) fn prepare_host(
 ) -> Result<NetlinkReconciliation, ProviderRuntimeError> {
     prepare_with(
         authority,
+        || fb_tunnels_isolated(Path::new(FB_TUNNELS_SYSCTL)),
         SystemdTransientUnitTransport::connect_system(),
         netlink_network,
     )
@@ -169,14 +171,27 @@ fn netlink_network(
 
 /// Step 7 with the bus `connect` yields, and the orphan sweep and egress
 /// probe that `network` builds for the SPI1 attempt range and egress probe.
+/// `isolated` is the fallback-tunnel sysctl probe (ADR-069 R14 N12): the
+/// unit network check is sound only when it holds, so a host where it does
+/// not is refused first, before anything is opened.
+///
 /// The bus is connected, then the recovery owner opened, then the staging
 /// directory and the capture store opened or created; any failure refuses
 /// the whole step.
 pub(super) fn prepare_with<N, P, E>(
     (admitted, installation, _): &RuntimeAuthority,
+    isolated: impl FnOnce() -> bool,
     connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
     network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
 ) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
+    if !isolated() {
+        writeln!(
+            std::io::stderr(),
+            "pos-sandboxd: {FB_TUNNELS_SYSCTL} must be at least 1 (ADR-069 R14 N12)"
+        )
+        .ok();
+        return Err(ProviderRuntimeError::HostUnavailable);
+    }
     let (network, egress) = network(installation.attempt_range(), installation.egress_probe());
     // Multi-thread: every attempt's release barrier blocks in place on it.
     tokio::runtime::Builder::new_multi_thread()

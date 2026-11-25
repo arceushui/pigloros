@@ -7,7 +7,7 @@ use std::{
 use rustix::fs::{statat, CWD};
 
 use super::*;
-use crate::test_fixtures::{cgroup_listing, TestResult};
+use crate::test_fixtures::{cgroup_listing, FakeUnitNetwork, TestResult};
 
 const INVOCATION: [u8; 16] = [0x12; 16];
 const ADAPTER: FdIdentity = FdIdentity {
@@ -43,6 +43,11 @@ fn this_unit() -> impl Fn() -> Result<(u32, [u8; 16]), KernelObservationError> {
     || Ok((own_pid(), INVOCATION))
 }
 
+/// A unit network check that finds only `lo`.
+fn isolated() -> FakeUnitNetwork {
+    FakeUnitNetwork::isolated()
+}
+
 /// A child that exits at once; reap it with `wait`.
 fn short_lived() -> TestResult<Child> {
     Ok(Command::new(std::env::current_exe()?)
@@ -68,7 +73,12 @@ fn exited(pidfd: &OwnedFd) -> TestResult {
 fn this_process_is_observed_through_its_anchored_procdir() -> TestResult {
     let (_directory, cgroup) = cgroup_listing(own_pid())?;
     let provider = foreign_provider()?;
-    let observed = observe_unit(&this_unit(), &context(&cgroup, false)?, &provider)?;
+    let observed = observe_unit(
+        &this_unit(),
+        &context(&cgroup, false)?,
+        &provider,
+        &isolated(),
+    )?;
     let observation = observed.observation();
     let own = ProviderNamespaces::observe()?;
     assert_eq!(observation.main_pid(), own_pid());
@@ -87,7 +97,12 @@ fn this_process_is_observed_through_its_anchored_procdir() -> TestResult {
     assert_eq!(observation.cgroup().device().major(), major(metadata.dev()));
     assert_eq!(observation.cgroup().device().minor(), minor(metadata.dev()));
     // Two observations of an unchanged process are equal: the recheck's rule.
-    let again = observe_unit(&this_unit(), &context(&cgroup, false)?, &provider)?;
+    let again = observe_unit(
+        &this_unit(),
+        &context(&cgroup, false)?,
+        &provider,
+        &isolated(),
+    )?;
     assert_eq!(again.observation(), observation);
     Ok(())
 }
@@ -106,6 +121,7 @@ fn a_requested_work_mount_is_observed_and_held_for_after_exit() -> TestResult {
         &this_unit(),
         &context(&cgroup, true)?,
         &foreign_provider()?,
+        &isolated(),
     )?;
     let work = observed.observation().work().ok_or("no /work")?;
     assert!(work.capacity_bytes() > 0);
@@ -176,7 +192,8 @@ fn a_work_path_that_is_no_tmpfs_root_is_refused() -> TestResult {
             paths,
             &this_unit(),
             &context(&cgroup, true)?,
-            &foreign_provider()?
+            &foreign_provider()?,
+            &isolated()
         ),
         Err(KernelObservationError::WorkRead(_))
     ));
@@ -245,7 +262,8 @@ fn a_process_directory_off_procfs_is_never_trusted() -> TestResult {
             paths,
             &this_unit(),
             &context(&cgroup, false)?,
-            &foreign_provider()?
+            &foreign_provider()?,
+            &isolated()
         ),
         Err(KernelObservationError::NotProcfs)
     ));
@@ -292,7 +310,13 @@ fn a_main_pid_outside_the_bound_cgroup_is_refused() -> TestResult {
         Err(KernelObservationError::CgroupProcs)
     );
     assert_eq!(
-        observe_unit(&this_unit(), &context(&other, false)?, &foreign_provider()?).err(),
+        observe_unit(
+            &this_unit(),
+            &context(&other, false)?,
+            &foreign_provider()?,
+            &isolated()
+        )
+        .err(),
         Some(KernelObservationError::NotInCgroup)
     );
     Ok(())
@@ -303,7 +327,13 @@ fn a_unit_in_the_providers_namespaces_is_refused() -> TestResult {
     let (_directory, cgroup) = cgroup_listing(own_pid())?;
     let provider = ProviderNamespaces::observe()?;
     assert_eq!(
-        observe_unit(&this_unit(), &context(&cgroup, false)?, &provider).err(),
+        observe_unit(
+            &this_unit(),
+            &context(&cgroup, false)?,
+            &provider,
+            &isolated()
+        )
+        .err(),
         Some(KernelObservationError::SharedNamespace)
     );
     Ok(())
@@ -316,7 +346,7 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
     let provider = foreign_provider()?;
     let unreadable = || Err::<(u32, [u8; 16]), _>(KernelObservationError::Identity);
     assert_eq!(
-        observe_unit(&unreadable, &context, &provider).err(),
+        observe_unit(&unreadable, &context, &provider, &isolated()).err(),
         Some(KernelObservationError::Identity)
     );
     let reads = std::cell::Cell::new(0_u8);
@@ -325,7 +355,7 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
         Ok::<_, KernelObservationError>((own_pid(), [reads.get(); 16]))
     };
     assert_eq!(
-        observe_unit(&drifting, &context, &provider).err(),
+        observe_unit(&drifting, &context, &provider, &isolated()).err(),
         Some(KernelObservationError::IdentityChanged)
     );
     reads.set(0);
@@ -338,12 +368,12 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
         }
     };
     assert_eq!(
-        observe_unit(&failing_again, &context, &provider).err(),
+        observe_unit(&failing_again, &context, &provider, &isolated()).err(),
         Some(KernelObservationError::Identity)
     );
     let no_main = || Ok::<_, KernelObservationError>((0, INVOCATION));
     assert_eq!(
-        observe_unit(&no_main, &context, &provider).err(),
+        observe_unit(&no_main, &context, &provider, &isolated()).err(),
         Some(KernelObservationError::NoMainProcess)
     );
     Ok(())
@@ -364,7 +394,7 @@ fn device_numbers_are_kept_within_the_kernel_bounds() -> TestResult {
         false,
     );
     assert_eq!(
-        observe_unit(&this_unit(), &context, &foreign_provider()?).err(),
+        observe_unit(&this_unit(), &context, &foreign_provider()?, &isolated()).err(),
         Some(KernelObservationError::Device)
     );
     Ok(())
@@ -408,7 +438,12 @@ fn sharing_any_single_namespace_type_with_the_provider_is_refused() -> TestResul
     let own = *ProviderNamespaces::observe()?.namespaces();
     let foreign = NamespaceSet::for_test_shifted(&own);
     assert!(own.isolated_from(&foreign));
-    for (shared, name) in NAMESPACES.iter().enumerate() {
+    let network = isolated();
+    for (shared, name) in [OTHER_NAMESPACES.as_slice(), &[NET]]
+        .concat()
+        .iter()
+        .enumerate()
+    {
         let mut provider = foreign;
         provider.0[shared] = own.0[shared];
         assert!(!own.isolated_from(&provider), "{name}");
@@ -417,12 +452,47 @@ fn sharing_any_single_namespace_type_with_the_provider_is_refused() -> TestResul
             observe_unit(
                 &this_unit(),
                 &context(&cgroup, false)?,
-                &ProviderNamespaces::for_test(provider)
+                &ProviderNamespaces::for_test(provider),
+                &network
             )
             .err(),
             Some(KernelObservationError::SharedNamespace),
             "{name}"
         );
+    }
+    // The check is never made on a namespace the provider shares.
+    assert!(network.seen().is_empty());
+    Ok(())
+}
+
+/// R14 N12: the check reads the very network namespace the observation
+/// names, on the descriptor opened with the identities, and a failed check
+/// leaves no observation, for every class of failure.
+#[test]
+fn the_unit_network_check_reads_the_observed_namespace_and_can_refuse() -> TestResult {
+    let (_directory, cgroup) = cgroup_listing(own_pid())?;
+    let provider = foreign_provider()?;
+    let network = isolated();
+    let observed = observe_unit(&this_unit(), &context(&cgroup, false)?, &provider, &network)?;
+    let net = statat(CWD, "/proc/self/ns/net", AtFlags::empty())?;
+    assert_eq!(network.seen(), [(net.st_dev, net.st_ino)]);
+    assert_eq!(
+        observed.observation().namespaces().identities()[5],
+        KernelIdentity::of(net.st_dev, net.st_ino)?
+    );
+    for error in [UnitNetworkError::Transport, UnitNetworkError::Changed] {
+        let refusing = FakeUnitNetwork::answering(Err(error));
+        assert_eq!(
+            observe_unit(
+                &this_unit(),
+                &context(&cgroup, false)?,
+                &provider,
+                &refusing
+            )
+            .err(),
+            Some(KernelObservationError::UnitNetwork(error))
+        );
+        assert_eq!(refusing.seen().len(), 1);
     }
     Ok(())
 }
