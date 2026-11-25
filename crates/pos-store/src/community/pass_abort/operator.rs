@@ -12,9 +12,11 @@
 //!    pass nobody reserved; 4 for a Committed pass, other bound content or
 //!    another principal; 13 for a retry at or after the pass's `H_r`) and,
 //!    for a first Abort, the live-call refusal (15);
-//! 4. the generation (5) and head (6) fences, the guard that the head is
-//!    still the initialization head (12, until A5 commits a pass) and the
-//!    metadata horizon (13);
+//! 4. for a first Abort, after the live-call refusal (15): the installed
+//!    CDP1 must be the Reserve's, that is its digest must equal the pass's
+//!    `profile_digest` (3); then the generation (5) and head (6) fences, the
+//!    guard that the head is still the initialization head (12, until A5
+//!    commits a pass) and the metadata horizon (13);
 //! 5. the records: the CAB1, the CAV1 (whose one authority row is the abort
 //!    decision's chain) and the CAU1 with the abort decision and the
 //!    metadata `write` decision as its two rows (R15.1(5)), all sealed under
@@ -195,8 +197,10 @@ impl MemoryCommunityDomainV1 {
     /// a zero identity or reservation, and for a CDP1 other than the one the
     /// pass was reserved under; `EvidenceUnavailable` for every
     /// authority failure, a pass nobody reserved, an unbootstrapped domain, a
-    /// Timeline whose head is not its initialization head, a missing pass
-    /// metadata key and a writer at or after the decision bound; `Conflict`
+    /// Timeline whose head is not its initialization head, a pass record
+    /// with no due member (there is no retained TPS1 digest to use), a
+    /// missing pass metadata key and a writer at or after the decision
+    /// bound; `Conflict`
     /// for a Committed pass, a retry with other bound content or by another
     /// principal; `EvidenceExpired` for a retry at or after the pass's
     /// `H_r`; `OperationActive` while the pass's call is live;
