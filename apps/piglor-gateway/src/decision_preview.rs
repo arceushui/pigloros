@@ -228,9 +228,9 @@ impl InFlightSlotV1 {
     /// Take a slot for `principal_id`, unless its four slots are taken.
     fn take(slots: &InFlightV1, principal_id: [u8; 16]) -> Option<Self> {
         let mut taken = slots.lock().unwrap_or_else(PoisonError::into_inner);
-        let count = taken.entry(principal_id).or_default();
-        (*count < MAX_IN_FLIGHT_PER_PRINCIPAL).then(|| {
-            *count += 1;
+        let held = taken.get(&principal_id).copied().unwrap_or(0);
+        (held < MAX_IN_FLIGHT_PER_PRINCIPAL).then(|| {
+            taken.insert(principal_id, held + 1);
             Self {
                 slots: Arc::clone(slots),
                 principal_id,
@@ -412,13 +412,12 @@ impl Gateway {
         permit: GatewayOperationPermitV1,
         consent_ref: EntityId,
     ) -> Result<GatewayOperationPermitV1, GatewayError> {
-        match self.consent_denial(&permit, consent_ref)? {
-            None => Ok(permit),
-            Some((authorization, pending)) => {
-                drop(permit);
-                Err(self.recorded_denial(&authorization, pending).await)
-            }
-        }
+        let denial = self.consent_denial(&permit, consent_ref)?;
+        let Some((authorization, pending)) = denial else {
+            return Ok(permit);
+        };
+        drop(permit);
+        Err(self.recorded_denial(&authorization, pending).await)
     }
 
     /// Run one Decision Preview store operation on the store worker.
