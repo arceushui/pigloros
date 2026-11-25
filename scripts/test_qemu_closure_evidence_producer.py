@@ -411,7 +411,7 @@ class ProducerShellTests(unittest.TestCase):
     def test_a_start_failure_that_systemd_run_does_not_print_leaves_stderr_empty(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")
-        # A failure that systemd-run does not print leaves stderr empty; the journal explains it.
+        # A failure that systemd-run does not print leaves stderr empty; the journal is where to look.
         self.shell.stub("systemd-run", "exit 1")
         self.shell.stub("journalctl", 'echo "piglor-network-fb-1.service: Failed with result exec-condition"')
         script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
