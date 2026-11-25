@@ -129,7 +129,7 @@ fn retry_after_rounds_up_to_whole_seconds_of_at_least_one() {
         (Duration::from_nanos(1), 1),
         (Duration::from_secs(1), 1),
         (Duration::from_millis(1_001), 2),
-        (Duration::from_secs(60), 60),
+        (Duration::from_mins(1), 60),
     ] {
         assert_eq!(retry_after_seconds(left), seconds, "{left:?}");
     }

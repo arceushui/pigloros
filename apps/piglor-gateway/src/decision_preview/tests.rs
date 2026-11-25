@@ -1,7 +1,8 @@
-//! The Decision Preview admission and read on the production composition
-//! (ADR-140 C2): a bound `SQLite` store, a provisioned Local Principal with
-//! one consent, and the release or the seam installed-profile port. The
-//! fixtures are shared with the route tests of [`super::route`].
+//! The Decision Preview admission and read on the production composition.
+//!
+//! ADR-140 C2: a bound `SQLite` store, a provisioned Local Principal with one
+//! consent, and the release or the seam installed-profile port. The fixtures
+//! are shared with the route tests of [`super::route`].
 
 use std::fmt::Debug;
 
@@ -87,8 +88,10 @@ async fn send(
 
 /// The Local Principal of the fixture actor and [`OTHER_ACTOR`], with one
 /// consent the fixture actor grants itself, the two Decision Preview grants,
-/// the Session read and consent revocation. The consent governs the preview
-/// creation; a consent that governs no operation is not provisionable.
+/// the Session read and consent revocation. The consent governs timeline
+/// creation, which the tests never call: the preview operations stay
+/// ungoverned, so the room's consent is the one the preview checks, and a
+/// consent that governs no operation is not provisionable.
 fn provision() -> TestResult<LocalPrincipalProvisionV1> {
     let actor = actor()?;
     Ok(LocalPrincipalProvisionV1::try_new_provisioned(
@@ -96,6 +99,7 @@ fn provision() -> TestResult<LocalPrincipalProvisionV1> {
         [actor, entity(OTHER_ACTOR)?],
         [
             GatewayOperationV1::CREATE_DECISION_PREVIEW,
+            GatewayOperationV1::CREATE_TIMELINE,
             GatewayOperationV1::READ_DECISION_PREVIEW,
             GatewayOperationV1::READ_SESSION,
             GatewayOperationV1::REVOKE_CONSENT,
@@ -105,7 +109,7 @@ fn provision() -> TestResult<LocalPrincipalProvisionV1> {
             grantee: actor,
             grants: vec![LocalConsentGrantDraftV1 {
                 purpose: "operation".to_owned(),
-                data_categories: vec!["decision-preview".to_owned()],
+                data_categories: vec!["timeline".to_owned()],
                 export_permitted: true,
             }],
         }),
