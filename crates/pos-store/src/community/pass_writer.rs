@@ -28,7 +28,9 @@
 //!
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
-//! re-validates only what is cheap to check: the pass state and the entry.
+//! re-validates only what is cheap to check: the pass state, the recorded
+//! identity and the pending entries (a Reserve), or the entry (a Commit or
+//! Abort).
 //! A Reserve is refused with `Conflict` when its identity is recorded in
 //! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
 //! and again at the apply. It is refused with `PassUnresolved` (code 7)
@@ -291,14 +293,7 @@ impl MemoryCommunityDomainV1 {
         }
         let cri1 = check_binding(&input)?;
         let key = (input.timeline, input.reservation_operation_id);
-        let horizons = self.horizons_for(&input)?;
-        // A recorded identity, resolved or not, is a replay (R8.1(7)).
-        if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
-            return Err(Error::Conflict);
-        }
-        if self.unresolved_pass(input.timeline).is_some() {
-            return Err(Error::PassUnresolved);
-        }
+        let horizons = self.check_identity(&input, key)?;
         let state = self
             .pass_states
             .get(&input.timeline)
@@ -458,9 +453,7 @@ impl MemoryCommunityDomainV1 {
         if writer.horizons.generation_micros <= decision_bound(input.reservation_sample_micros) {
             return Err(Error::EvidenceExpired);
         }
-        if state.generation != input.generation {
-            return Err(Error::StaleGeneration);
-        }
+        check_frontier(state, input)?;
         // The reuse is of the same `(T, G)` and its records outlive `H_g`:
         // the pass's State records depend on the reused Observation CPN1 and
         // live to `H_g` (R9.2; R13.2(2), (4a); R10.7 steps 5c and 5j: 6).
@@ -474,11 +467,7 @@ impl MemoryCommunityDomainV1 {
             .minted
             .as_ref()
             .is_some_and(|minted| minted.not_after_micros < writer.horizons.generation_micros);
-        if state.head != input.selected_head
-            || state.counters != input.prior_shared_counts
-            || reuse_stale
-            || mint_short
-        {
+        if reuse_stale || mint_short {
             return Err(Error::StaleFrontier);
         }
         self.check_reserve_budget(input)?;
@@ -536,6 +525,26 @@ impl MemoryCommunityDomainV1 {
         })
     }
 
+    /// The installed horizons the request must fit (`InvalidBinding`), then
+    /// the identity and T checks that R10.7 steps 4a and 4c put before 5j: a
+    /// recorded identity, resolved or not, is a replay (`Conflict`, R8.1(7))
+    /// and an unresolved pass of T is `PassUnresolved`. It returns the
+    /// horizons the Reserve is judged by.
+    fn check_identity(
+        &self,
+        input: &CommunityReserveInputV1,
+        key: (TimelineId, [u8; 16]),
+    ) -> Result<WriterHorizonsV1, Error> {
+        let horizons = self.horizons_for(input)?;
+        if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
+            return Err(Error::Conflict);
+        }
+        if self.unresolved_pass(input.timeline).is_some() {
+            return Err(Error::PassUnresolved);
+        }
+        Ok(horizons)
+    }
+
     /// R13.1(4) at the writer: every actor of T's scope still fits the
     /// pass's worst-case rows and `F_p` beside every pending reservation.
     /// A misfit is 6, not 14: the planner already judged the quote.
@@ -564,9 +573,10 @@ impl MemoryCommunityDomainV1 {
     /// Apply a staged Reserve in the guarded step that published its records.
     ///
     /// It adds one retained outcome, the pending entry and the pass record
-    /// and, for a minted materialization, its additions to the counters, the
-    /// closure terms and scope rows a reuse reads, the observation it
-    /// retains for reuse and one more control operation.
+    /// (the CRI1 index entry, status Reserved) and, for a minted
+    /// materialization, its additions to the counters, the closure terms and
+    /// scope rows a reuse reads, the observation it retains for reuse and one
+    /// more control operation.
     ///
     /// # Errors
     /// Returns `Conflict` when the reservation identity is recorded already,
@@ -579,7 +589,7 @@ impl MemoryCommunityDomainV1 {
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedReserveV1,
     ) -> Result<(), Error> {
-        self.check_apply(&staged)?;
+        self.check_apply_reserve(&staged)?;
         let (timeline, _) = staged.key;
         self.native_producer_ordinal = staged.native_ordinal;
         if staged.minted.is_some() {
@@ -595,12 +605,14 @@ impl MemoryCommunityDomainV1 {
         Ok(())
     }
 
-    /// The refusals of an apply, none of which changes the domain.
-    fn check_apply(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
-        let (timeline, _) = staged.key;
-        if self.pending_reservations.contains_key(&staged.key)
-            || self.pass_records.contains_key(&staged.key)
-        {
+    /// The cheap re-validation of an apply: the identity is not recorded
+    /// (`Conflict`), T has no other pending reservation (`PassUnresolved`),
+    /// has pass state (`EvidenceUnavailable`) and the ordinals staged are
+    /// still the next ones (`Conflict`).
+    fn check_apply_reserve(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
+        let key = staged.key;
+        let (timeline, _) = key;
+        if self.pending_reservations.contains_key(&key) || self.pass_records.contains_key(&key) {
             return Err(Error::Conflict);
         }
         if self
@@ -738,12 +750,13 @@ impl MemoryCommunityDomainV1 {
         // A pending entry belongs to an unresolved pass (R13.1(4)); the
         // Sealed-before-Commit rule is A5's and the live-call 15 is
         // A4e-2's, both on the record's status and `live` flag.
-        let unresolved = self
-            .pass_records
-            .get(&key)
-            .is_some_and(|record| record.status.unresolved());
-        match self.pending_reservations.get(&key) {
-            Some(entry) if unresolved && rows <= entry.rows => Ok(()),
+        let held = self.pending_reservations.get(&key).filter(|_| {
+            self.pass_records
+                .get(&key)
+                .is_some_and(|record| record.status.unresolved())
+        });
+        match held {
+            Some(entry) if rows <= entry.rows => Ok(()),
             _ => Err(Error::InvalidBinding),
         }
     }
@@ -911,6 +924,21 @@ fn record_reserve(state: &mut CommunityPassStateV1, minted: Option<CommunityMint
             .scope_rows
             .insert(minted.scope_reference, minted.scope);
     }
+}
+
+/// The generation (5), then the head and the counters (6), the call was
+/// planned over: R10.7 step 5j.
+fn check_frontier(
+    state: &CommunityPassStateV1,
+    input: &CommunityReserveInputV1,
+) -> Result<(), Error> {
+    if state.generation != input.generation {
+        return Err(Error::StaleGeneration);
+    }
+    if state.head != input.selected_head || state.counters != input.prior_shared_counts {
+        return Err(Error::StaleFrontier);
+    }
+    Ok(())
 }
 
 /// The counters with `added` on top, saturating like every counter.
