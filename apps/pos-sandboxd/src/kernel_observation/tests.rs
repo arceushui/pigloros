@@ -297,6 +297,30 @@ fn an_exited_process_is_never_observed() -> TestResult {
     Ok(())
 }
 
+/// The network namespace is read last, with its descriptor: a process whose
+/// other five namespaces read but whose `ns/net` does not is refused.
+#[test]
+fn a_process_without_a_readable_network_namespace_is_refused() -> TestResult {
+    let fake = tempfile::tempdir()?;
+    std::fs::create_dir(fake.path().join("ns"))?;
+    for name in OTHER_NAMESPACES {
+        std::fs::write(fake.path().join("ns").join(name), b"")?;
+    }
+    let procdir = open(fake.path(), DIRECTORY, Mode::empty())?;
+    assert!(matches!(
+        NamespaceSet::read_retaining(procdir.as_fd()),
+        Err(KernelObservationError::Namespace(_))
+    ));
+    std::fs::write(fake.path().join("ns").join(NET), b"")?;
+    let (namespaces, net) = NamespaceSet::read_retaining(procdir.as_fd())?;
+    let status = fstat(&net)?;
+    assert_eq!(
+        namespaces.identities()[5],
+        KernelIdentity::of(status.st_dev, status.st_ino)?
+    );
+    Ok(())
+}
+
 #[test]
 fn a_main_pid_outside_the_bound_cgroup_is_refused() -> TestResult {
     let (_directory, other) = cgroup_listing(own_pid() + 1)?;

@@ -658,4 +658,32 @@ mod privileged {
         ));
         Ok(())
     }
+
+    /// The unit network check (ADR-069 R14 N12) over a real namespace: a
+    /// fresh one holds only its down `lo`, and one that also holds a veth
+    /// end is refused. The check enters the descriptor on a scoped thread,
+    /// as the first observation does.
+    #[test]
+    fn the_unit_network_check_passes_a_fresh_namespace_and_refuses_a_veth_end() -> TestResult {
+        use crate::namespace_network::{
+            route, LinkName, NetlinkUnitNetwork, UnitNetworkCheck, UnitNetworkError,
+        };
+
+        if !isolated("the_unit_network_check_passes_a_fresh_namespace_and_refuses_a_veth_end")? {
+            return Ok(());
+        }
+        let namespace = fresh_namespace()?;
+        assert_eq!(NetlinkUnitNetwork.check(namespace.as_fd()), Ok(()));
+        let (host, inner) = (LinkName::new("piglor-hu")?, LinkName::new("piglor-nu")?);
+        NetlinkSession::open(ROUTE)?.execute(vec![route::veth_pair(
+            &host,
+            &inner,
+            namespace.as_fd(),
+        )])?;
+        assert_eq!(
+            NetlinkUnitNetwork.check(namespace.as_fd()),
+            Err(UnitNetworkError::Changed)
+        );
+        Ok(())
+    }
 }
