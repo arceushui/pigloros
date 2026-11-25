@@ -153,7 +153,7 @@ fn cancel_authentication_accepts_only_the_signed_answer_to_the_request() -> Test
         assert_eq!(
             verified.check(),
             accepted_spy1.map_or(TerminalEvidenceCheck::Unverified, |_| {
-                TerminalEvidenceCheck::Recomputed
+                TerminalEvidenceCheck::Compared
             })
         );
     }
@@ -161,13 +161,26 @@ fn cancel_authentication_accepts_only_the_signed_answer_to_the_request() -> Test
         provider.authenticate_cancel_response(&signed, &request, Some([11; 32])),
         Err(contradiction())
     );
-    assert!(provider
-        .authenticate_cancel_response(&flip_last_byte(signed), &request, None)
-        .is_err());
+    assert_eq!(
+        provider.authenticate_cancel_response(&flip_last_byte(signed), &request, None),
+        Err(SandboxAdmissionError::Protocol(
+            SandboxProviderProtocolError::SignatureInvalid
+        ))
+    );
     assert!(provider
         .authenticate_cancel_response(b"not cbor", &request, None)
         .is_err());
     let foreign_request = scy1(&fixture, [99; 16], 1, key_id(&fixture))?;
+    assert_eq!(
+        provider.authenticate_cancel_response(
+            &flip_last_byte(foreign_request.clone()),
+            &request,
+            None
+        ),
+        Err(SandboxAdmissionError::Protocol(
+            SandboxProviderProtocolError::SignatureInvalid
+        ))
+    );
     assert_eq!(
         provider.authenticate_cancel_response(&foreign_request, &request, None),
         Err(contradiction())
@@ -188,7 +201,7 @@ fn reconcile_recomputes_the_tuple_when_the_selector_accepted_the_terminal() -> T
     let signed = sry1(&fixture, REQUEST_ID, recomputed_digest()?, key_id(&fixture))?;
     let verified =
         provider.authenticate_reconcile_response(&signed, &request, Some(&accepted()))?;
-    assert_eq!(verified.check(), TerminalEvidenceCheck::Recomputed);
+    assert_eq!(verified.check(), TerminalEvidenceCheck::Compared);
     assert_eq!(
         verified.response().reconciliation_evidence_digest,
         recomputed_digest()?
@@ -262,6 +275,13 @@ fn reconcile_checks_the_signature_before_the_request_identities() -> TestResult 
     assert_eq!(
         provider.authenticate_reconcile_response(&foreign_request, &request, None),
         Err(contradiction())
+    );
+    // A forged signature on a foreign request is a signature failure first.
+    assert_eq!(
+        provider.authenticate_reconcile_response(&flip_last_byte(foreign_request), &request, None),
+        Err(SandboxAdmissionError::Protocol(
+            SandboxProviderProtocolError::SignatureInvalid
+        ))
     );
     let foreign_key = sry1(
         &fixture,
