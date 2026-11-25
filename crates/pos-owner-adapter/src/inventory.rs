@@ -10,6 +10,11 @@
 //! neither codec, is unrecognized and refuses the whole pass; a file with
 //! another name that parses as neither codec belongs to no subject key and is
 //! ignored.
+//!
+//! The pass covers the whole directory while only the calling owner's lock is
+//! held, so another owner's in-flight `.tmp` file would refuse it spuriously.
+//! ADR-110 §1a keeps one owner thread, and the adapters rely on that: it is
+//! load-bearing, not incidental.
 
 use pos_crypto::subject_key::SubjectKeyWrapV1;
 use pos_owner_bridge::encryptor_lock::linux::{
