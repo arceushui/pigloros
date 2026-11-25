@@ -451,6 +451,20 @@ pub(crate) fn attempt_admission(grant_digest: [u8; 32]) -> crate::AttemptAdmissi
     )
 }
 
+/// An admission under a signed test AGR1, with that AGR1's digest and the
+/// signer and key of its runtime key ID, for the lifecycle tests.
+#[derive(Debug)]
+pub struct SignedAdmission {
+    /// The admission.
+    pub admission: crate::AttemptAdmission,
+    /// The AGR1 digest.
+    pub digest: [u8; 32],
+    /// The signer of the AGR1's runtime key ID.
+    pub signer: crate::KeyFileRuntimeSigner,
+    /// Its public key.
+    pub key: ed25519_dalek::VerifyingKey,
+}
+
 /// A Completed test attempt that ended and whose response is not retained
 /// yet, for the serving tests.
 pub struct PendingCompleted {

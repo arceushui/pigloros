@@ -122,8 +122,13 @@ fn a_requested_work_mount_is_observed_and_held_for_after_exit() -> TestResult {
     assert!(usage.available_bytes() >= block);
     // The release outcome keeps this handle for the terminal reading.
     let evidence = observed.observation().fixture_evidence()?;
-    let outcome = crate::ReleaseOutcome::new(None, Some((observed, evidence)), None);
+    let mut outcome = crate::ReleaseOutcome::new(None, Some((observed, evidence)), None);
     assert!(outcome.work().is_some());
+    // The terminal reading takes the handle, so nothing keeps it open after
+    // `work-after` (ADR-069 R15 §3.6 item 3, N9).
+    assert!(outcome.take_work().is_some());
+    assert!(outcome.work().is_none());
+    assert!(outcome.take_work().is_none());
     Ok(())
 }
 
