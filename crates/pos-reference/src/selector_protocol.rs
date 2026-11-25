@@ -1004,8 +1004,9 @@ fn grant_matches_execute_request(
 /// of R16 §3.3 change C): no exchange can happen before `release1-digest` is
 /// bound.
 ///
-/// The check is mode-independent, so it is stricter for `AirGapped` and `Fork`
-/// than R16 requires. 1492-b (R16 §7) owns the checks for non-empty plans.
+/// The check is mode-independent, so it is stricter than R16 requires for
+/// every non-Local mode, `Replay` with empty plans included. 1492-b (R16 §7)
+/// owns the checks for non-empty plans.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
@@ -3364,9 +3365,8 @@ mod tests {
             );
         }
 
-        // A transcript with no plan to bind it: refused as a whole, belt and
-        // braces over the isolated guard test above (the tamper breaks the SPR1
-        // digest too).
+        // A transcript with no plan to bind it: the same guard, reached
+        // through `validate_evidence`.
         let mut receipt = evidence.receipt.clone();
         receipt.network_transcript_digests = vec![[99; 32]];
         assert_eq!(

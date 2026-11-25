@@ -482,16 +482,17 @@ impl ExecuteError {
     /// TME1 `launch-failure` of an execution refused before its unit start
     /// by the recheck immediately before it (1), for its output reservation
     /// (3 or 5) or its standard channels (4), ADR-069 R9 §4.6.1 and R10
-    /// §4.7 and §4.1, or whose unit could not be pinned (2, R9 §4.6.7).
-    /// `None` for every other error: the terminal records give those their
-    /// own codes.
+    /// §4.7 and §4.1, whose unit could not be pinned (2, R9 §4.6.7), whose
+    /// Local network or FD 3 channel could not be set up (6) or whose Replay
+    /// exchange is unavailable (7, ADR-069 R14 §3.4). `None` for every other
+    /// error: the terminal records give those their own codes.
     #[must_use]
     pub fn launch_failure(&self) -> Option<LaunchFailure> {
         self.pre_start_refusal().or_else(|| self.unpinned_unit())
     }
 
     /// The launch failure of an execution refused before its unit start
-    /// (1, 3, 4 or 5).
+    /// (1, 3, 4, 5, 6 or 7).
     fn pre_start_refusal(&self) -> Option<LaunchFailure> {
         match self {
             Self::Recheck(_) | Self::RootIdentity => Some(LaunchFailure::PreStartRecheckFailed),
