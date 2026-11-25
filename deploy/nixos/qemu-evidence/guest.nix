@@ -29,21 +29,22 @@ let
   # workspace and the fixtures it compiles in are in its source.
   rustToolchain = pkgs.rust_1_97.packages.prebuilt;
   rustPlatform = pkgs.makeRustPlatform { inherit (rustToolchain) rustc cargo; };
+  source = lib.fileset.toSource {
+    root = repository;
+    fileset = lib.fileset.unions [
+      (repository + "/Cargo.toml")
+      (repository + "/Cargo.lock")
+      (repository + "/apps")
+      (repository + "/crates")
+      (repository + "/plugins")
+      # pos-reference's test-support fixtures embed these at compile time.
+      (repository + "/fixtures/conformance")
+    ];
+  };
   conformance = rustPlatform.buildRustPackage {
     pname = "pos-sandboxd-conformance";
     version = "0";
-    src = lib.fileset.toSource {
-      root = repository;
-      fileset = lib.fileset.unions [
-        (repository + "/Cargo.toml")
-        (repository + "/Cargo.lock")
-        (repository + "/apps")
-        (repository + "/crates")
-        (repository + "/plugins")
-        # pos-reference's test-support fixtures embed these at compile time.
-        (repository + "/fixtures/conformance")
-      ];
-    };
+    src = source;
     cargoLock.lockFile = repository + "/Cargo.lock";
     cargoBuildFlags = [
       "--package"
@@ -55,6 +56,38 @@ let
     auditable = false;
     doCheck = false;
     meta.mainProgram = "pos-sandboxd-conformance";
+  };
+
+  # The image's /adapter (#444 owner decision, 2026-11-25): its first mode,
+  # honest, reads one EAI1 attempt and writes one EAO1 observation. It runs
+  # inside the activated EROFS root, which holds nothing but the image's own
+  # files, so it is linked statically and needs no loader or library there.
+  # glibc.static with crt-static (not pkgsStatic, which would build a musl
+  # rustc and std from source): the adapter only uses std, so the result has
+  # no PT_INTERP. buildRustPackage always passes `--target`, so RUSTFLAGS
+  # should reach neither build scripts nor proc macros; as an environment
+  # variable it replaces, not merges with, any rustflags in a cargo config.
+  # build-images.sh refuses an adapter that is not a loadable static ELF file
+  # of the architecture. The static pos-sandboxd launcher is built by the
+  # piece that uses it.
+  adapter = rustPlatform.buildRustPackage {
+    pname = "pos-sandbox-evidence-adapter";
+    version = "0";
+    src = source;
+    cargoLock.lockFile = repository + "/Cargo.lock";
+    cargoBuildFlags = [
+      "--package"
+      "pos-sandbox-evidence-adapter"
+      "--bin"
+      "pos-sandbox-evidence-adapter"
+    ];
+    # Not buildInputs: the wrapper would then put the static libc.a ahead of
+    # libc.so for the dynamically linked build scripts, which then segfault
+    # (the first QEMU run, 2026-11-25). Only the final link gets the path.
+    env.RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=-L${pkgs.glibc.static}/lib";
+    auditable = false;
+    doCheck = false;
+    meta.mainProgram = "pos-sandbox-evidence-adapter";
   };
 
   # The part (b) SIM1 DDIs for this architecture, built offline from the
@@ -73,6 +106,7 @@ let
         TRUSTED_CERTIFICATE = ../dev-trust/root-hash-dev-test.crt;
         UNTRUSTED_KEY = ../dev-trust/root-hash-untrusted-dev-test.key;
         UNTRUSTED_CERTIFICATE = ../dev-trust/root-hash-untrusted-dev-test.crt;
+        ADAPTER = "${adapter}/bin/pos-sandbox-evidence-adapter";
       }
       ''
         bash ${./build-images.sh} ${
