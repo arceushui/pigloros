@@ -1203,7 +1203,7 @@ fn a_preview_is_read_only_by_its_principal_and_actor() -> TestResult {
     )?)?;
     let result = events(&mut host)?
         .into_iter()
-        .find(|event| is_result(event))
+        .find(is_result)
         .ok_or("the result committed")?;
     for (preview_id, principal_id, reader) in [
         (admitted.preview_id, [8; 16], actor()?),
