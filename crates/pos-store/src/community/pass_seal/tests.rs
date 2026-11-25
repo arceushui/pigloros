@@ -99,6 +99,7 @@ fn pass_state(operations: u64) -> CommunityPassStateV1 {
         generation: GENERATION,
         head: hash(30),
         profile_digest: hash(31),
+        highest_pass_ordinal: 0,
         counters: counts(100),
         graph: CommunityGraphCountsV1 {
             registrations: 1,
