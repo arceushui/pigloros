@@ -210,6 +210,32 @@ fn start() -> String {
     "attempt".to_owned()
 }
 
+/// The admission of [`ATTEMPT`] under the signed test grant, with a
+/// complete input, its AGR1 digest, and the signer and key of that grant.
+pub(super) fn signed_admission() -> TestResult<(
+    crate::AttemptAdmission,
+    [u8; 32],
+    crate::KeyFileRuntimeSigner,
+    ed25519_dalek::VerifyingKey,
+)> {
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    let input = TransferRecord {
+        start: 1,
+        deadline: 4,
+        finish: 3,
+        expected_bytes: 1,
+        accepted_bytes: 1,
+        complete: true,
+    };
+    Ok((
+        admission_of(Some(&grant), SandboxExecutionMode::AirGapped, Some(input)),
+        digest,
+        signer(),
+        signing_key().verifying_key(),
+    ))
+}
+
 /// A Completed response with output, signed by the test key and retained
 /// in `lifecycle` for [`ATTEMPT`].
 pub(super) fn completed_retained(
@@ -1346,3 +1372,51 @@ fn failed_after_release() -> TestResult<EndedAttempt<String>> {
 }
 
 mod response;
+
+// The lifecycle tests' fixtures, kept here so coverage scores them as test
+// code.
+impl AttemptAdmission {
+    /// The admission of the attempt records' test attempt under their
+    /// signed test grant, with that grant's signer and key, for the
+    /// lifecycle tests that sign a real response.
+    pub(crate) fn signed_for_test(
+    ) -> Result<crate::test_fixtures::SignedAdmission, Box<dyn std::error::Error + Send + Sync>>
+    {
+        signed_admission().map(|(admission, digest, signer, key)| {
+            crate::test_fixtures::SignedAdmission {
+                admission,
+                digest,
+                signer,
+                key,
+            }
+        })
+    }
+}
+
+impl crate::RetainedResponse {
+    /// A Completed response, signed by the test runtime key, retained by a
+    /// throwaway lifecycle: what the lifecycle tests retain for their fake
+    /// attempts.
+    pub(crate) fn signed_for_test(
+    ) -> Result<std::sync::Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let directory = tempfile::tempdir()?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        for child in ["registry", "attempts"] {
+            let path = directory.path().join(child);
+            std::fs::create_dir(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let parent = std::fs::File::open(directory.path())?;
+        let registry = crate::SystemdAttemptRegistry::from_runtime_directory(
+            &parent,
+            parent.metadata()?.uid(),
+        )?;
+        let ledger = crate::StagingLedger::new(crate::StagingLimits {
+            aggregate_bytes: 1024,
+        });
+        let lifecycle: crate::AttemptLifecycle =
+            crate::AttemptLifecycle::new(registry, ledger, &crate::ReconciledRestart::for_test());
+        lifecycle.completed_for_test()
+    }
+}
