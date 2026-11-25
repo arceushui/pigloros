@@ -13,8 +13,9 @@ use crate::sandbox_provider_protocol::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalEvidenceCheck {
     /// The selector compared the answer with its accepted terminal response
-    /// and they agree (R15 §3.5 rule 2).
-    Recomputed,
+    /// and they agree: for SRY1 the recomputed tuple digest (R15 §3.5 rule 2),
+    /// for SCY1 the bound SPY1 digest.
+    Compared,
     /// The selector holds no accepted terminal response, so only the
     /// signature and identities were checked (R15 §3.5 rule 3).
     Unverified,
@@ -120,10 +121,13 @@ impl AdmittedSandboxProvider {
 
     /// Authenticate one SCY1 against the SCQ1 it answers.
     ///
-    /// The signature is checked under the admitted runtime key before the
-    /// request identities. When the selector accepted the attempt's terminal
-    /// SPY1, `accepted_spy1_digest` must equal the digest the SCY1 binds
-    /// (R15 §3.5).
+    /// The key ID is compared with the admitted manifest first, then the
+    /// signature is verified under the admitted runtime key, then the request
+    /// identities are checked. When the selector accepted the attempt's
+    /// terminal SPY1, `accepted_spy1_digest` must equal the digest the SCY1
+    /// binds (R15 §3.5, "also equals every SCY1 SPY1 digest"). That check is
+    /// an addition to R15 §3.3 to §3.5, not a prescribed selector rule, and
+    /// refuses with `InconsistentFields` by analogy with SRY1.
     ///
     /// # Errors
     /// Rejects a malformed, foreign-keyed, forged, unbound or contradicting
@@ -141,7 +145,7 @@ impl AdmittedSandboxProvider {
         accepted_spy1_digest
             .map_or(Ok(TerminalEvidenceCheck::Unverified), |accepted| {
                 (accepted == response.terminal_spy1_digest)
-                    .then_some(TerminalEvidenceCheck::Recomputed)
+                    .then_some(TerminalEvidenceCheck::Compared)
                     .ok_or_else(contradiction)
             })
             .map(|check| AuthenticatedCancellation { response, check })
@@ -149,8 +153,9 @@ impl AdmittedSandboxProvider {
 
     /// Authenticate one SRY1 against the SRQ1 it answers (R15 §3.5, N8).
     ///
-    /// 1. The signature is verified under the admitted runtime key, then the
-    ///    fields, identities and self-digest are validated.
+    /// 1. The key ID is compared with the admitted manifest, then the
+    ///    signature is verified under the admitted runtime key, then the
+    ///    identities are validated against the request.
     /// 2. With `accepted` terminal digests, the selector recomputes
     ///    `reconciliation-evidence-v1` and requires a byte-equal digest. A
     ///    mismatch is a signed provider contradiction and is refused.
@@ -173,7 +178,7 @@ impl AdmittedSandboxProvider {
         accepted
             .map_or(Ok(TerminalEvidenceCheck::Unverified), |fields| {
                 recompute_matches(fields, request, &response)
-                    .then_some(TerminalEvidenceCheck::Recomputed)
+                    .then_some(TerminalEvidenceCheck::Compared)
                     .ok_or_else(contradiction)
             })
             .map(|check| AuthenticatedReconciliation { response, check })
