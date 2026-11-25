@@ -11,26 +11,45 @@ permissions:
   contents: read
 
 jobs:
-  # pos-store seen by a dependent crate: test-support is NOT enabled. This is
-  # what the local pre-commit hook lints for a branch that does not touch
-  # pos-store.
-  dependent-baseline-main:
-    name: baseline (origin/main) clippy -p piglor-ledger
+  # Lint each pos-store dependent the way the local pre-commit hook does for a
+  # branch that changes only that package. pos-store is then compiled without
+  # test-support. --keep-going reports every failing member, not only the first.
+  dependents:
+    name: clippy -p ${{ matrix.package }}
     runs-on: ubuntu-24.04
-    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - piglor-ledger
+          - pos-plugin-worker
+          - pos-gateway-conformance-adapter
+          - pos-cli
+          - piglor-gateway
+          - pos-experiment
+          - pos-plugin-supervisor
+          - pos-runtime
+          - pos-query
+          - pos-plugin-publisher
+          - pos-time
+          - pos-local-erasure-loader
+          - pos-plugin-eval
+          - pos-plugin-synthetic-obs
+          - pos-plugin-agent
+          - pos-plugin-ledger
+          - pos-plugin-world
+          - pos-plugin-rule-agent
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: aa2a745bd5e952b6775ef542c84beafca0103cc7
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
           components: clippy
-      - name: clippy -p piglor-ledger on main
-        run: cargo clippy -p piglor-ledger --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: clippy -p ${{ matrix.package }}
+        run: cargo clippy -p ${{ matrix.package }} --all-features --all-targets --locked --keep-going --message-format short -- -D warnings -W clippy::pedantic
 
-  dependent-fixed:
-    name: fixed clippy -p piglor-ledger
+  pos-store:
+    name: pos-store lint and recipient export tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,13 +57,9 @@ jobs:
         with:
           toolchain: 1.97.1
           components: clippy
-      - name: clippy -p piglor-ledger with the fix
-        run: cargo clippy -p piglor-ledger --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
-      - name: clippy -p pos-store with the fix
-        run: cargo clippy -p pos-store --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
       - name: clippy -p pos-store without test-support
         run: cargo clippy -p pos-store --all-targets --locked -- -D warnings -W clippy::pedantic
-      - name: recipient export tests with test-support
+      - name: recipient unit tests with test-support
         run: cargo test -p pos-store --features test-support --locked --lib recipient_ -- --include-ignored
       - name: recipient export fault tests
         run: cargo test -p pos-store --features test-support --locked --test recipient_export_publication_faults_public -- --include-ignored
