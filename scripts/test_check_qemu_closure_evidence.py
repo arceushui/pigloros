@@ -553,10 +553,8 @@ RUNTIME_PROPERTIES = runtime_properties()
 
 def runtime_credentials(**data: object) -> str:
     """The collector's credential lines: one `NAME<TAB>JSON` each, empty lists unless given."""
-    types = {"SetCredential": "a(say)", "SetCredentialEncrypted": "a(say)", "LoadCredential": "a(ss)",
-             "LoadCredentialEncrypted": "a(ss)", "ImportCredential": "as"}
     return "".join(f'{key}\t{json.dumps({"type": kind, "data": data.get(key, [])}, separators=(",", ":"))}\n'
-                   for key, kind in types.items())
+                   for key, kind in checker.CREDENTIAL_PROPERTIES.items())
 
 
 RUNTIME_CREDENTIALS = runtime_credentials()
@@ -1735,6 +1733,18 @@ class EvidenceTests(unittest.TestCase):
              "credential line is malformed"),
             (lambda f: f.update({f"{base}/runtime-credentials": "SetCredential no tab\n"}),
              "credential line is malformed"),
+            # A busctl that failed leaves the name and a tab and no JSON: refused, naming the line.
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                'LoadCredential\t{"type":"a(ss)","data":[]}', "LoadCredential\t", 1)}),
+             r"credential line is malformed or of the wrong type: 'LoadCredential\\t'"),
+            # Each property carries its own D-Bus type.
+            *[(lambda f, key=key, kind=kind, wrong=wrong: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                f'{key}\t{{"type":"{kind}"', f'{key}\t{{"type":"{wrong}"', 1)}), "wrong type")
+              for key, kind in checker.CREDENTIAL_PROPERTIES.items()
+              for wrong in ("s", "a(sv)", "as" if kind != "as" else "a(say)")],
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                '"type":"a(say)",', "", 1)}),
+             "wrong type"),
             (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
                 '"data":[]', '"data":"x"', 1)}),
              "credential line is malformed"),

@@ -203,8 +203,9 @@ runtime_credentials() {
   for property in SetCredential SetCredentialEncrypted LoadCredential LoadCredentialEncrypted \
     ImportCredential; do
     printf '%s\t' "${property}"
+    # A failed call still ends its line, so the next property starts on a line of its own.
     busctl --json=short get-property org.freedesktop.systemd1 "${RUNTIME_UNIT_PATH}" \
-      org.freedesktop.systemd1.Service "${property}"
+      org.freedesktop.systemd1.Service "${property}" || printf '\n'
   done
 }
 
@@ -262,6 +263,8 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
     systemctl show "${RUNTIME_UNIT}.service" \
       --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,RuntimeMaxUSec,Environment,EnvironmentFiles,PassEnvironment,Sockets,OpenFile,ExtraFileDescriptors,ExecStart \
       >"${dir}/runtime-properties"
+    # A failing busctl leaves a partial line the checker refuses by name (the function ends the
+    # line itself), and does not stop the collector before it writes the stop status and the log.
     runtime_credentials >"${dir}/runtime-credentials"
     readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
     find "${RUNTIME_ROOT}" -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"

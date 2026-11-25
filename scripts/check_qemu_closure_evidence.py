@@ -197,14 +197,17 @@ DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-sta
 # a failed start.
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
                         "runtime-log", "provider-sha256", "start-state", "start-journal"}
-# R11 5.2 gives the unit no environment, no descriptor and no credential: each of these is
-# empty or omitted (systemctl show omits some empty lists). `ListenStream` belongs to socket
-# units, which the runtime unit has none of.
+# R11 5.2 gives the unit no environment, no descriptor and no credential. These environment and
+# descriptor lists must be empty or omitted (systemctl show omits some empty lists); the
+# credential lists cannot be read that way and are checked through `runtime-credentials`
+# (CREDENTIAL_PROPERTIES). `ListenStream` belongs to socket units, which the runtime unit has
+# none of.
 EMPTY_UNIT_PROPERTIES = ("EnvironmentFiles", "Sockets", "OpenFile", "ExtraFileDescriptors")
-# The credential lists, which `systemctl show` cannot print: read over the bus as JSON, and
-# each must be an empty list.
-CREDENTIAL_PROPERTIES = ("SetCredential", "SetCredentialEncrypted", "LoadCredential",
-                         "LoadCredentialEncrypted", "ImportCredential")
+# The credential lists, which `systemctl show` cannot print: read over the bus as JSON, each with
+# its D-Bus type, and each must be an empty list.
+CREDENTIAL_PROPERTIES = {"SetCredential": "a(say)", "SetCredentialEncrypted": "a(say)",
+                         "LoadCredential": "a(ss)", "LoadCredentialEncrypted": "a(ss)",
+                         "ImportCredential": "as"}
 # The manager's own lines for the stop, as `journalctl -o short-monotonic` prints them: PID 1
 # says it is stopping the unit, and later that the unit deactivated successfully. A line a
 # daemon wrote, one for another unit, or one from before the stop does not count.
@@ -1464,13 +1467,15 @@ def check_credentials(evidence: Evidence, path: str, name: str) -> None:
     """Each credential list of the runtime unit is present and empty (R11 5.2)."""
     seen = {}
     for line in evidence.text(path).splitlines():
-        key, tab, value = line.partition("\t")
+        key, _, value = line.partition("\t")
         try:
-            document = json.loads(value) if tab else None
+            document = json.loads(value)
         except json.JSONDecodeError:
             document = None
-        if key in seen or not isinstance(document, dict) or not isinstance(document.get("data"), list):
-            raise EvidenceError(f"the {name} runtime unit's credential line is malformed: {line!r}")
+        if key in seen or not isinstance(document, dict) or not isinstance(document.get("data"), list) \
+                or document.get("type") != CREDENTIAL_PROPERTIES.get(key):
+            raise EvidenceError(f"the {name} runtime unit's credential line is malformed or of the wrong "
+                                f"type: {line!r}")
         seen[key] = document["data"]
     if sorted(seen) != sorted(CREDENTIAL_PROPERTIES):
         raise EvidenceError(f"the {name} runtime unit's credential properties are {sorted(seen)}, "

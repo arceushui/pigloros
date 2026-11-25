@@ -421,7 +421,9 @@ class ProducerShellTests(unittest.TestCase):
         log("systemd-run", 'echo "start-stderr line" >&2')
         log("systemctl", 'if [[ $1 == show && $* == *--value* ]]; then echo 1; fi')
         log("journalctl", 'echo "journal line"')
-        log("busctl", 'echo "{\\"type\\":\\"a(say)\\",\\"data\\":[]}"')
+        log("busctl", 'case "${@: -1}" in SetCredential*) t="a(say)";; LoadCredential*) t="a(ss)";; '
+                      '*) t="as";; esac\n'
+                      'echo "{\\"type\\":\\"$t\\",\\"data\\":[]}"')
         script = "\n".join([
             f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
             f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
@@ -445,12 +447,13 @@ class ProducerShellTests(unittest.TestCase):
         # The credential lists come over the bus, one NAME<TAB>JSON line each, in the checker's order.
         credentials = (case / "runtime-credentials").read_text().splitlines()
         self.assertEqual([line.split("\t")[0] for line in credentials], list(checker.CREDENTIAL_PROPERTIES))
-        self.assertTrue(all(line.split("\t")[1] == '{"type":"a(say)","data":[]}' for line in credentials))
+        self.assertEqual(credentials, [
+            f'{key}\t{{"type":"{kind}","data":[]}}' for key, kind in checker.CREDENTIAL_PROPERTIES.items()])
         busctl = [line for line in calls.read_text().splitlines() if line.startswith("busctl ")]
-        self.assertEqual(len(busctl), len(checker.CREDENTIAL_PROPERTIES))
-        self.assertIn("--json=short get-property org.freedesktop.systemd1 "
-                      "/org/freedesktop/systemd1/unit/piglor_2dsandbox_2druntime_2eservice "
-                      "org.freedesktop.systemd1.Service SetCredential", busctl[0])
+        self.assertEqual(busctl, [
+            "busctl --json=short get-property org.freedesktop.systemd1 "
+            f"/org/freedesktop/systemd1/unit/piglor_2dsandbox_2druntime_2eservice "
+            f"org.freedesktop.systemd1.Service {key}" for key in checker.CREDENTIAL_PROPERTIES])
         # The `systemctl show` property list covers every row the checker judges.
         listed = {name for line in calls.read_text().splitlines() if line.startswith("systemctl show ")
                   and "--property=Id," in line
@@ -468,6 +471,49 @@ class ProducerShellTests(unittest.TestCase):
         self.assertTrue(steps[start + 2].startswith("journalctl --sync"), steps)
         # The runtime root is removed again.
         self.assertFalse((self.base / "run-pigloros").exists())
+
+    def test_a_failing_busctl_leaves_a_partial_line_and_the_collector_finishes(self):
+        import check_qemu_closure_evidence as checker
+        calls = self.base / "calls"
+        out = self.base / "out"
+        out.mkdir()
+        images = self.base / "images"
+        images.mkdir()
+        (images / "adapter").write_text("adapter")
+        launcher, spi1, installed = self.base / "launcher", self.base / "spi1", self.base / "installed"
+        for path in (launcher, spi1, installed):
+            path.write_text("x")
+        counter = self.base / "count"
+        counter.write_text("0")
+
+        def stub(name: str, body: str = "") -> None:
+            self.shell.stub(name, f'printf "%s %s\\n" "{name}" "$*" >>"{calls}"\n{body}')
+
+        stub("pos-sandboxd-conformance", f'printf "staged\\t{installed}\\n"\ncat >/dev/null\nprintf "unstaged\\n"')
+        stub("sha256sum", 'printf "%s  %s\\n" "$(printf %064d 7)" "$1"')
+        for name in ("readelf", "systemd-run", "journalctl"):
+            stub(name, "true")
+        stub("systemctl", 'if [[ $1 == show && $* == *--value* ]]; then echo 1; fi')
+        # The third busctl call fails and prints nothing; the others print their JSON.
+        stub("busctl", f'n=$(( $(cat "{counter}") + 1 )); echo $n >"{counter}"\n'
+                       '[[ $n -eq 3 ]] && exit 1\n'
+                       'echo "{\\"type\\":\\"x\\",\\"data\\":[]}"')
+        script = "\n".join([
+            f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
+            f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
+            f'cd "{out}"; mkdir daemon',
+            'daemon_case start image.raw signer.der "CN: 01"',
+        ])
+        self.shell.out(script, COLLECTOR)
+        case = out / "daemon" / "start"
+        # The collector went on: the stop status, the log and the stage status are there.
+        self.assertEqual((case / "stop-status").read_text(), "0\n")
+        self.assertTrue((case / "runtime-log").exists())
+        self.assertEqual((case / "stage-status").read_text(), "0\n")
+        # The failed call left its name and a tab, and nothing else, as the third line.
+        lines = (case / "runtime-credentials").read_text().splitlines()
+        self.assertEqual(lines[2], "LoadCredential\t")
+        self.assertEqual(len(lines), len(checker.CREDENTIAL_PROPERTIES))
 
     def test_the_unit_runs_an_absolute_bash_because_a_unit_path_has_none(self):
         sysctl = self.base / "fb_tunnels"
