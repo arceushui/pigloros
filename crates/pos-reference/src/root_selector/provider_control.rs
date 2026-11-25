@@ -20,6 +20,12 @@ use crate::sandbox_provider_protocol::{
 };
 
 const MAX_DISTINCT_REQUESTS: u8 = 4;
+/// The BHC1 limit ID of the provider's pending-response wait, in
+/// milliseconds (ADR-069 R15 §3.3, R11 Amendment 1 P1).
+const PENDING_WAIT_LIMIT_ID: u8 = 16;
+/// What the selector adds to the provider's own wait for framing, signing and
+/// scheduling.
+const CONTROL_MARGIN: Duration = Duration::from_secs(5);
 const REQUEST_ID_DOMAIN: &[u8] = b"PiglorOS.SelectorControlRequestId.v1\0";
 const NONCE_DOMAIN: &[u8] = b"PiglorOS.SelectorControlNonce.v1\0";
 
@@ -40,13 +46,29 @@ fn derive(domain: &[u8], attempt_id: [u8; 16], operation: ControlOperation, inde
     identity
 }
 
+/// The exchange budget of one control request: the provider waits up to
+/// BHC1 limit 16 for a pending response, read here from the same installed
+/// caps, plus a fixed margin.
+pub(super) fn control_budget(admitted: &AdmittedSandboxProvider) -> Duration {
+    let wait = admitted
+        .broker_hard_caps()
+        .iter()
+        .find(|limit| limit.limit_id == PENDING_WAIT_LIMIT_ID)
+        .map_or(0, |limit| limit.value);
+    Duration::from_millis(wait).saturating_add(CONTROL_MARGIN)
+}
+
 /// One attempt of one admitted provider runtime.
 pub(super) struct AttemptControl<'a, T: ProviderExecutor> {
     pub(super) transport: &'a T,
     pub(super) admitted: &'a AdmittedSandboxProvider,
     pub(super) attempt_id: [u8; 16],
     pub(super) agr1_digest: [u8; 32],
+    /// The exchange budget of one request (see [`control_budget`]).
     pub(super) timeout: Duration,
+    /// How long the attempt itself may still run: SCQ1 waits for it to end
+    /// before the provider's own interval starts (R15 §3.6 item 2(a)).
+    pub(super) active_wait: Duration,
     pub(super) diagnostics: &'a DiagnosticSink,
 }
 
@@ -95,8 +117,22 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
         }
     }
 
+    /// After an exhausted recovery: cancel the attempt, then reconcile it
+    /// with no accepted terminal, because the selector wrote a terminal to
+    /// the evaluator all the same (owner decisions on #1503).
+    pub(super) fn settle_exhausted(&self) {
+        self.cancel(None);
+        self.reconcile(None);
+    }
+
+    /// SCQ1 waits for a still running attempt to end, then for the provider's
+    /// own interval.
+    const fn cancel_budget(&self) -> Duration {
+        self.timeout.saturating_add(self.active_wait)
+    }
+
     /// Cancel the attempt after its recovery was exhausted.
-    pub(super) fn cancel(&self, accepted_spy1_digest: Option<[u8; 32]>) {
+    fn cancel(&self, accepted_spy1_digest: Option<[u8; 32]>) {
         let result = retrying(|index| {
             self.admitted
                 .cancel_request(
@@ -122,7 +158,7 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
                         &request,
                         &bytes,
                         accepted_spy1_digest,
-                        self.timeout,
+                        self.cancel_budget(),
                     )
                 })
         });

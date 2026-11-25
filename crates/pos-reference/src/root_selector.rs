@@ -2128,7 +2128,8 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             admitted: admitted_provider.provider(),
             attempt_id: decoded.attempt_id,
             agr1_digest,
-            timeout: Duration::from_millis(resolved.attempt().watchdog_ms),
+            timeout: provider_control::control_budget(admitted_provider.provider()),
+            active_wait: Duration::from_millis(resolved.attempt().watchdog_ms),
             diagnostics: &self.diagnostics,
         };
         write_and_control(
@@ -2172,7 +2173,7 @@ fn write_and_control<'a, T: ProviderExecutor + 'a>(
         }) => {
             let written =
                 write_post_admission_provider_failure(stream, decoded, agr1_digest, failure);
-            control(agr1_digest).cancel(None);
+            control(agr1_digest).settle_exhausted();
             return written;
         }
     };
@@ -7491,8 +7492,18 @@ mod tests {
             agr1_digest: [91; 32],
             failure: PostAdmissionProviderFailure::TerminalUnavailable,
         }))?;
-        assert_eq!(calls, ["cancel", "cancel"]);
+        // SCQ1, then SRQ1 with no accepted terminal; each is repeated once.
+        assert_eq!(
+            calls,
+            [
+                "cancel",
+                "cancel",
+                "reconcile-unverified",
+                "reconcile-unverified"
+            ]
+        );
         assert!(diagnostics.contains("provider cancel failed"));
+        assert!(diagnostics.contains("provider reconcile failed"));
         Ok(())
     }
 

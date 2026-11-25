@@ -198,6 +198,7 @@ fn reconcile_with(
         attempt_id: ATTEMPT,
         agr1_digest: AGR1,
         timeout: Duration::from_secs(2),
+        active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
     .reconcile(accepted);
@@ -323,6 +324,7 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
         attempt_id: ATTEMPT,
         agr1_digest: AGR1,
         timeout: Duration::from_secs(2),
+        active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
     .cancel(Some(SPY1));
@@ -342,6 +344,7 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
         attempt_id: ATTEMPT,
         agr1_digest: AGR1,
         timeout: Duration::from_secs(2),
+        active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
     .cancel(None);
@@ -365,4 +368,38 @@ fn derived_identities_differ_by_domain_operation_and_index_and_are_nonzero() {
         assert_ne!(*identity, [0; 16]);
         assert!(!all[position + 1..].contains(identity));
     }
+}
+
+#[test]
+fn the_control_budget_is_the_installed_pending_wait_plus_the_margin() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let caps = fixture.provider.broker_hard_caps();
+    assert_eq!(
+        caps[usize::from(PENDING_WAIT_LIMIT_ID)].limit_id,
+        PENDING_WAIT_LIMIT_ID
+    );
+    assert_eq!(
+        control_budget(&fixture.provider),
+        Duration::from_millis(caps[usize::from(PENDING_WAIT_LIMIT_ID)].value) + CONTROL_MARGIN
+    );
+    Ok(())
+}
+
+#[test]
+fn a_cancel_budget_adds_the_time_the_attempt_may_still_run() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let idle = provider(Vec::new())?;
+    let diagnostics: DiagnosticSink = Mutex::new(Box::new(Sink::default()));
+    let control = AttemptControl {
+        transport: &idle.transport,
+        admitted: &fixture.provider,
+        attempt_id: ATTEMPT,
+        agr1_digest: AGR1,
+        timeout: Duration::from_secs(3),
+        active_wait: Duration::from_secs(40),
+        diagnostics: &diagnostics,
+    };
+    assert_eq!(control.cancel_budget(), Duration::from_secs(43));
+    requests(idle)?;
+    Ok(())
 }

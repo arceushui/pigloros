@@ -34,6 +34,8 @@ use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
 
 mod control;
+#[cfg(feature = "test-support")]
+pub mod guest;
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const CHUNK_BYTES: usize = 1024 * 1024;
@@ -228,10 +230,10 @@ pub(crate) trait ProviderRequestAdmission {
     fn entered(&mut self);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct UnfencedProviderRequest;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ProviderRequestAdmission for UnfencedProviderRequest {
     fn begin(&mut self) -> Result<(), ProviderTransportError> {
         Ok(())
@@ -319,8 +321,7 @@ impl AuthenticatedProviderExecution {
     /// # Errors
     /// Returns a closed I/O failure when staging cannot be rewound or read, or when `compose`
     /// rejects the descriptor or output stream.
-    #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_verified_output<T>(
         &mut self,
         compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
