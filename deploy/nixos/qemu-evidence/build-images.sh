@@ -40,7 +40,7 @@ path = sys.argv[2]
 machine = {"x86-64": 62, "arm64": 183}[sys.argv[1]]
 data = open(path, "rb").read()
 if len(data) < 100_000 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 or data[6] != 1:
-    raise SystemExit(f"{path} is not a 64-bit little-endian ELF file")
+    raise SystemExit(f"{path} is not a 64-bit little-endian ELF executable")
 kind, found, version = struct.unpack_from("<HHI", data, 16)
 if kind not in (2, 3) or found != machine or version != 1:
     raise SystemExit(f"{path} is not an executable for {sys.argv[1]}")
@@ -51,14 +51,16 @@ if size < 56 or offset + size * count > len(data):
 segments = [struct.unpack_from("<IIQQQQQQ", data, offset + index * size) for index in range(count)]
 loads = [segment for segment in segments if segment[0] == 1]
 if not loads:
-    raise SystemExit(f"{path} has nothing to load")
+    raise SystemExit(f"{path} has no loadable segment")
 if any(segment[0] == 3 for segment in segments):
     raise SystemExit(f"{path} is dynamically linked")
-if any(segment[2] + segment[5] > len(data) or segment[5] > segment[6] for segment in loads):
-    raise SystemExit(f"{path} is truncated")
+if any(segment[2] + segment[5] > len(data) for segment in loads):
+    raise SystemExit(f"{path} is truncated: a loadable segment reaches beyond the file")
+if any(segment[5] > segment[6] for segment in loads):
+    raise SystemExit(f"{path} has a loadable segment whose file size exceeds its memory size")
 entry, = struct.unpack_from("<Q", data, 24)
-if not any(segment[3] <= entry < segment[3] + segment[6] for segment in loads):
-    raise SystemExit(f"{path} has an entry point outside its segments")
+if not any(segment[1] & 1 and segment[3] <= entry < segment[3] + segment[6] for segment in loads):
+    raise SystemExit(f"{path}'s entry point is in no executable loadable segment")
 ' "${architecture}" "${ADAPTER}"
 cp -- "${ADAPTER}" "${out}/adapter"
 chmod 0755 "${out}/adapter"

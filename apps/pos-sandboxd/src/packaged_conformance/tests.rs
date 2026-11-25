@@ -46,6 +46,13 @@ fn arguments(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// `values`, with the argument at `index` replaced by the non-UTF-8 `bytes`.
+fn arguments_with(values: &[&str], index: usize, bytes: Vec<u8>) -> Vec<OsString> {
+    let mut arguments = arguments(values);
+    arguments[index] = OsString::from_vec(bytes);
+    arguments
+}
+
 fn detached(root: u64, _: &()) -> Release<'_> {
     Box::pin(async move {
         assert_eq!(root, 7);
@@ -121,6 +128,21 @@ fn arguments_are_image_certificate_description_adapter_and_its_arguments() -> Te
     }
     let missing = directory.path().join("missing");
     let missing = missing.to_str().ok_or("temporary path")?;
+    // A malformed text argument is a usage error before any file is read, so a missing
+    // file beside it does not turn it into an I/O error.
+    for malformed in [
+        arguments_with(&[missing, certificate, "CN: 01", adapter], 2, vec![0xff]),
+        arguments_with(
+            &[missing, certificate, "CN: 01", adapter, "honest"],
+            4,
+            vec![0xff],
+        ),
+    ] {
+        assert!(matches!(
+            ConformanceCase::from_arguments(&malformed),
+            Err(ConformanceError::Usage)
+        ));
+    }
     for unreadable in [
         [missing, certificate, adapter],
         [image, missing, adapter],

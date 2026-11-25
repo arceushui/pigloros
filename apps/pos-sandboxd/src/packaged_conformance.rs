@@ -116,28 +116,31 @@ impl ConformanceCase {
         let [image, certificate, description, adapter, adapter_arguments @ ..] = arguments else {
             return Err(ConformanceError::Usage);
         };
+        // The text arguments first: a malformed one is a usage error before any I/O.
+        let key_description = text(description)?;
+        let adapter_arguments = adapter_arguments
+            .iter()
+            .map(text)
+            .collect::<Result<_, _>>()?;
         Self::read(
             [image, certificate, adapter],
-            description,
+            key_description,
             adapter_arguments,
         )
     }
 
-    /// Read the three files and convert the text arguments.
+    /// Read the three files of a case whose text arguments are already text.
     fn read(
         [image, certificate, adapter]: [&OsString; 3],
-        description: &OsString,
-        adapter_arguments: &[OsString],
+        key_description: String,
+        adapter_arguments: Vec<String>,
     ) -> Result<Self, ConformanceError> {
         Ok(Self {
             image: fs::read(image)?,
             certificate: fs::read(certificate)?,
-            key_description: text(description)?,
+            key_description,
             adapter: fs::read(adapter)?,
-            adapter_arguments: adapter_arguments
-                .iter()
-                .map(text)
-                .collect::<Result<_, _>>()?,
+            adapter_arguments,
         })
     }
 
