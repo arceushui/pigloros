@@ -59,6 +59,7 @@ use super::pass_planner::{
     CommunityQuarantineIndexV1,
 };
 use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1};
+use super::pass_state::CommunityPassStateV1;
 
 /// The observation materialization a Reserve mints (R9.7), as its stage-1
 /// quote derived it.
@@ -185,31 +186,12 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::InvalidBinding);
         }
         let key = (input.timeline, input.reservation_operation_id);
-        let reservation = input.pass.reservation;
-        let pass_key = reservation.pass_key;
-        if pass_key.timeline() != input.timeline
-            || pass_key.generation() != input.generation
-            || reservation.predecessor_head_digest != input.selected_head
-        {
-            return Err(Error::InvalidBinding);
-        }
-        // A recorded identity, resolved or not, is a replay (R8.1(7)).
-        if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
-            return Err(Error::Conflict);
-        }
-        if self.unresolved_pass(input.timeline).is_some() {
-            return Err(Error::PassUnresolved);
-        }
+        self.check_identity(&input, key)?;
         let state = self
             .pass_states
             .get(&input.timeline)
             .ok_or(Error::EvidenceUnavailable)?;
-        if state.generation != input.generation {
-            return Err(Error::StaleGeneration);
-        }
-        if state.head != input.selected_head || state.counters != input.prior_shared_counts {
-            return Err(Error::StaleFrontier);
-        }
+        check_frontier(state, &input)?;
         self.check_reserve_budget(&input)?;
         if input.roster_quarantine_keys.iter().any(|member| {
             self.quarantine_reasons(*member)
@@ -245,6 +227,32 @@ impl MemoryCommunityDomainV1 {
                 minted: input.minted,
             }
         })
+    }
+
+    /// The record's binding to the call (`InvalidBinding`), then the identity
+    /// and T checks that R10.7 steps 4a and 4c put before 5j: a recorded
+    /// identity, resolved or not, is a replay (`Conflict`, R8.1(7)) and an
+    /// unresolved pass of T is `PassUnresolved`.
+    fn check_identity(
+        &self,
+        input: &CommunityReserveInputV1,
+        key: (TimelineId, [u8; 16]),
+    ) -> Result<(), Error> {
+        let reservation = input.pass.reservation;
+        let pass_key = reservation.pass_key;
+        if pass_key.timeline() != input.timeline
+            || pass_key.generation() != input.generation
+            || reservation.predecessor_head_digest != input.selected_head
+        {
+            return Err(Error::InvalidBinding);
+        }
+        if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
+            return Err(Error::Conflict);
+        }
+        if self.unresolved_pass(input.timeline).is_some() {
+            return Err(Error::PassUnresolved);
+        }
+        Ok(())
     }
 
     /// R13.1(4) at the writer: every actor of T's scope still fits the
@@ -288,23 +296,8 @@ impl MemoryCommunityDomainV1 {
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedReserveV1,
     ) -> Result<(), Error> {
+        self.check_apply_reserve(staged.key)?;
         let (timeline, _) = staged.key;
-        if self.pending_reservations.contains_key(&staged.key)
-            || self.pass_records.contains_key(&staged.key)
-        {
-            return Err(Error::Conflict);
-        }
-        if self
-            .pending_reservations
-            .range((timeline, [0; 16])..=(timeline, [u8::MAX; 16]))
-            .next()
-            .is_some()
-        {
-            return Err(Error::PassUnresolved);
-        }
-        if !self.pass_states.contains_key(&timeline) {
-            return Err(Error::EvidenceUnavailable);
-        }
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
         self.pass_states.entry(timeline).and_modify(|state| {
@@ -319,6 +312,28 @@ impl MemoryCommunityDomainV1 {
                     .insert(minted.scope_reference, minted.scope);
             }
         });
+        Ok(())
+    }
+
+    /// The cheap re-validation of an apply: the identity is not recorded
+    /// (`Conflict`), T has no other pending reservation (`PassUnresolved`)
+    /// and has pass state (`EvidenceUnavailable`).
+    fn check_apply_reserve(&self, key: (TimelineId, [u8; 16])) -> Result<(), Error> {
+        let (timeline, _) = key;
+        if self.pending_reservations.contains_key(&key) || self.pass_records.contains_key(&key) {
+            return Err(Error::Conflict);
+        }
+        if self
+            .pending_reservations
+            .range((timeline, [0; 16])..=(timeline, [u8::MAX; 16]))
+            .next()
+            .is_some()
+        {
+            return Err(Error::PassUnresolved);
+        }
+        if !self.pass_states.contains_key(&timeline) {
+            return Err(Error::EvidenceUnavailable);
+        }
         Ok(())
     }
 
@@ -433,15 +448,31 @@ impl MemoryCommunityDomainV1 {
         // A pending entry belongs to an unresolved pass (R13.1(4)); the
         // Sealed-before-Commit rule is A5's and the live-call 15 is
         // A4e-2's, both on the record's status and `live` flag.
-        let unresolved = self
-            .pass_records
-            .get(&key)
-            .is_some_and(|record| record.status.unresolved());
-        match self.pending_reservations.get(&key) {
-            Some(entry) if unresolved && rows <= entry.rows => Ok(()),
+        let held = self.pending_reservations.get(&key).filter(|_| {
+            self.pass_records
+                .get(&key)
+                .is_some_and(|record| record.status.unresolved())
+        });
+        match held {
+            Some(entry) if rows <= entry.rows => Ok(()),
             _ => Err(Error::InvalidBinding),
         }
     }
+}
+
+/// The generation (5), then the head and the counters (6), the call was
+/// planned over: R10.7 step 5j.
+fn check_frontier(
+    state: &CommunityPassStateV1,
+    input: &CommunityReserveInputV1,
+) -> Result<(), Error> {
+    if state.generation != input.generation {
+        return Err(Error::StaleGeneration);
+    }
+    if state.head != input.selected_head || state.counters != input.prior_shared_counts {
+        return Err(Error::StaleFrontier);
+    }
+    Ok(())
 }
 
 /// The counters with `added` on top, saturating like every counter.
