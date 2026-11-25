@@ -44,6 +44,12 @@ const GENEROUS_WATCHDOG_MS: u64 = 30_000;
 #[error("injected failure")]
 struct Injected;
 
+impl crate::SetupError for Injected {
+    fn setup_class(&self) -> crate::SetupClass {
+        crate::SetupClass::Creation
+    }
+}
+
 type Log = Arc<Mutex<Vec<String>>>;
 
 fn record(log: &Log, entry: &str) {
@@ -1670,6 +1676,10 @@ async fn a_namespace_of_another_attempt_never_submits_a_unit() -> TestResult {
 async fn a_network_that_cannot_be_established_never_submits_a_unit() -> TestResult {
     let (scenario, failed) = local_failure(&BrokenNetwork, ATTEMPT).await?;
     assert!(matches!(failed.error, ExecuteError::Network(_)));
+    assert_eq!(
+        failed.error.launch_failure(),
+        Some(pos_reference::sandbox_provider_protocol::LaunchFailure::NetworkSetupFailed)
+    );
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(scenario.entries().is_empty());
     Ok(())
