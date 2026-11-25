@@ -38,9 +38,9 @@
 //! A Reserve replay is refused here as well as by the pipeline's step 4a
 //! discovery: `pass_records` keeps every pass with its status after it
 //! resolves, so a recorded identity, pending or resolved, is a `Conflict`
-//! at stage and at apply, before the head and counters are compared. The
-//! discovery still answers a replay from its original outcome first; this
-//! refusal is the backstop.
+//! at stage, before the generation, head and counters are compared, and
+//! again at the apply. The discovery still answers a replay from its
+//! original outcome first; this refusal is the backstop.
 //!
 //! No apply re-runs the budget, caps, head or counters compares; a token
 //! staged before another operation changed them is for the pipeline to
@@ -280,10 +280,9 @@ impl MemoryCommunityDomainV1 {
     ///
     /// # Errors
     /// Returns `Conflict` when the reservation identity is recorded already,
-    /// resolved or not, `PassUnresolved` (7) when another reservation of T is
-    /// pending, and
-    /// `EvidenceUnavailable` when the Timeline has no pass state; the
-    /// domain is unchanged.
+    /// resolved or not, `PassUnresolved` (7) when another reservation of T
+    /// is pending, and `EvidenceUnavailable` when the Timeline has no pass
+    /// state; the domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
