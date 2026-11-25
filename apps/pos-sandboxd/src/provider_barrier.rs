@@ -906,14 +906,10 @@ where
         network: Option<&(dyn NetworkReadback + Sync)>,
     ) -> Result<(), BarrierError> {
         require_multi_thread()?;
-        self.require_attempt(attempt.admitted())?;
+        self.require_attempt(attempt.admitted())
+            .and_then(|()| self.require_network(network))?;
         if self.attempted {
             return Err(BarrierError::AlreadyAttempted);
-        }
-        // Local status 0 requires `network-readback` (R14 §3.1): a Local
-        // attempt is never released without the network that fills it.
-        if self.admitted.mode() == SandboxExecutionMode::Local && network.is_none() {
-            return Err(BarrierError::LocalNetworkMissing);
         }
         let main_pid = read_by(
             attempt.deadline(),
@@ -1003,6 +999,19 @@ where
             adapter_identity: adapter,
             launch_parameter_digest: self.parameters.digest,
             expected_fdl1_digest: self.parameters.expected_fdl1_digest,
+        }
+    }
+
+    /// Local status 0 requires `network-readback` (R14 §3.1): a Local
+    /// attempt is never released without the network that fills it.
+    fn require_network(
+        &self,
+        network: Option<&(dyn NetworkReadback + Sync)>,
+    ) -> Result<(), BarrierError> {
+        if self.admitted.mode() == SandboxExecutionMode::Local && network.is_none() {
+            Err(BarrierError::LocalNetworkMissing)
+        } else {
+            Ok(())
         }
     }
 

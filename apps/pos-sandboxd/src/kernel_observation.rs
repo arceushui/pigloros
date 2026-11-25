@@ -1074,16 +1074,9 @@ fn observe_unit_in(
         .isolated_from(&provider_namespaces)
         .then_some(())
         .ok_or(KernelObservationError::SharedNamespace)?;
-    network
-        .check(facts.net.as_fd())
-        .map_err(KernelObservationError::UnitNetwork)?;
+    let readback = network_facts(network, facts.net.as_fd(), context)?;
     let (device, inode) = context.cgroup.identity;
     let cgroup = KernelIdentity::of(device, inode)?;
-    let readback = context
-        .network
-        .map(|(network, deadline)| network.readback(deadline))
-        .transpose()
-        .map_err(KernelObservationError::Network)?;
     let (work, handle) = facts
         .work
         .map_or((None, None), |(mount, file)| (Some(mount), Some(file)));
@@ -1103,6 +1096,23 @@ fn observe_unit_in(
         },
         work: handle,
     })
+}
+
+/// The unit's network namespace check (R14 N12), then the Local network
+/// readback of a Local attempt (R14 §3.2); `None` for every other mode.
+fn network_facts(
+    check: &dyn UnitNetworkCheck,
+    unit_network: BorrowedFd<'_>,
+    context: &ObservationContext<'_>,
+) -> Result<Option<LocalNetworkReadback>, KernelObservationError> {
+    check
+        .check(unit_network)
+        .map_err(KernelObservationError::UnitNetwork)?;
+    context
+        .network
+        .map(|(network, deadline)| network.readback(deadline))
+        .transpose()
+        .map_err(KernelObservationError::Network)
 }
 
 /// The attempt's KOE1 for a frozen `observation`, made once the `ReadyV1`
