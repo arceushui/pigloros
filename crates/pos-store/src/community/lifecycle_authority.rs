@@ -59,7 +59,7 @@ const EXECUTION_CATEGORY: &str = "community.execution-state";
 const INITIALIZER_CATEGORY: &str = "community.initial-state";
 const PURPOSE: &str = "lifecycle-administration";
 
-/// The five closed administrative actions (ADR-129 §1, A5.1).
+/// The six closed administrative actions (ADR-129 §1, A5.1 and R8.3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommunityAdministrativeActionV1 {
     /// First initialization of a Timeline.
@@ -72,6 +72,8 @@ pub enum CommunityAdministrativeActionV1 {
     Retire,
     /// Authenticated quarantine reset.
     QuarantineReset,
+    /// Authenticated Abort of an unresolved pass, reasons 0 and 4 (R8.3).
+    PassAbort,
 }
 
 impl CommunityAdministrativeActionV1 {
@@ -84,16 +86,19 @@ impl CommunityAdministrativeActionV1 {
             Self::Fork => "community.fork.v1",
             Self::Retire => "community.retire.v1",
             Self::QuarantineReset => "community.quarantine.reset.v1",
+            Self::PassAbort => "community.pass.abort.v1",
         }
     }
 
     /// The `<k>` of the operation constraint: `i` for CGI1 operations, `f`
-    /// for Fork and `c` for control operations.
+    /// for Fork, `c` for control operations and `r` for the reservation
+    /// operation of a pass Abort.
     const fn operation_kind(self) -> char {
         match self {
             Self::Initialize | Self::Transition => 'i',
             Self::Fork => 'f',
             Self::Retire | Self::QuarantineReset => 'c',
+            Self::PassAbort => 'r',
         }
     }
 
@@ -144,6 +149,13 @@ pub enum CommunityAdministrativeOperationV1 {
         timeline: TimelineId,
         /// CQC1 control operation identity.
         control_operation_id: [u8; 16],
+    },
+    /// `control` Abort, CAB1 reason 0 or 4: the caller form of R8.3(2).
+    PassAbort {
+        /// The aborted pass's Timeline.
+        timeline: TimelineId,
+        /// The pass's `reservation_operation_id`.
+        reservation_operation_id: [u8; 16],
     },
 }
 
@@ -210,6 +222,10 @@ impl CommunityAdministrativeRequestV1 {
                 timeline,
                 control_operation_id,
             } => Some((Action::QuarantineReset, timeline, control_operation_id)),
+            Operation::PassAbort {
+                timeline,
+                reservation_operation_id,
+            } => Some((Action::PassAbort, timeline, reservation_operation_id)),
         };
         derived
             .filter(|(_, timeline, operation_id)| {

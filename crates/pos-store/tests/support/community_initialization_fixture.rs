@@ -850,7 +850,8 @@ pub fn member_resource(
     ))
 }
 
-/// One grant that admits every decision of a code-0 initialize of `timeline`.
+/// One grant that admits every decision of a code-0 initialize of `timeline`
+/// and the administrative decision of a pass Abort (`community.pass.abort.v1`).
 ///
 /// It covers the administrative request, `roster`'s initializer `read` and
 /// every member's `execute`. The CAV1 has one authority row per chain
@@ -883,6 +884,7 @@ pub fn data_grant(
             resources,
             actions: vec![
                 "community.initialize.v1".to_owned(),
+                "community.pass.abort.v1".to_owned(),
                 "execute".to_owned(),
                 "read".to_owned(),
             ],

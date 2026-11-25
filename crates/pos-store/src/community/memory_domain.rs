@@ -25,6 +25,8 @@ use super::erasure_budget::{CommunityErasureContextV1, CommunityPendingReservati
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 #[cfg(target_os = "linux")]
+use super::pass_abort::CommittedPassAbortV1;
+#[cfg(target_os = "linux")]
 use super::pass_install::CommunityHorizonPolicyV1;
 #[cfg(target_os = "linux")]
 use super::pass_record::CommunityPassRecordV1;
@@ -204,6 +206,10 @@ pub struct MemoryCommunityDomainV1 {
     /// The installed horizon inputs of the Reserve writer (R13.4(2)).
     #[cfg(target_os = "linux")]
     pub(super) pass_horizons: Option<CommunityHorizonPolicyV1>,
+    /// Every committed pass Abort by `(T, reservation operation ID)`, its
+    /// retry key (ADR-129 R15.3(2) step 4).
+    #[cfg(target_os = "linux")]
+    pub(super) pass_aborts: BTreeMap<(TimelineId, [u8; 16]), CommittedPassAbortV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -258,6 +264,7 @@ impl MemoryCommunityDomainV1 {
                 pass_records: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 pass_horizons: None,
+                pass_aborts: BTreeMap::new(),
             })
         }
     }
