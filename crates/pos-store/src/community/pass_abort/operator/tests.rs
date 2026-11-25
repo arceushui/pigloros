@@ -940,10 +940,10 @@ fn a_refused_commit_leaves_the_pass_unresolved() -> TestResult {
     let staged = moved.staged()?;
     moved
         .domain_mut()
-        .bootstrap
-        .as_mut()
-        .ok_or("no bootstrap")?
         .selection
+        .as_mut()
+        .ok_or("no committed CSI1")?
+        .1
         .address = hash(1);
     assert_eq!(
         moved.domain_mut().commit_pass_abort(&SEAL, staged).err(),
