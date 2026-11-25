@@ -461,7 +461,13 @@ pub(crate) fn erase(
 fn a_preview_commits_its_claim_and_result_and_reads_them_back() -> TestResult {
     let mut host = host()?;
     let request = seeded(&mut host, entity(CONSENT)?)?;
-    let admitted = ok(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?)?;
+    let admitted = ok(admit(
+        &mut host,
+        &request,
+        "k-1",
+        &limits(64),
+        Instant::now(),
+    )?)?;
     // The claim, then its result: the preview ID is the claim Event's ID,
     // the claim's entity is the claim key's, the result's is the preview.
     let stored = events(&mut host)?;
@@ -533,8 +539,12 @@ fn an_exact_retry_returns_the_preview_and_appends_nothing() -> TestResult {
     let limits = limits(64);
     let now = Instant::now();
     let first = ok(admit(&mut host, &request, "k-1", &limits, now)?)?;
-    let found = ok(lookup_claim(&mut host, &claim_key("k-1")?, request.digest()))?
-        .ok_or("the claim is found by its key")?;
+    let found = ok(lookup_claim(
+        &mut host,
+        &claim_key("k-1")?,
+        request.digest(),
+    ))?
+    .ok_or("the claim is found by its key")?;
     assert!(found.is_finished());
     // The step-12 re-lookup answers an equal claim as an exact retry, from
     // its stored claim, and the quota does not count it.
@@ -572,7 +582,11 @@ fn an_exact_retry_returns_the_preview_and_appends_nothing() -> TestResult {
         refusal(finish_retry(&mut host, &other, "k-1", 64)?),
         "IdempotencyConflict"
     );
-    let unclaimed = ok(lookup_claim(&mut host, &claim_key("k-2")?, request.digest()))?;
+    let unclaimed = ok(lookup_claim(
+        &mut host,
+        &claim_key("k-2")?,
+        request.digest(),
+    ))?;
     assert!(unclaimed.is_none());
     // A finish without a claim to finish is the internal-failure arm.
     assert_eq!(
@@ -592,8 +606,12 @@ fn an_interrupted_claim_is_finished_once_by_its_retry() -> TestResult {
     let admitted = ok(read(&mut host, preview_id)?)?;
     assert_eq!(admitted.state, DecisionPreviewStateV1::Admitted);
     assert_eq!(admitted.state.generation(), 1);
-    let found = ok(lookup_claim(&mut host, &claim_key("k-1")?, request.digest()))?
-        .ok_or("the claim is found")?;
+    let found = ok(lookup_claim(
+        &mut host,
+        &claim_key("k-1")?,
+        request.digest(),
+    ))?
+    .ok_or("the claim is found")?;
     assert!(!found.is_finished());
     let finished = ok(finish_retry(&mut host, &request, "k-1", 64)?)?;
     assert_eq!(finished.preview_id, preview_id);
@@ -644,7 +662,13 @@ fn an_input_erased_before_the_finish_fails_the_preview_for_good() -> TestResult 
 fn a_later_erasure_degrades_a_computed_preview() -> TestResult {
     let mut host = host()?;
     let request = seeded(&mut host, entity(CONSENT)?)?;
-    let admitted = ok(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?)?;
+    let admitted = ok(admit(
+        &mut host,
+        &request,
+        "k-1",
+        &limits(64),
+        Instant::now(),
+    )?)?;
     let committed = ok(read(&mut host, admitted.preview_id)?)?;
     erase(
         &mut host,
@@ -662,7 +686,13 @@ fn a_later_erasure_degrades_a_computed_preview() -> TestResult {
     assert_eq!(events(&mut host)?.len(), 2);
     // The erased input is now 404 to a fresh admission.
     assert_eq!(
-        refusal(admit(&mut host, &request, "k-2", &limits(64), Instant::now())?),
+        refusal(admit(
+            &mut host,
+            &request,
+            "k-2",
+            &limits(64),
+            Instant::now()
+        )?),
         "NotFound"
     );
     Ok(())
@@ -723,10 +753,7 @@ fn the_quota_window_counts_new_claims_only() -> TestResult {
     }
     assert_eq!(quota.check(PRINCIPAL, opened), Err(QUOTA_WINDOW));
     let later = opened + Duration::from_secs(20);
-    assert_eq!(
-        quota.check(PRINCIPAL, later),
-        Err(Duration::from_secs(40))
-    );
+    assert_eq!(quota.check(PRINCIPAL, later), Err(Duration::from_secs(40)));
     // Another Principal has its own window, and a closed window reopens.
     assert_eq!(quota.check([8; 16], later), Ok(()));
     assert_eq!(quota.check(PRINCIPAL, opened + QUOTA_WINDOW), Ok(()));
@@ -758,7 +785,13 @@ fn the_quota_window_counts_new_claims_only() -> TestResult {
         first.preview_id
     );
     assert_eq!(events(&mut host)?.len(), 2);
-    ok(admit(&mut host, &request, "k-2", &limits, now + QUOTA_WINDOW)?)?;
+    ok(admit(
+        &mut host,
+        &request,
+        "k-2",
+        &limits,
+        now + QUOTA_WINDOW,
+    )?)?;
     Ok(())
 }
 
@@ -771,7 +804,13 @@ fn a_match_score_refusal_is_the_internal_arm() -> TestResult {
     let mut request = seeded(&mut host, entity(CONSENT)?)?;
     request.preference = preference(&mut host, actor()?, &[("nature", 2_000_000)])?;
     assert_eq!(
-        refusal(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?),
+        refusal(admit(
+            &mut host,
+            &request,
+            "k-1",
+            &limits(64),
+            Instant::now()
+        )?),
         "Internal"
     );
     assert!(!ok(scan(&mut host))?.recorded);
@@ -795,7 +834,13 @@ fn undecodable_inputs_are_the_internal_arm() -> TestResult {
             GatewayRevisionKindV1::OptionSpec => corrupt.option_spec = undecodable,
         }
         assert_eq!(
-            refusal(admit(&mut host, &corrupt, "k-1", &limits(64), Instant::now())?),
+            refusal(admit(
+                &mut host,
+                &corrupt,
+                "k-1",
+                &limits(64),
+                Instant::now()
+            )?),
             "Internal",
             "{kind:?}"
         );
@@ -859,7 +904,11 @@ fn every_stored_inconsistency_is_the_internal_arm() -> TestResult {
         vec![0xff],
     )?;
     assert_eq!(
-        refusal(lookup_claim(&mut host, &claim_key("corrupt")?, request.digest())),
+        refusal(lookup_claim(
+            &mut host,
+            &claim_key("corrupt")?,
+            request.digest()
+        )),
         "Internal"
     );
     for (key, payload) in [
@@ -947,14 +996,26 @@ fn admission_answers_every_unusable_input_with_not_found() -> TestResult {
         with_option_spec(foreign_option_spec),
     ] {
         assert_eq!(
-            refusal(admit(&mut host, &refused, "k-1", &limits(64), Instant::now())?),
+            refusal(admit(
+                &mut host,
+                &refused,
+                "k-1",
+                &limits(64),
+                Instant::now()
+            )?),
             "NotFound",
             "{refused:?}"
         );
     }
     assert!(!ok(scan(&mut host))?.recorded);
     // The key was never claimed: the valid request admits under it now.
-    ok(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?)?;
+    ok(admit(
+        &mut host,
+        &request,
+        "k-1",
+        &limits(64),
+        Instant::now(),
+    )?)?;
     Ok(())
 }
 
@@ -983,7 +1044,13 @@ fn an_undecodable_room_is_the_internal_arm() -> TestResult {
         ..request
     };
     assert_eq!(
-        refusal(admit(&mut host, &corrupt, "k-1", &limits(64), Instant::now())?),
+        refusal(admit(
+            &mut host,
+            &corrupt,
+            "k-1",
+            &limits(64),
+            Instant::now()
+        )?),
         "Internal"
     );
     Ok(())
@@ -993,14 +1060,34 @@ fn an_undecodable_room_is_the_internal_arm() -> TestResult {
 fn the_profile_gate_needs_an_installed_servable_profile() -> TestResult {
     for (mode, profile_id, served) in [
         (GatewayModeProfileIdV1::Local, "replay-v1", true),
-        (GatewayModeProfileIdV1::Local, "deterministic-local-v1", true),
+        (
+            GatewayModeProfileIdV1::Local,
+            "deterministic-local-v1",
+            true,
+        ),
         (GatewayModeProfileIdV1::Local, "live-local-v1", true),
-        (GatewayModeProfileIdV1::Local, "deterministic-air-gapped-v1", false),
+        (
+            GatewayModeProfileIdV1::Local,
+            "deterministic-air-gapped-v1",
+            false,
+        ),
         (GatewayModeProfileIdV1::Local, "live-air-gapped-v1", false),
         (GatewayModeProfileIdV1::AirGapped, "replay-v1", true),
-        (GatewayModeProfileIdV1::AirGapped, "deterministic-air-gapped-v1", true),
-        (GatewayModeProfileIdV1::AirGapped, "live-air-gapped-v1", true),
-        (GatewayModeProfileIdV1::AirGapped, "deterministic-local-v1", false),
+        (
+            GatewayModeProfileIdV1::AirGapped,
+            "deterministic-air-gapped-v1",
+            true,
+        ),
+        (
+            GatewayModeProfileIdV1::AirGapped,
+            "live-air-gapped-v1",
+            true,
+        ),
+        (
+            GatewayModeProfileIdV1::AirGapped,
+            "deterministic-local-v1",
+            false,
+        ),
         (GatewayModeProfileIdV1::AirGapped, "unknown-v1", false),
     ] {
         assert_eq!(servable(mode, profile_id), served, "{mode:?} {profile_id}");
@@ -1063,18 +1150,26 @@ fn the_profile_gate_needs_an_installed_servable_profile() -> TestResult {
 fn a_client_root_named_decision_previews_is_never_used() -> TestResult {
     let mut host = host()?;
     let request = seeded(&mut host, entity(CONSENT)?)?;
-    let decoy = host.command_sender()?.create_timeline("decision-previews")?;
+    let decoy = host
+        .command_sender()?
+        .create_timeline("decision-previews")?;
     raw_decoy(&mut host, decoy.id())?;
     assert!(!ok(scan(&mut host))?.recorded);
-    let admitted = ok(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?)?;
+    let admitted = ok(admit(
+        &mut host,
+        &request,
+        "k-1",
+        &limits(64),
+        Instant::now(),
+    )?)?;
     assert_eq!(events(&mut host)?.len(), 2);
     assert!(matches!(
         ok(read(&mut host, admitted.preview_id)?)?.state,
         DecisionPreviewStateV1::Committed { .. }
     ));
-    let decoy_events = host
-        .read_sender()?
-        .read_bounded(decoy.id(), SeqRange::all(), read_bounds())?;
+    let decoy_events =
+        host.read_sender()?
+            .read_bounded(decoy.id(), SeqRange::all(), read_bounds())?;
     assert_eq!(decoy_events.len(), 1);
     assert_ne!(decoy.id(), decision_previews_timeline());
     Ok(())
@@ -1102,7 +1197,13 @@ fn a_preview_is_read_only_by_its_principal_and_actor() -> TestResult {
         "NotFound"
     );
     let request = seeded(&mut host, entity(CONSENT)?)?;
-    let admitted = ok(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?)?;
+    let admitted = ok(admit(
+        &mut host,
+        &request,
+        "k-1",
+        &limits(64),
+        Instant::now(),
+    )?)?;
     let result = events(&mut host)?
         .into_iter()
         .find(|event| is_result(event))
@@ -1134,7 +1235,13 @@ fn a_preview_is_read_only_by_its_principal_and_actor() -> TestResult {
 fn a_preview_keeps_the_binding_its_claim_committed_under() -> TestResult {
     let mut host = host()?;
     let request = seeded(&mut host, entity(CONSENT)?)?;
-    let admitted = ok(admit(&mut host, &request, "k-1", &limits(64), Instant::now())?)?;
+    let admitted = ok(admit(
+        &mut host,
+        &request,
+        "k-1",
+        &limits(64),
+        Instant::now(),
+    )?)?;
     let reference = |id: &str, digest: &str| -> TestResult<GatewayModeProfileRefV1> {
         Ok(GatewayModeProfileRefV1::try_new(id, digest_of(digest)?)?)
     };
@@ -1145,7 +1252,10 @@ fn a_preview_keeps_the_binding_its_claim_committed_under() -> TestResult {
     host.gateway_mode_binding().migrate_mode(permit)?;
     let preview = ok(read(&mut host, admitted.preview_id)?)?;
     assert_eq!(
-        (preview.mode_profile.profile, preview.mode_profile.binding_epoch.get()),
+        (
+            preview.mode_profile.profile,
+            preview.mode_profile.binding_epoch.get()
+        ),
         (GatewayModeProfileIdV1::Local, 1)
     );
     Ok(())
@@ -1238,12 +1348,12 @@ fn a_store_without_a_host_or_an_expired_command_answers() -> TestResult {
         )
     );
     let (reply, receiver) = oneshot::channel();
-    super::super::expire_command(super::super::Command::Action(Box::new(
-        PreviewCommandV1::<()> {
-            operation: Box::new(|_| Ok(())),
-            reply,
-        },
-    )));
+    super::super::expire_command(super::super::Command::Action(Box::new(PreviewCommandV1::<
+        (),
+    > {
+        operation: Box::new(|_| Ok(())),
+        reply,
+    })));
     assert!(matches!(
         receiver.blocking_recv()?,
         Err(StoreExecutorError::DeadlineExceeded)
