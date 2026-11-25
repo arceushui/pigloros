@@ -106,6 +106,9 @@ impl<'a> Channel<'a> {
         };
         channel.send(CMD_INIT, &nonce, MAX_MESSAGE_BYTES)?;
         let reply = loop {
+            if channel.remaining().is_zero() {
+                return Err(TIMEOUT);
+            }
             let reply = channel.receive(CMD_INIT, MAX_MESSAGE_BYTES)?;
             if reply.starts_with(&nonce) {
                 break reply;

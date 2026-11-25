@@ -1,5 +1,6 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::{BridgeError, LifecycleCode, MonotonicClock, UnavailableCode};
@@ -108,9 +109,33 @@ fn payload(length: usize) -> Vec<u8> {
         .collect()
 }
 
+/// A clock that moves one millisecond every time it is read, on top of the shared fake clock, so
+/// a loop that never reads the device still reaches the deadline instead of spinning.
+struct Ticking {
+    clock: FakeClock,
+    reads: Cell<u32>,
+}
+
+impl Ticking {
+    fn new(clock: &FakeClock) -> Self {
+        Self {
+            clock: clock.clone(),
+            reads: Cell::new(0),
+        }
+    }
+}
+
+impl MonotonicClock for Ticking {
+    fn now(&self) -> Instant {
+        self.reads.set(self.reads.get() + 1);
+        self.clock.now() + Duration::from_millis(u64::from(self.reads.get()))
+    }
+}
+
 fn open(device: &mut Scripted, clock: &FakeClock) -> Result<[u8; 4], BridgeError> {
+    let clock = Ticking::new(clock);
     let deadline = clock.now() + Duration::from_secs(10);
-    Channel::open(device, clock, deadline, nonce()).map(|channel| channel.cid)
+    Channel::open(device, &clock, deadline, nonce()).map(|channel| channel.cid)
 }
 
 fn transact(
@@ -119,8 +144,9 @@ fn transact(
     request: &[u8],
     limit: usize,
 ) -> Result<Vec<u8>, BridgeError> {
+    let clock = Ticking::new(clock);
     let deadline = clock.now() + Duration::from_secs(10);
-    Channel::open(device, clock, deadline, nonce())
+    Channel::open(device, &clock, deadline, nonce())
         .and_then(|mut channel| channel.transact(CMD_CBOR, request, limit))
 }
 
@@ -170,11 +196,28 @@ fn init_skips_replies_to_another_nonce_and_never_cancels_the_broadcast() {
 }
 
 #[test]
+fn init_gives_up_at_the_deadline_between_replies_to_another_nonce() {
+    let clock = FakeClock::start();
+    let mut other = nonce();
+    other[0] ^= 1;
+    let mut device = Scripted::new(&clock, init_reply(other, 0x04));
+    let ticking = Ticking::new(&clock);
+    let deadline = ticking.now() + Duration::from_millis(2);
+    assert_eq!(
+        Channel::open(&mut device, &ticking, deadline, nonce()).map(|_| ()),
+        Err(TIMEOUT)
+    );
+    assert_eq!(device.writes.len(), 1);
+    assert_eq!(device.reads.len(), 1);
+}
+
+#[test]
 fn nothing_is_sent_once_the_deadline_has_passed() {
     let clock = FakeClock::start();
     let mut device = Scripted::new(&clock, init_reply(nonce(), 0x04));
-    let deadline = clock.now() + Duration::from_secs(10);
-    let opened = Channel::open(&mut device, &clock, deadline, nonce()).map(|mut channel| {
+    let ticking = Ticking::new(&clock);
+    let deadline = ticking.now() + Duration::from_secs(10);
+    let opened = Channel::open(&mut device, &ticking, deadline, nonce()).map(|mut channel| {
         clock.advance(Duration::from_secs(10));
         channel.transact(CMD_CBOR, &[4], 100)
     });
@@ -182,7 +225,7 @@ fn nothing_is_sent_once_the_deadline_has_passed() {
     assert_eq!(device.writes.len(), 1);
     let mut late = Scripted::new(&clock, init_reply(nonce(), 0x04));
     assert_eq!(
-        Channel::open(&mut late, &clock, deadline, nonce()).map(|_| ()),
+        Channel::open(&mut late, &ticking, deadline, nonce()).map(|_| ()),
         Err(TIMEOUT)
     );
     assert!(late.writes.is_empty());
@@ -273,7 +316,8 @@ fn the_deadline_cancels_the_request() {
     let mut device = Scripted::new(&clock, init_reply(nonce(), 0x04));
     let started = clock.now();
     assert_eq!(transact(&mut device, &clock, &[4], 100), Err(TIMEOUT));
-    assert_eq!(clock.now(), started + Duration::from_secs(10));
+    let elapsed = clock.now() - started;
+    assert!(elapsed > Duration::from_millis(9_900) && elapsed <= Duration::from_secs(10));
     let cancel = device.writes[2];
     assert_eq!(cancel[..7], [0, 0, 0, 9, CMD_CANCEL, 0, 0]);
 
