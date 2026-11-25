@@ -32,7 +32,7 @@
 //!     then `Open`.
 //!
 //! The SPI1 attempt network is used only by Local attempts, which the port
-//! refuses until #1488.
+//! refuses until #1488 serves it.
 
 use std::fs::File;
 use std::future::Future;
