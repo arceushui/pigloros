@@ -71,19 +71,26 @@ pub(super) const fn serves(mode: ExecutionMode) -> bool {
     )
 }
 
-/// The network plan of an admitted `mode` the port serves: `Fork`'s own,
-/// `Replay`'s with no exchanges, and `AirGapped`'s for every other, whose
-/// execution then refuses the mismatch.
+/// The network plan of an admitted `mode` the port serves: `Replay`'s with no
+/// exchanges, and the network-free plan of every other.
 ///
 /// A Replay case has no exchange to resolve: the plans it reconstructs are
 /// empty, because a non-empty SPX1 plan list fails the reconstruction
 /// equality (R11 Amendment 1 §7.5 row 7).
 const fn mode_plan(mode: SandboxExecutionMode) -> ModePlan {
     match mode {
-        SandboxExecutionMode::Fork => ModePlan::Fork,
         SandboxExecutionMode::Replay => ModePlan::Replay {
             exchanges: Vec::new(),
         },
+        other => network_free_plan(other),
+    }
+}
+
+/// `Fork`'s own plan, and `AirGapped`'s for every other mode, whose execution
+/// then refuses the mismatch.
+const fn network_free_plan(mode: SandboxExecutionMode) -> ModePlan {
+    match mode {
+        SandboxExecutionMode::Fork => ModePlan::Fork,
         _ => ModePlan::AirGapped,
     }
 }
