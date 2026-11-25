@@ -321,6 +321,17 @@ BAD_ENTRY = "entry point is in no executable loadable segment"
 NOT_CARRIED = "does not carry the adapter exactly once"
 
 
+def two_loads(first_flags: int, second_flags: int, entry: int) -> bytes:
+    """The adapter with two PT_LOAD segments, the first at 0x400000 (4096 bytes) and the second at
+    0x600000 (the whole file), with the given flags and entry point, as a real static link has."""
+    data = bytearray(X86_ADAPTER)
+    total = len(data)
+    struct.pack_into("<IIQQQQQQ", data, 64, 1, first_flags, 0, 0x400000, 0x400000, 4096, 4096, 4096)
+    struct.pack_into("<IIQQQQQQ", data, 120, 1, second_flags, 0, 0x600000, 0x600000, total, total, 4096)
+    struct.pack_into("<Q", data, 24, entry)
+    return bytes(data)
+
+
 def table_at_end() -> bytes:
     """The adapter with its program header table moved to the very end of the file."""
     data = bytearray(X86_ADAPTER)
@@ -348,8 +359,12 @@ def elf_accepted() -> list[bytes]:
     # the file; and a file of exactly the size floor.
     offset_segment = patched(72, struct.pack("<Q", 100))
     offset_segment = offset_segment[:96] + struct.pack("<Q", total - 100) + offset_segment[104:]
+    # Two loadable segments, as in a real link: the entry point is in the executable one, whichever
+    # comes first, and the other (read-only) one does not matter. A file size equal to the memory
+    # size is every other fixture's default.
     return [patched(24, struct.pack("<Q", 0x400000)), bss, patched(16, struct.pack("<H", 2)),
-            offset_segment, table_at_end(), static_elf(62, b"adapter", size=checker.MIN_EXECUTABLE_BYTES - 176)]
+            offset_segment, table_at_end(), static_elf(62, b"adapter", size=checker.MIN_EXECUTABLE_BYTES - 176),
+            two_loads(4, 5, 0x600000 + 176), two_loads(5, 4, 0x400000 + 176)]
 
 
 def elf_defects() -> list[tuple[str, bytes]]:
@@ -368,9 +383,12 @@ def elf_defects() -> list[tuple[str, bytes]]:
         # A wrong class, byte order or ident version.
         (ELF_FORMAT, patched(4, b"\x01")), (ELF_FORMAT, patched(5, b"\x02")),
         (ELF_FORMAT, patched(6, b"\x09")),
-        # Another architecture, a relocatable object and a wrong ELF version.
+        # A header that is valid except for one byte of the magic number (each of the four).
+        *[(ELF_FORMAT, patched(index, bytes([X86_ADAPTER[index] ^ 1]))) for index in range(4)],
+        # Another architecture, every file type but an executable or a shared object (relocatable,
+        # none, core, and a value no type has), and a wrong ELF version.
         (WRONG_EXECUTABLE, static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")),
-        (WRONG_EXECUTABLE, patched(16, struct.pack("<H", 1))),
+        *[(WRONG_EXECUTABLE, patched(16, struct.pack("<H", kind))) for kind in (0, 1, 4, 5)],
         (WRONG_EXECUTABLE, patched(20, struct.pack("<I", 9))),
         # Dynamically linked: no loader exists inside the image's root.
         (DYNAMIC, static_elf(machine, b"adapter", interpreter=True)),
@@ -391,9 +409,13 @@ def elf_defects() -> list[tuple[str, bytes]]:
         # A file size above the memory size while inside the file, with the entry point still inside
         # the memory size (176 < 200), so that no other rule refuses it.
         (SEGMENT_SIZES, patched(104, struct.pack("<Q", 200))),
+        # ... and by exactly one byte (the file size is the whole file, the memory size one less).
+        (SEGMENT_SIZES, patched(104, struct.pack("<Q", len(X86_ADAPTER) - 1))),
         # One byte more than the file holds, with the memory size to match.
         (TRUNCATED, patched(104, struct.pack("<Q", len(X86_ADAPTER) + 1),
                             patched(96, struct.pack("<Q", len(X86_ADAPTER) + 1)))),
+        # The entry point in a segment that is not executable while another loadable segment is.
+        (BAD_ENTRY, two_loads(5, 4, 0x600000 + 176)), (BAD_ENTRY, two_loads(4, 5, 0x400000 + 176)),
         # An entry point outside every segment, one past the end of the only segment, and one in a
         # segment that is readable and writable but not executable.
         (BAD_ENTRY, patched(24, struct.pack("<Q", 0x10))), (BAD_ENTRY, patched(24, struct.pack("<Q", end))),
