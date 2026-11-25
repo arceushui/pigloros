@@ -1295,7 +1295,7 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(checker.EvidenceError,
                                     r"stderr: '' \(empty: systemd-run printed nothing\); "
                                     r"probe files written: \[\]; "
-                                    r"the explanation is in guest/network/fb-1/journal"):
+                                    r"look in guest/network/fb-1/journal"):
             self.verdict(change=logged_only)
         # A record with a missing run file or an unexpected file is named precisely, with the
         # probe files that exist.
