@@ -83,13 +83,16 @@ async fn send(
 
 /// The Local Principal of the fixture actor, with one consent the actor
 /// grants itself, and the operations the tests use: a stand-in for the
-/// Decision Preview grants, which the route layer adds (#305 C3).
+/// Decision Preview grants, which the route layer adds (#305 C3). The
+/// timeline creation is the operation the consent governs; a consent that
+/// governs no operation is not provisionable.
 fn provision() -> TestResult<LocalPrincipalProvisionV1> {
     let actor = actor()?;
     Ok(LocalPrincipalProvisionV1::try_new_provisioned(
         &PrincipalRefV1::try_new(PRINCIPAL, "local")?,
         [actor],
         [
+            GatewayOperationV1::CREATE_TIMELINE,
             GatewayOperationV1::READ_SCENARIO_ROOM,
             GatewayOperationV1::READ_SESSION,
             GatewayOperationV1::REVOKE_CONSENT,
