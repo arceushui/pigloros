@@ -1006,12 +1006,13 @@ fn grant_matches_execute_request(
 /// clause of R16 §3.3 change C. The check is mode-independent, so it is
 /// stricter than R16 requires for the non-Local modes without a replay source.
 /// 1492-b (R16 §7) owns the checks for non-empty plans.
-const fn transcripts_fit_plans(
-    receipt: &SandboxProviderReceipt,
-    spx: &SandboxExecuteRequest,
-) -> bool {
-    receipt.network_transcript_digests.len() <= spx.network_plans.len()
-        && (receipt.release1_digest.is_some() || receipt.network_transcript_digests.is_empty())
+fn transcripts_fit_plans(receipt: &SandboxProviderReceipt, spx: &SandboxExecuteRequest) -> bool {
+    // With a release bound, every planned exchange may have a transcript;
+    // without one, none may.
+    let planned = receipt
+        .release1_digest
+        .map_or(0, |_| spx.network_plans.len());
+    receipt.network_transcript_digests.len() <= planned
 }
 
 fn receipt_matches_grant(
