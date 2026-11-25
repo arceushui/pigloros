@@ -55,6 +55,9 @@ impl CommunityGenerationCountsV1 {
 pub(super) struct CommunityPassStateV1 {
     /// T's active generation G (R10.5).
     pub(super) generation: [u8; 16],
+    /// `H(CDP1)` of the profile T was initialized under: every Reserve on T
+    /// names it, whatever profile is installed now (R10.7 5j).
+    pub(super) profile_digest: Hash,
     /// `H(CSH1)`, T's selected head: the head and frontier a Reserve must
     /// still find (R10.7 step 5j).
     pub(super) head: Hash,
@@ -105,6 +108,7 @@ impl CommunityPassStateV1 {
     /// counter starts at the initialization's own bytes.
     pub(super) fn initialized(
         generation: [u8; 16],
+        profile_digest: Hash,
         history: CommunitySharedCountsV1,
         graph: &CommunityInitializationGraphV1,
     ) -> Self {
@@ -119,6 +123,7 @@ impl CommunityPassStateV1 {
             .fold(0_u64, u64::saturating_add);
         Self {
             generation,
+            profile_digest,
             head: graph.selected_head_digest(),
             counters: CommunitySharedCountsV1 {
                 nodes: history.nodes.saturating_add(nodes),

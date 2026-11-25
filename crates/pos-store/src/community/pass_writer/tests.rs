@@ -50,6 +50,9 @@ const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition
 const GENERATION: [u8; 16] = [0x20; 16];
 const OPERATION: [u8; 16] = [0x30; 16];
 const SAMPLE: u64 = 1_000;
+/// The native producer ordinal the fixture's materialization carries and
+/// the burned counter stands at (R10.7 5h burned it just before the Reserve).
+const BURNED: u64 = 3;
 /// The recovery window: 60 s, so `H_r` is `SAMPLE` + 60 s.
 const WINDOW: u64 = 60_000_000;
 /// `generation_not_after`, and so `H_g`: 100 s.
@@ -133,6 +136,7 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
     );
     domain.pass_states.insert(id(1), state);
     domain.pass_horizons = Some(domain_policy());
+    domain.native_producer_ordinal = BURNED;
     Ok(domain)
 }
 
@@ -152,7 +156,22 @@ fn domain_policy() -> CommunityHorizonPolicyV1 {
             evidence_micros: 2 * GENERATION_HORIZON,
         },
         profile_digest: hash(83),
+        roster_len: 2,
     }
+}
+
+/// Set the installed owner evidence horizon.
+fn set_evidence(
+    domain: &mut MemoryCommunityDomainV1,
+    micros: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    domain
+        .pass_horizons
+        .as_mut()
+        .ok_or("horizons")?
+        .owners
+        .evidence_micros = micros;
+    Ok(())
 }
 
 /// Set the installed recording horizon.
@@ -173,6 +192,7 @@ fn set_recording(
 fn pass_state() -> CommunityPassStateV1 {
     CommunityPassStateV1 {
         generation: GENERATION,
+        profile_digest: hash(83),
         head: hash(30),
         counters: counts(100),
         graph: CommunityGraphCountsV1 {
@@ -329,6 +349,10 @@ fn other_operation(
     other.selected_head = state.head;
     other.prior_shared_counts = state.counters;
     other.reservation_operation_id = [0x77; 16];
+    // A new materialization carries the ordinal burned for it just now.
+    if let Some(minted) = other.minted.as_mut() {
+        minted.reference.producer_ordinal = domain.native_producer_ordinal;
+    }
     bound(other).map_err(Box::<dyn std::error::Error>::from)
 }
 
@@ -1074,7 +1098,7 @@ fn a_reserve_indexes_its_pass_reserved_and_live() -> TestResult {
     );
     assert!(domain.pass_is_live(id(1), OPERATION));
     let reservation = domain.pass_reservation(id(1), OPERATION).ok_or("cpr1")?;
-    assert!(reservation == expected_reservation(1, 1)?);
+    assert!(reservation == expected_reservation(1, BURNED + 1)?);
     let counters = domain.pass_counters(id(1), OPERATION).ok_or("counts")?;
     assert!(counters.prior == counts(100));
     assert!(counters.materialization.ok_or("additions")? == counts(10));
@@ -1282,17 +1306,18 @@ fn an_apply_over_a_record_or_a_bare_entry_fails_loudly() -> TestResult {
 fn a_second_pending_reservation_of_t_refuses_the_apply() -> TestResult {
     let mut domain = domain()?;
     let base = input()?;
-    let other = |byte: u8| CommunityReserveInputV1 {
-        reservation_operation_id: [byte; 16],
-        ..base.clone()
+    let other = |byte: u8| {
+        let mut call = base.clone();
+        call.reservation_operation_id = [byte; 16];
+        bound(call)
     };
     // Another Timeline's entry is not T's.
     domain.pending_reservations.insert(
         (id(2), [0x40; 16]),
         CommunityPendingReservationV1::for_pass(0, 0),
     );
-    let first = domain.stage_reserve(other(0x40))?;
-    let second = domain.stage_reserve(other(0x41))?;
+    let first = domain.stage_reserve(other(0x40)?)?;
+    let second = domain.stage_reserve(other(0x41)?)?;
     domain.apply_reserve(&SEAL, first)?;
     let before = snapshot(&domain)?;
     assert_eq!(
@@ -1304,7 +1329,7 @@ fn a_second_pending_reservation_of_t_refuses_the_apply() -> TestResult {
     // identities of T are T's too.
     for edge in [[0; 16], [u8::MAX; 16]] {
         let mut domain = self::domain()?;
-        let staged = domain.stage_reserve(other(0x42))?;
+        let staged = domain.stage_reserve(other(0x42)?)?;
         domain
             .pending_reservations
             .insert((id(1), edge), CommunityPendingReservationV1::for_pass(0, 0));
@@ -1540,6 +1565,7 @@ fn the_cut_compare_walks_the_history_forks_depth() -> TestResult {
             .collect::<Result<Vec<_>, _>>()?;
         let mut domain =
             MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
+        domain.native_producer_ordinal = BURNED;
         domain.pass_states.insert(leaf, pass_state());
         domain.pass_horizons = Some(domain_policy());
         let mut call = input()?;
@@ -1700,19 +1726,12 @@ fn the_writer_computes_the_horizons_and_binds_the_observation_use() -> TestResul
 fn the_state_horizon_must_outlast_the_decision_bound() -> TestResult {
     let mut domain = domain()?;
     let bound = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1;
-    let owner = |domain: &mut MemoryCommunityDomainV1, evidence: u64| {
-        domain
-            .pass_horizons
-            .as_mut()
-            .map(|policy| policy.owners.evidence_micros = evidence)
-            .ok_or("horizons")
-    };
-    owner(&mut domain, bound)?;
+    set_evidence(&mut domain, bound)?;
     assert_eq!(
         domain.stage_reserve(input()?).err(),
         Some(Error::EvidenceExpired)
     );
-    owner(&mut domain, bound + 1)?;
+    set_evidence(&mut domain, bound + 1)?;
     assert!(domain.stage_reserve(input()?).is_ok());
     Ok(())
 }
@@ -1751,7 +1770,7 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
     };
     // Two members in order agree with three trace rows and six targets.
     let mut two = input()?;
-    two.pass.members = vec![member(0), member(2)];
+    two.pass.members = vec![member(0), member(1)];
     two.pass.trace_rows = 3;
     two.failure_reserve = 6;
     assert!(domain.stage_reserve(two).is_ok());
@@ -1771,6 +1790,31 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
         with(&|call| call.pass.failure_cohort_key = call.pass.metadata_key)?,
         Some(Error::InvalidBinding)
     );
+    // No due member, even with the trace rows and `F_p` of an empty pass.
+    let mut empty = input()?;
+    empty.pass.members.clear();
+    empty.pass.trace_rows = 1;
+    empty.failure_reserve = 2;
+    assert_eq!(
+        domain.stage_reserve(empty).err(),
+        Some(Error::InvalidBinding)
+    );
+    // A member row beyond the installed roster, and a key list that is
+    // short or long for it.
+    let mut beyond = input()?;
+    beyond.pass.members = vec![member(2)];
+    assert_eq!(
+        domain.stage_reserve(beyond).err(),
+        Some(Error::InvalidBinding)
+    );
+    for keys in [1_usize, 3] {
+        let mut call = input()?;
+        call.roster_quarantine_keys = (0..keys).map(|_| hash(50)).collect();
+        assert_eq!(
+            domain.stage_reserve(call).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
     for indices in [[1, 1], [2, 1]] {
         let mut call = input()?;
         call.pass.members = vec![member(indices[0]), member(indices[1])];
@@ -1807,16 +1851,66 @@ fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
     Ok(())
 }
 
+/// T was initialized under one profile, and a Reserve naming the installed
+/// profile of another is refused (3) whatever has been reinstalled since.
+#[test]
+fn a_reserve_names_the_profile_the_timeline_was_initialized_under() -> TestResult {
+    let mut domain = domain()?;
+    domain
+        .pass_states
+        .get_mut(&id(1))
+        .ok_or("state")?
+        .profile_digest = hash(99);
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+/// R10.7 5j order: a short `H_g` gives 13 before a stale generation (5), and
+/// a moved cut gives 12 before the 13.
+#[test]
+fn the_decision_bound_and_the_cut_come_before_the_generation_compare() -> TestResult {
+    let mut domain = domain()?;
+    let bound_micros = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1;
+    set_evidence(&mut domain, bound_micros)?;
+    let mut stale = input()?;
+    stale.generation = [0x21; 16];
+    assert_eq!(
+        domain.stage_reserve(bound(stale.clone())?).err(),
+        Some(Error::EvidenceExpired)
+    );
+    if let Some(minted) = stale.minted.as_mut() {
+        minted.cut.through_seq = 1;
+    }
+    assert_eq!(
+        domain.stage_reserve(bound(stale)?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A Reserve of a minted materialization whose nodes carry `ordinal`.
+fn minting(ordinal: u64) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
+    let mut call = input()?;
+    if let Some(minted) = call.minted.as_mut() {
+        minted.reference.producer_ordinal = ordinal;
+    }
+    Ok(call)
+}
+
 /// R9.7 step 4, annex §4: a Reserve allocates its native producer ordinal
 /// and its pass ordinal in its own transaction, the next of the burned
 /// counter and of T's floor; an Abort decrements neither.
 #[test]
 fn a_reserve_allocates_both_ordinals_in_its_transaction() -> TestResult {
     let mut domain = domain()?;
-    assert_eq!(domain.burn_materialization_ordinal(&SEAL)?, 1);
-    let staged = domain.stage_reserve(input()?)?;
+    let burned = domain.burn_materialization_ordinal(&SEAL)?;
+    assert_eq!(burned, BURNED + 1);
+    let staged = domain.stage_reserve(minting(burned)?)?;
     // Staging allocates nothing.
-    assert_eq!(domain.native_producer_ordinal, 1);
+    assert_eq!(domain.native_producer_ordinal, burned);
     assert_eq!(
         domain
             .pass_states
@@ -1825,7 +1919,7 @@ fn a_reserve_allocates_both_ordinals_in_its_transaction() -> TestResult {
         Some(0)
     );
     domain.apply_reserve(&SEAL, staged)?;
-    assert_eq!(domain.native_producer_ordinal, 2);
+    assert_eq!(domain.native_producer_ordinal, burned + 1);
     assert_eq!(
         domain
             .pass_states
@@ -1834,7 +1928,7 @@ fn a_reserve_allocates_both_ordinals_in_its_transaction() -> TestResult {
         Some(1)
     );
     let first = domain.pass_reservation(id(1), OPERATION).ok_or("cpr1")?;
-    assert!(first == expected_reservation(1, 2)?);
+    assert!(first == expected_reservation(1, burned + 1)?);
 
     let abort = domain.stage_abort(id(1), OPERATION, 0)?;
     domain.apply_abort(&SEAL, &abort)?;
@@ -1842,9 +1936,9 @@ fn a_reserve_allocates_both_ordinals_in_its_transaction() -> TestResult {
     let staged = domain.stage_reserve(second)?;
     domain.apply_reserve(&SEAL, staged)?;
     let second = domain.pass_reservation(id(1), [0x77; 16]).ok_or("cpr1")?;
-    assert_eq!(second.native_producer_ordinal, 3);
+    assert_eq!(second.native_producer_ordinal, burned + 2);
     assert_eq!(second.pass_key.ordinal(), 2);
-    assert_eq!(domain.native_producer_ordinal, 3);
+    assert_eq!(domain.native_producer_ordinal, burned + 2);
     Ok(())
 }
 
@@ -1853,14 +1947,14 @@ fn a_reserve_allocates_both_ordinals_in_its_transaction() -> TestResult {
 #[test]
 fn a_refused_reserve_burns_nothing_and_a_burn_stays_burned() -> TestResult {
     let mut domain = domain()?;
-    assert_eq!(domain.burn_materialization_ordinal(&SEAL)?, 1);
-    let mut stale = input()?;
+    let burned = domain.burn_materialization_ordinal(&SEAL)?;
+    let mut stale = minting(burned)?;
     stale.generation = [0x21; 16];
     assert_eq!(
         domain.stage_reserve(bound(stale)?).err(),
         Some(Error::StaleGeneration)
     );
-    assert_eq!(domain.native_producer_ordinal, 1);
+    assert_eq!(domain.native_producer_ordinal, burned);
     assert_eq!(
         domain
             .pass_states
@@ -1868,6 +1962,27 @@ fn a_refused_reserve_burns_nothing_and_a_burn_stays_burned() -> TestResult {
             .map(|state| state.highest_pass_ordinal),
         Some(0)
     );
+    Ok(())
+}
+
+/// R10.7 5h: a minted materialization carries the ordinal the burn made
+/// last; a later burn, or an ordinal never burned, is refused (3). A reused
+/// observation names no new materialization and needs no check.
+#[test]
+fn a_minted_observation_carries_the_ordinal_just_burned() -> TestResult {
+    let mut domain = domain()?;
+    assert!(domain.stage_reserve(input()?).is_ok());
+    let burned = domain.burn_materialization_ordinal(&SEAL)?;
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
+        domain.stage_reserve(minting(burned + 1)?).err(),
+        Some(Error::InvalidBinding)
+    );
+    assert!(domain.stage_reserve(minting(burned)?).is_ok());
+    assert!(domain.stage_reserve(reuse()?).is_ok());
     Ok(())
 }
 
@@ -1883,10 +1998,10 @@ fn the_ordinals_have_no_next_value_at_the_top() -> TestResult {
     );
     assert_eq!(domain.native_producer_ordinal, u64::MAX);
     assert_eq!(
-        domain.stage_reserve(input()?).err(),
+        domain.stage_reserve(reuse()?).err(),
         Some(Error::CapacityExhausted)
     );
-    domain.native_producer_ordinal = 0;
+    domain.native_producer_ordinal = BURNED;
     domain
         .pass_states
         .get_mut(&id(1))
@@ -1911,7 +2026,7 @@ fn a_token_is_stale_when_an_ordinal_moved_before_its_apply() -> TestResult {
         Some(Error::Conflict)
     );
     assert_eq!(burned.pass_status(id(1), OPERATION), None);
-    assert_eq!(burned.native_producer_ordinal, 1);
+    assert_eq!(burned.native_producer_ordinal, BURNED + 1);
 
     let mut passed = domain()?;
     let staged = passed.stage_reserve(input()?)?;
@@ -1925,7 +2040,46 @@ fn a_token_is_stale_when_an_ordinal_moved_before_its_apply() -> TestResult {
         Some(Error::Conflict)
     );
     assert_eq!(passed.pass_status(id(1), OPERATION), None);
-    assert_eq!(passed.native_producer_ordinal, 0);
+    assert_eq!(passed.native_producer_ordinal, BURNED);
+    Ok(())
+}
+
+/// The CRI1 is validated with the other bindings and every refusal is 3: a
+/// zero digest, a requested horizon of 0 or past `i64::MAX`, and an `H_r`
+/// the CPR1 cannot hold (R10.4(2): a `run_pass` refusal never gives 2).
+#[test]
+fn an_invalid_request_or_reservation_is_refused_with_3() -> TestResult {
+    let mut domain = domain()?;
+    let mut zero = input()?;
+    zero.request.roster_digest = Hash::zero();
+    assert_eq!(
+        domain.stage_reserve(zero).err(),
+        Some(Error::InvalidBinding)
+    );
+    for horizon in [0, i64::MAX as u64 + 1] {
+        let mut call = input()?;
+        call.request.requested_evidence_horizon = horizon;
+        assert_eq!(
+            domain.stage_reserve(call).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    // Horizons at the top: `H_r` is the sample plus the window, past the
+    // trusted range, which the CPR1 refuses.
+    let top = u64::MAX;
+    {
+        let policy = domain.pass_horizons.as_mut().ok_or("horizons")?;
+        policy.retention.generation_not_after_micros = top;
+        policy.retention.metadata_not_after_micros = top;
+        policy.retention.recording_not_after_micros = top;
+        policy.owners.evidence_micros = top;
+    }
+    let mut call = input()?;
+    call.reservation_sample_micros = i64::MAX as u64;
+    assert_eq!(
+        domain.stage_reserve(call).err(),
+        Some(Error::InvalidBinding)
+    );
     Ok(())
 }
 
@@ -1952,7 +2106,7 @@ fn the_selection_successor_carries_the_new_floors() -> TestResult {
     })?
     .to_canonical_cbor();
 
-    let next = community_reserve_selection_v1(&current, id(1), 7, 5)?;
+    let next = community_reserve_selection_v1(&current, id(1), GENERATION, 7, 5)?;
     let decoded = CommunitySelectionV1::from_canonical_cbor(&next)?;
     let fields = decoded.as_input();
     assert_eq!(fields.store_incarnation, [0x5a; 16]);
@@ -1971,18 +2125,40 @@ fn the_selection_successor_carries_the_new_floors() -> TestResult {
     // Ordinals that are not above the CSI1's, or not the next floor.
     for (native, pass) in [(6, 5), (7, 4), (7, 6)] {
         assert_eq!(
-            community_reserve_selection_v1(&current, id(1), native, pass).err(),
+            community_reserve_selection_v1(&current, id(1), GENERATION, native, pass).err(),
             Some(Error::InvalidBinding)
         );
     }
     // A Timeline with no floor row, and a record that is no CSI1.
     assert_eq!(
-        community_reserve_selection_v1(&current, id(3), 7, 1).err(),
+        community_reserve_selection_v1(&current, id(3), GENERATION, 7, 1).err(),
         Some(Error::EvidenceUnavailable)
     );
     assert_eq!(
-        community_reserve_selection_v1(&[0x80], id(1), 7, 5).err(),
+        community_reserve_selection_v1(&[0x80], id(1), GENERATION, 7, 5).err(),
         Some(Error::EvidenceUnavailable)
+    );
+    // A floor closed to new allocation, and another generation's Reserve.
+    let closed_floors = [CommunityTimelineFloorV1 {
+        closed: true,
+        ..floor(id(1), 4)
+    }];
+    let closed = CommunitySelectionV1::new(CommunitySelectionInputV1 {
+        store_incarnation: [0x5a; 16],
+        installed_catalogue_digest: hash(1),
+        native_profile_digest: hash(2),
+        highest_native_producer_ordinal: 6,
+        timeline_floors: CommunityTimelineFloorsV1::from_floors(&closed_floors),
+        metadata_not_after_micros: 20_000,
+    })?
+    .to_canonical_cbor();
+    assert_eq!(
+        community_reserve_selection_v1(&closed, id(1), GENERATION, 7, 5).err(),
+        Some(Error::ContextClosed)
+    );
+    assert_eq!(
+        community_reserve_selection_v1(&current, id(1), [0x21; 16], 7, 5).err(),
+        Some(Error::StaleGeneration)
     );
     Ok(())
 }

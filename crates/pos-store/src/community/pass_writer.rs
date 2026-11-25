@@ -34,6 +34,12 @@
 //! refused at the apply only, not at stage). A Commit or Abort is refused
 //! when its entry is gone or too small, which also refuses their replay.
 //!
+//! A Reserve allocates its native producer ordinal and its pass ordinal
+//! (annex §4): `stage_reserve` computes the next of each without changing
+//! anything, and `apply_reserve` refuses (`Conflict`) a token whose ordinals
+//! another burn or pass has moved since, then advances both. A minted
+//! materialization must carry the ordinal the step-5h burn made last.
+//!
 //! A resolved reservation identity stays in the CRI1 index, so a replay of
 //! it is refused (`Conflict`) at stage and at apply. The planner's step 4a
 //! still returns the original outcome first. Neither apply re-runs the
@@ -127,9 +133,10 @@ pub struct CommunityReserveInputV1 {
     pub prior_shared_counts: CommunitySharedCountsV1,
     /// The CQK1 digest of every roster member, due or not (R10.6).
     pub roster_quarantine_keys: Vec<Hash>,
-    /// `t_r`, the call's trusted-clock reservation sample. The pipeline
-    /// takes it from the domain's clock reservation; the writer cannot
-    /// check it.
+    /// `t_r`, the call's trusted-clock reservation sample.
+    ///
+    /// The writer cannot check it. The pipeline that makes the domain's
+    /// clock reservation (A4c-3c-ii) must take the sample from it.
     pub reservation_sample_micros: u64,
     /// The worst-case ARD1 rows of the pass: State and recording rows, the
     /// materialization's included, and no trace (R13.1(4), R15.5).
@@ -230,8 +237,11 @@ impl MemoryCommunityDomainV1 {
     /// Returns `InvalidBinding` when the minted rows exceed the pass rows;
     /// when the request's T, G, identity or expected head differs from the
     /// call's; when the pass facts disagree (members, trace rows, `F_p`,
-    /// key IDs); when the request is not a valid CRI1 or names a profile
-    /// other than the installed one. Then `EvidenceUnavailable` with no
+    /// key IDs); when the request is not a valid CRI1 (3, also for a
+    /// requested horizon outside `1..=i64::MAX`) or names a profile other
+    /// than the installed one or the one T was initialized under; or when the
+    /// roster keys or member rows do not fit the installed roster. Then
+    /// `EvidenceUnavailable` with no
     /// installed horizons, `Conflict` for a reservation identity already
     /// recorded, resolved or not, and `PassUnresolved` (7) for another
     /// unresolved pass of T. These come first, as R10.7 steps 4a and 4c
@@ -256,8 +266,7 @@ impl MemoryCommunityDomainV1 {
         if bound > input.pass_rows {
             return Err(Error::InvalidBinding);
         }
-        check_binding(&input)?;
-        let cri1 = CommunityReservationRequestV1::new(input.request)?;
+        let cri1 = check_binding(&input)?;
         let key = (input.timeline, input.reservation_operation_id);
         let horizons = self.horizons_for(&input)?;
         // A recorded identity, resolved or not, is a replay (R8.1(7)).
@@ -311,6 +320,11 @@ impl MemoryCommunityDomainV1 {
 
     /// The next native producer ordinal (the burned counter's) and the next
     /// pass ordinal (T's floor's).
+    ///
+    /// Exhaustion gives 14 without closing the context, as `initialize`'s
+    /// allocator does; the parent says exhaustion closes the context, which
+    /// is unreachable in practice (a `u64` counter) and left to the
+    /// context-closure slice.
     fn next_ordinals(&self, state: &CommunityPassStateV1) -> Result<(u64, u64), Error> {
         let native = self
             .native_producer_ordinal
@@ -351,7 +365,17 @@ impl MemoryCommunityDomainV1 {
             policy.owners,
             input.reservation_sample_micros,
         );
-        if input.request.profile_digest != policy.profile_digest {
+        // One CQK1 per installed roster member and only installed roster rows
+        // (R10.6): a short list would skip the whole-roster refusal 9.
+        let roster = policy.roster_len;
+        if input.roster_quarantine_keys.len() != roster
+            || input
+                .pass
+                .members
+                .iter()
+                .any(|member| member.roster_index >= roster)
+            || input.request.profile_digest != policy.profile_digest
+        {
             return Err(Error::InvalidBinding);
         }
         Ok(WriterHorizonsV1 {
@@ -370,12 +394,23 @@ impl MemoryCommunityDomainV1 {
         state: &CommunityPassStateV1,
         writer: WriterHorizonsV1,
     ) -> Result<(), Error> {
+        // T was initialized under the profile the request names.
+        if state.profile_digest != input.request.profile_digest {
+            return Err(Error::InvalidBinding);
+        }
         // The Logical Head and chain compare comes first, with the
         // authority re-check (R10.7 step 5j: 12), for the cut a minted
         // observation observed and for the cut a reused one observed. A call
         // names exactly one.
         let (cut, retained) = match (&input.minted, input.reused) {
-            (Some(minted), None) => (&minted.cut, None),
+            (Some(minted), None) => {
+                // R10.7 5h burned the ordinal the materialization's nodes
+                // carry just before this Reserve.
+                if minted.reference.producer_ordinal != self.native_producer_ordinal {
+                    return Err(Error::InvalidBinding);
+                }
+                (&minted.cut, None)
+            }
             (None, Some(reference)) => {
                 let retained = state
                     .retained
@@ -496,10 +531,11 @@ impl MemoryCommunityDomainV1 {
     /// retains for reuse and one more control operation.
     ///
     /// # Errors
-    /// Returns `Conflict` when the reservation identity is pending already,
-    /// `PassUnresolved` (7) when another reservation of T is pending, and
-    /// `EvidenceUnavailable` when the Timeline has no pass state; the
-    /// domain is unchanged.
+    /// Returns `Conflict` when the reservation identity is pending already
+    /// or recorded, or when the ordinals staged are no longer the next ones
+    /// (another burn or pass moved them), `PassUnresolved` (7) when another
+    /// reservation of T is pending, and `EvidenceUnavailable` when the
+    /// Timeline has no pass state; the domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
@@ -680,11 +716,15 @@ impl MemoryCommunityDomainV1 {
     }
 }
 
-/// The request is the call's own, and the pass facts agree with each other
-/// (R8.1(7), R15.3(2), R15.5): one member digest row per due member,
-/// ascending by roster index, `n_due + 1` trace rows, `F_p` of two targets
-/// each, and two distinct key IDs.
-fn check_binding(input: &CommunityReserveInputV1) -> Result<(), Error> {
+/// The request is a valid CRI1 of the call's own, and the pass facts agree
+/// (R8.1(7), R15.3(2), R15.5).
+///
+/// One member digest row per due member, ascending by roster index,
+/// `n_due + 1` trace rows, `F_p` of two targets each, and two distinct key
+/// IDs. An invalid CRI1 (a zero digest or identity, a requested horizon
+/// outside `1..=i64::MAX`) is 3: a `run_pass` refusal never gives 2
+/// (R10.4(2)).
+fn check_binding(input: &CommunityReserveInputV1) -> Result<CommunityReservationRequestV1, Error> {
     let request = input.request;
     let facts = &input.pass;
     let due = facts.members.len() as u64;
@@ -711,12 +751,15 @@ fn check_binding(input: &CommunityReserveInputV1) -> Result<(), Error> {
     {
         Err(Error::InvalidBinding)
     } else {
-        Ok(())
+        CommunityReservationRequestV1::new(request).map_err(|_| Error::InvalidBinding)
     }
 }
 
 /// The CPR1 of a Reserve: the pass key and native producer ordinal it
 /// allocated, the CRI1 digest and the request's own bindings.
+///
+/// A CPR1 that does not validate (an `H_r` outside `1..=i64::MAX`) is 3, not
+/// 2 (R10.4(2)).
 fn mint_reservation(
     input: &CommunityReserveInputV1,
     cri1: &CommunityReservationRequestV1,
@@ -738,6 +781,7 @@ fn mint_reservation(
             })
         })
         .map(|reservation| *reservation.as_input())
+        .map_err(|_| Error::InvalidBinding)
 }
 
 /// The CSI1 plaintext a Reserve's committed successor holds.
@@ -749,11 +793,14 @@ fn mint_reservation(
 ///
 /// # Errors
 /// Returns `EvidenceUnavailable` for a CSI1 that is malformed or has no
-/// floor row for T, and `InvalidBinding` for an ordinal that is not above
-/// the CSI1's native ordinal or not the next of T's floor.
+/// floor row for T, `ContextClosed` (17) for a floor closed to new
+/// allocation, `StaleGeneration` (5) when T's active generation is not
+/// `generation`, and `InvalidBinding` for an ordinal that is not above the
+/// CSI1's native ordinal or not the next of T's floor.
 pub fn community_reserve_selection_v1(
     current: &[u8],
     timeline: TimelineId,
+    generation: [u8; 16],
     native_ordinal: u64,
     pass_ordinal: u64,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -768,6 +815,12 @@ pub fn community_reserve_selection_v1(
         .iter_mut()
         .find(|floor| floor.timeline == timeline)
         .ok_or(Error::EvidenceUnavailable)?;
+    if floor.closed {
+        return Err(Error::ContextClosed);
+    }
+    if floor.active_generation != Some(generation) {
+        return Err(Error::StaleGeneration);
+    }
     if native_ordinal <= fields.highest_native_producer_ordinal
         || floor.highest_pass_ordinal.checked_add(1) != Some(pass_ordinal)
     {
