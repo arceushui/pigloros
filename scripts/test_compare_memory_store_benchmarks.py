@@ -776,7 +776,6 @@ class WorkflowTriggerTests(unittest.TestCase):
             "crates/pos-core/src/erasure/authorization.rs",
             "crates/pos-crypto/src/lib.rs",
             "crates/pos-conformance/src/lib.rs",
-            "crates/pos-reference/src/lib.rs",
         )
         for event in ("push", "pull_request"):
             with self.subTest(event=event):
@@ -789,6 +788,25 @@ class WorkflowTriggerTests(unittest.TestCase):
                                 for pattern in paths
                             ),
                             f"{changed_path} does not trigger {event}",
+                        )
+
+    def test_test_only_and_dev_dependency_changes_do_not_trigger_benchmark(self) -> None:
+        irrelevant_changes = (
+            "crates/pos-reference/src/lib.rs",
+            "crates/pos-conformance/tests/bundle_contract_public.rs",
+            "crates/pos-conformance/vectors/sandbox-provider-v1/spm1.cbor",
+        )
+        for event in ("push", "pull_request"):
+            with self.subTest(event=event):
+                paths = self.paths_for_event(event)
+                for changed_path in irrelevant_changes:
+                    with self.subTest(path=changed_path):
+                        self.assertFalse(
+                            any(
+                                fnmatch.fnmatchcase(changed_path, pattern)
+                                for pattern in paths
+                            ),
+                            f"{changed_path} unexpectedly triggers {event}",
                         )
 
 
