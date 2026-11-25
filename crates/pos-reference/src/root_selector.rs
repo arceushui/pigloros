@@ -3837,7 +3837,7 @@ mod tests {
         use crate::provider_admission::ProviderImageSnapshot;
         use crate::selector::installation::tests::updates::{complete_live_update, UpdateFixture};
         use crate::selector::installation::tests::{
-            admitted_state_with_salt, ddi_fixture, ddi_salt, installed_object_path,
+            admitted_state_with_arguments, ddi_fixture, ddi_salt, installed_object_path,
             materialize_installation_state, materialize_root_selector_state, ImageSigning,
             IMAGE_PROOF,
         };
@@ -3860,12 +3860,13 @@ mod tests {
         {
             let _paths = FixedCompositionFixture::create()?;
             let (image, partitions) = ddi_fixture("x86-64")?;
-            let state = admitted_state_with_salt(
+            let state = admitted_state_with_arguments(
                 &image,
                 b"adapter",
                 &partitions,
                 &ImageSigning::synthetic(IMAGE_PROOF),
                 ddi_salt("x86-64")?,
+                &[],
             )?;
             let installed = materialize_installation_state(
                 root,

@@ -37,8 +37,8 @@ use pos_core::community_lifecycle::{
     CommunityPassDemandV1, CommunityPassDomainV1, CommunityPassGraphTermsV1,
     CommunityPassObservationV1, CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1,
     CommunityPassQuoteV1, CommunityPreparedInvocationInputV1, CommunityProtectionSizesV1,
-    CommunityQuarantineKeyV1, CommunityQuarantineReasonV1, CommunityScopeMemberV1,
-    CommunitySharedCountsV1, CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
+    CommunityQuarantineReasonV1, CommunityScopeMemberV1, CommunitySharedCountsV1,
+    CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
     COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_ROW_LIMIT_V1,
     COMMUNITY_ERASURE_TARGET_LINE_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
     MAX_COMMUNITY_COVERAGE_ROWS_V1, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
@@ -52,6 +52,7 @@ use super::erasure_budget::{
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::observation::{CommunityObservationQuoteV1, CommunityObservationSourcesV1};
+use super::pass_install::roster_quarantine_keys;
 
 /// The domain's quarantine index read (R10.6(2)).
 ///
@@ -294,24 +295,18 @@ fn quarantine<Q: CommunityQuarantineIndexV1>(
     installation: CommunityPassInstallationV1<'_>,
     timeline: TimelineId,
 ) -> Result<(), Error> {
-    installation
-        .profile
-        .as_input()
-        .roster
-        .iter()
-        .try_for_each(|member| {
-            CommunityQuarantineKeyV1::new(timeline, member.stable_entry(), member.implementation())
-                .and_then(|key| {
-                    if index
-                        .quarantine_reasons(key.digest())
-                        .is_some_and(|reasons| !reasons.is_empty())
-                    {
-                        Err(Error::Quarantined)
-                    } else {
-                        Ok(())
-                    }
-                })
+    roster_quarantine_keys(installation.profile, timeline).try_for_each(|key| {
+        key.and_then(|key| {
+            if index
+                .quarantine_reasons(key)
+                .is_some_and(|reasons| !reasons.is_empty())
+            {
+                Err(Error::Quarantined)
+            } else {
+                Ok(())
+            }
         })
+    })
 }
 
 /// Step 4f: the generation horizon and the selected root's horizon must
@@ -340,7 +335,7 @@ const fn deadline(request: CommunityPassRequestV1) -> u64 {
 }
 
 /// `t_r` plus the decision deadline, for a reservation sample `t_r`.
-const fn decision_bound(reservation_sample_micros: u64) -> u64 {
+pub(super) const fn decision_bound(reservation_sample_micros: u64) -> u64 {
     reservation_sample_micros.saturating_add(COMMUNITY_DECISION_DEADLINE_MICROS_V1)
 }
 
@@ -470,16 +465,16 @@ impl CommunityPassDueV1<'_> {
                                     .require_keys()
                                     .and_then(|()| demand.require_graph())
                                     .and_then(|()| erasure_budget(port, timeline, &demand))
-                                    .and_then(|trace_rows| {
+                                    .and_then(|trace_headroom_rows| {
                                         scope_bounds(port, timeline, steps, &share.scope)
                                             .and_then(|()| demand.require_objects())
-                                            .map(|()| (demand, trace_rows))
+                                            .map(|()| (demand, trace_headroom_rows))
                                     })
                             })
-                            .map(|(demand, trace_rows)| CommunityPassQuotedV1 {
+                            .map(|(demand, trace_headroom_rows)| CommunityPassQuotedV1 {
                                 quote,
                                 demand,
-                                trace_rows,
+                                trace_headroom_rows,
                             })
                     })
             })
@@ -523,7 +518,7 @@ impl CommunityPassDueV1<'_> {
 pub struct CommunityPassQuotedV1 {
     quote: CommunityPassQuoteV1,
     demand: CommunityPassDemandV1,
-    trace_rows: u64,
+    trace_headroom_rows: u64,
 }
 
 impl CommunityPassQuotedV1 {
@@ -541,13 +536,15 @@ impl CommunityPassQuotedV1 {
         &self.demand
     }
 
-    /// The trace rows (CAT1, GCA1 and Annotation CPN1s) the erasure budget
-    /// still admits after the State, recording and `F_p` demand, in every
-    /// actor's scope; the rest are omitted with reason 3 `AnnotationBudget`
-    /// (R13.1(3)). `u64::MAX` when T has no actor to bound it.
+    /// The rows the erasure budget still admits after the State, recording
+    /// and `F_p` demand, in every actor's scope (R13.1(3)).
+    ///
+    /// This is headroom only. A pass holds `n_due + 1` trace rows in its
+    /// entry and plans none (R15.5), so no writer input derives from it.
+    /// `u64::MAX` when T has no actor to bound it.
     #[must_use]
-    pub const fn trace_rows(&self) -> u64 {
-        self.trace_rows
+    pub const fn trace_headroom_rows(&self) -> u64 {
+        self.trace_headroom_rows
     }
 }
 

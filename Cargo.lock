@@ -6347,6 +6347,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-sandbox-evidence-adapter"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "pos-reference",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "pos-sandboxd"
 version = "0.1.0"
 dependencies = [
