@@ -472,13 +472,15 @@ impl Gateway {
         permit: &GatewayOperationPermitV1,
         input: &ScenarioRoomInputV1,
     ) -> Result<Option<(Arc<GatewayAuthorization>, PendingAuthorityDenial)>, RoomFailureV1> {
-        self.consent_denial(permit, input.privacy_export_ref).map_err(RoomFailureV1::Gateway)
+        self.consent_denial(permit, input.privacy_export_ref)
+            .map_err(RoomFailureV1::Gateway)
     }
 
-    /// The denial of the consent `consent_ref` names, as the decision of
-    /// `permit` pinned it, with the authorizer to record it: the check of
-    /// [`Self::room_consent_denial`], which a Decision Preview also makes on
-    /// its bound room's consent (ADR-140 D6).
+    /// The denial of the consent `consent_ref` names, with its authorizer.
+    ///
+    /// The consent is read as the decision of `permit` pinned it. This is
+    /// the check of [`Self::room_consent_denial`], which a Decision Preview
+    /// also makes on its bound room's consent (ADR-140 D6).
     ///
     /// # Errors
     /// A refusal that yields no recordable denial fails closed with

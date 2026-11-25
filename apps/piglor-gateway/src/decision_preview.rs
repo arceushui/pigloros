@@ -304,7 +304,10 @@ impl Gateway {
         };
         let admitted = match found {
             Some(claimed) => self.retry_preview(permit, commit, claimed).await,
-            None => self.admit_preview(permit, commit, (principal_id, actor), request).await,
+            None => {
+                self.admit_preview(permit, commit, (principal_id, actor), request)
+                    .await
+            }
         }?;
         Ok(DecisionPreviewReceiptV1 {
             preview_id: admitted.preview_id,
@@ -344,7 +347,9 @@ impl Gateway {
         commit: PreviewCommitV1,
         claimed: ClaimedPreviewV1,
     ) -> Result<AdmittedPreviewV1, DecisionPreviewErrorV1> {
-        let permit = self.preview_consent(permit, claimed.claim.consent_ref).await?;
+        let permit = self
+            .preview_consent(permit, claimed.claim.consent_ref)
+            .await?;
         let admitted = if claimed.is_finished() {
             Ok(claimed.admitted())
         } else {

@@ -480,10 +480,11 @@ pub(crate) fn preview_weights(content: &[u8]) -> Option<Vec<PreferenceWeightV1>>
         })
 }
 
-/// The options of stored `OptionSpec` content in authored order, as the
-/// Match Score reads them: their keys and tags (ADR-140 P2 leaves out the
-/// label, the lean hint and the coordinates); `None` for content that does
-/// not decode.
+/// The options of stored `OptionSpec` content, as the Match Score reads them.
+///
+/// They keep their authored order and carry only their keys and tags:
+/// ADR-140 P2 leaves out the label, the lean hint and the coordinates.
+/// `None` for content that does not decode.
 pub(crate) fn preview_options(content: &[u8]) -> Option<Vec<PreviewOptionV1>> {
     ciborium::from_reader::<ContentV1<OptionV1>, _>(content)
         .ok()

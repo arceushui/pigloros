@@ -165,7 +165,7 @@ fn cbor(value: &impl Serialize) -> Result<Vec<u8>, String> {
 /// Commit revision 1 of a `kind` resource `id` of `subject` with raw
 /// `content` through the revision port, as a #304 commit stores it: the
 /// content is not validated, so it may be out of bounds or undecodable.
-fn raw_revision(
+pub(crate) fn raw_revision(
     host: &mut ErasureExecutionHostV1,
     kind: GatewayRevisionKindV1,
     id: Ulid,
@@ -1169,6 +1169,11 @@ fn a_host_refusal_is_a_store_failure() -> TestResult {
     Ok(())
 }
 
+/// ADR-140 P30: an `AuthorizationDenied` topology refusal is the
+/// non-retryable unavailability, any other host refusal a store failure.
+/// (A host recovered through `open_with_authority`, even with the closed
+/// composition, always holds an authority and a coordinator, so the
+/// refusal cannot be provoked through a recovered store.)
 #[test]
 fn host_and_room_errors_map_to_their_preview_errors() {
     assert_eq!(
@@ -1201,54 +1206,6 @@ fn host_and_room_errors_map_to_their_preview_errors() {
         format!("{:?}", room_error(RoomStoreErrorV1::StaleParent)),
         "Internal"
     );
-}
-
-/// ADR-140 P30: with an active erasure request and no Local erasure
-/// composition, opening the `decision-previews` Timeline is the
-/// non-retryable unavailability; the composed authority opens it.
-#[cfg(target_os = "linux")]
-#[test]
-fn opening_under_an_active_request_needs_the_composed_authority(
-) -> crate::local_erasure_signing_fixture::TestResult {
-    use crate::{
-        authorization::GatewayOperationV1,
-        local_erasure_composition::{
-            tests::{actor, erasure_world_granting, principal},
-            LocalErasureServeV1,
-        },
-        local_erasure_signing_fixture::SIGNER_SEED,
-    };
-    use pos_core::{ErasureReferenceV1, ErasureScopeV1};
-    use pos_runtime::{ErasureCoordinatorCompositionV1, LocalErasureSubmissionV1};
-
-    let world = erasure_world_granting(&[
-        GatewayOperationV1::CREATE_TIMELINE,
-        GatewayOperationV1::REQUEST_ERASURE,
-    ])?;
-    let credentials = world.credentials("credentials", &SIGNER_SEED, &[])?;
-    let erasure = LocalErasureServeV1::for_serve(Some(world.inputs(&credentials)))?;
-    let mut composed = world.host(erasure.composition())?;
-    composed
-        .command_sender()?
-        .submit_local_erasure(&LocalErasureSubmissionV1 {
-            principal: principal()?,
-            actor: actor()?,
-            scope: ErasureScopeV1::PrivateSubjectData,
-            idempotency_key_digest: ErasureReferenceV1::from_digest([0x11; 32]),
-            mode_profile: ErasureReferenceV1::from_digest([0x12; 32]),
-            binding_epoch: 1,
-        })
-        .map_err(|error| format!("{error:?}"))?;
-    drop(composed);
-    let mut closed = world.host(&ErasureCoordinatorCompositionV1::closed())?;
-    assert_eq!(
-        refusal(open_previews_timeline(&mut closed)),
-        "TopologyUnavailable"
-    );
-    drop(closed);
-    let mut composed = world.host(erasure.composition())?;
-    ok(open_previews_timeline(&mut composed))?;
-    Ok(())
 }
 
 /// The test-only stores have no erasure host, and an expired command
@@ -1288,5 +1245,64 @@ fn a_store_without_a_host_or_an_expired_command_answers() -> TestResult {
         receiver.blocking_recv()?,
         Err(StoreExecutorError::DeadlineExceeded)
     ));
+    Ok(())
+}
+
+/// The hand-written CBOR of the provenance record is the deterministic
+/// encoding: every head width and the null item agree with `ciborium`.
+#[test]
+fn the_provenance_record_is_deterministic_cbor() -> TestResult {
+    for value in [
+        0,
+        23,
+        24,
+        0xff,
+        0x100,
+        0xffff,
+        0x1_0000,
+        0xffff_ffff,
+        0x1_0000_0000,
+        u64::MAX,
+    ] {
+        let mut head = Vec::new();
+        cbor_head(&mut head, CBOR_UNSIGNED, value);
+        assert_eq!(head, cbor(&value)?, "{value}");
+    }
+    for length in [0, 23, 26, 64, 300] {
+        let text = "a".repeat(length);
+        assert_eq!(cbor_text(&text), cbor(&text)?, "{length}");
+    }
+    // A preview read before and after its result commits: the record is
+    // the CBOR array ADR-140 P24 names, with a null result digest first.
+    let mut host = host()?;
+    let consent = entity(CONSENT)?;
+    let request = seeded(&mut host, consent)?;
+    let preview_id = interrupted(&mut host, &request, "k-1", consent, None)?;
+    let admitted = ok(read(&mut host, preview_id)?)?;
+    ok(finish_retry(&mut host, &request, "k-1", 64)?)?;
+    let committed = ok(read(&mut host, preview_id)?)?;
+    let stored = events(&mut host)?;
+    let digest = |payload: &CanonicalBytes| payload_digest(payload.as_slice());
+    for (preview, result) in [
+        (&admitted, None),
+        (&committed, Some(digest(&stored[1].payload))),
+    ] {
+        let mut expected = PROVENANCE_DOMAIN.to_vec();
+        expected.extend(cbor(&(
+            ORIGIN,
+            Ulid::from_bytes(PRINCIPAL).to_string(),
+            ACTOR,
+            preview_id.to_string(),
+            digest(&stored[0].payload),
+            result,
+            preview.mode_profile.profile.as_str(),
+            hex(preview.mode_profile.digest),
+            preview.mode_profile.binding_epoch.get(),
+        ))?);
+        assert_eq!(
+            preview.provenance_digest,
+            *blake3::hash(&expected).as_bytes()
+        );
+    }
     Ok(())
 }

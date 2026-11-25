@@ -1731,13 +1731,24 @@ pub mod tests {
     }
 
     /// ADR-136 §4a and acceptance test 2 at the socket: a Fork naming the
-    /// recorded Erasure Host Timeline as its parent is answered code 4, the
-    /// answer of a parent the store does not hold, before any FAC1 runs. It
-    /// writes nothing, and its retry answers the same bytes.
+    /// recorded Erasure Host Timeline, or the recorded `decision-previews`
+    /// Timeline (ADR-140 P10), as its parent is answered code 4, the answer
+    /// of a parent the store does not hold, before any FAC1 runs. It writes
+    /// nothing, and its retry answers the same bytes.
     #[tokio::test]
     async fn listener_refuses_the_erasure_host_timeline_as_a_fork_parent() -> TestResult {
         let (world, _) = provisioned_world(&[])?;
         let erasure_host = crate::local_principal::provision_erasure_host_timeline(world.path()?)?;
+        let previews = crate::decision_preview::decision_previews_timeline();
+        crate::startup::open_recovered_erasure_host(
+            pos_store::StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            crate::startup::GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?
+        .command_sender()?
+        .open_root_timeline(previews, "decision-previews")?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         assert_eq!(
             gateway.host_timelines(),
@@ -1748,10 +1759,12 @@ pub mod tests {
             &BIND_OK
         );
         let before = graph_rows(&world)?;
-        let payload = fork_payload(41, erasure_host)?;
-        assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
-        assert_eq!(graph_rows(&world)?, before);
-        assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
+        for (fork, parent) in [(41, erasure_host), (42, previews)] {
+            let payload = fork_payload(fork, parent)?;
+            assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
+            assert_eq!(graph_rows(&world)?, before);
+            assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
+        }
         stop(&world, gateway, listener).await?;
         Ok(())
     }

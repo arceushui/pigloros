@@ -21,7 +21,9 @@ use super::{
     *,
 };
 use crate::{
-    executor::decision_preview::tests::{actor, entity, interrupted, seeded, ACTOR, PRINCIPAL},
+    executor::decision_preview::tests::{
+        actor, entity, interrupted, raw_revision, seeded, ACTOR, PRINCIPAL,
+    },
     local_principal::{
         local_gateway, provision_on_host, LocalConsentDraftV1, LocalConsentGrantDraftV1,
         LocalPrincipalProvisionV1,
@@ -413,6 +415,68 @@ async fn a_revoked_consent_refuses_retries_reads_and_fresh_requests() -> TestRes
     Ok(())
 }
 
+/// ADR-140 D6 and P29: stored content is decoded only after the consent
+/// check, so a corrupt input is the internal-failure arm while the consent
+/// holds, and a recorded `403 revoked` once it is revoked.
+#[tokio::test]
+async fn the_consent_check_comes_before_the_internal_failure_arm() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let served = served(&directory).await?;
+    let mut request = seed(&served).await?;
+    request.preference = on_host(&served.gateway, |host| {
+        let actor = actor()?;
+        raw_revision(
+            host,
+            pos_core::GatewayRevisionKindV1::Preference,
+            EntityId::new().inner(),
+            actor,
+            vec![0xff],
+        )
+    })
+    .await?;
+    let gateway = seam(&served.gateway);
+    assert_eq!(
+        refused(
+            gateway
+                .create_decision_preview(permit(&gateway).await?, "k-1", request.clone())
+                .await
+        ),
+        "Internal"
+    );
+    let (status, _) = send(
+        &served.app,
+        "POST",
+        "/v1/me/consent-revocations",
+        Some("revoke"),
+        Some(&json!({"consent_ref": served.consent.to_string()})),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let refusal = gateway
+        .create_decision_preview(permit(&gateway).await?, "k-1", request)
+        .await;
+    assert!(
+        matches!(
+            refusal,
+            Err(DecisionPreviewErrorV1::Gateway(
+                GatewayError::AuthorizationDenied(_)
+            ))
+        ),
+        "{refusal:?}"
+    );
+    // Neither refusal appended anything.
+    let recorded = on_host(&served.gateway, |host| {
+        host.command_sender()
+            .and_then(|mut commands| commands.records_timeline(decision_previews_timeline()))
+            .map_err(|error| format!("{error:?}"))
+    })
+    .await?;
+    assert!(!recorded);
+    served.gateway.shutdown().await?;
+    drop(served);
+    Ok(())
+}
+
 /// ADR-140 P35: a Principal has at most four requests in flight; a slot is
 /// released when its request is answered, refused or not.
 #[tokio::test]
@@ -510,7 +574,11 @@ async fn a_preview_fails_closed_without_a_decision_a_host_or_an_executor() -> Te
         .await
         .map_err(|error| format!("{error:?}"))?;
     assert_eq!(
-        refused(gateway.create_decision_preview(permit, "k-1", request).await),
+        refused(
+            gateway
+                .create_decision_preview(permit, "k-1", request)
+                .await
+        ),
         "Gateway(StoreExecutorClosed)"
     );
     drop(served);

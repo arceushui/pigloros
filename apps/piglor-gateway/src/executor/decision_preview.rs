@@ -73,6 +73,12 @@ const QUOTA_WINDOW: Duration = Duration::from_mins(1);
 const PROVENANCE_DOMAIN: &[u8] = b"PiglorOS.GatewayDecisionPreviewProvenance.v1\0";
 /// The `provenance.origin` of every preview.
 const ORIGIN: &str = "host-derived";
+/// The members of the provenance record.
+const PROVENANCE_FIELDS: u64 = 9;
+const CBOR_UNSIGNED: u8 = 0;
+const CBOR_TEXT: u8 = 3;
+const CBOR_ARRAY: u8 = 4;
+const CBOR_NULL: u8 = 0xf6;
 
 type PreviewResult<T> = Result<T, DecisionPreviewErrorV1>;
 
@@ -158,6 +164,13 @@ struct StoredResultV1 {
     event: DecisionPreviewResultEventV1,
     outcome: PreviewOutcomeV1,
     payload: Vec<u8>,
+}
+
+impl StoredResultV1 {
+    /// BLAKE3 of the exact `PRS1` bytes, in lower-case hex.
+    fn digest(&self) -> String {
+        payload_digest(&self.payload)
+    }
 }
 
 /// One stored claim and its result, if one committed.
@@ -264,8 +277,8 @@ pub(crate) fn lookup_claim(
 /// [`DecisionPreviewErrorV1::IncompatibleProfile`] for a profile without an
 /// installed EPF1 or outside the bound mode's servable set, then
 /// [`DecisionPreviewErrorV1::NotFound`] for any input that is unknown,
-/// foreign, not the acting persona's, digest-mismatched or erased, and the
-/// internal-failure arm.
+/// foreign, not the acting persona's, digest-mismatched or erased. Stored
+/// content is decoded only by the commit command, after the consent check.
 pub(crate) fn admit_inputs(
     host: &mut ErasureExecutionHostV1,
     actor: EntityId,
@@ -273,7 +286,7 @@ pub(crate) fn admit_inputs(
     installed: Option<(String, [u8; 32])>,
 ) -> PreviewResult<(EntityId, [u8; 32])> {
     let profile_digest = gate(host, &request.profile_id, installed)?;
-    bound_inputs(host, actor, request).map(|consent_ref| (consent_ref, profile_digest))
+    bound_records(host, actor, request).map(|(consent_ref, _, _)| (consent_ref, profile_digest))
 }
 
 /// The commit command of step 12, or with no fresh request the finish of
@@ -487,12 +500,17 @@ fn current_binding(
 }
 
 /// The room and binding checks of steps 8 and 9, shared by the admission
-/// and the commit's re-validation: the bound room's consent reference.
-fn bound_inputs(
+/// and the commit's re-validation.
+///
+/// It answers the bound room's consent reference and the two input
+/// revisions. It decodes no content, so a corrupt input reaches the
+/// internal-failure arm only in the commit command, after the step-10
+/// consent check.
+fn bound_records(
     host: &mut ErasureExecutionHostV1,
     actor: EntityId,
     request: &PreviewRequestV1,
-) -> PreviewResult<EntityId> {
+) -> PreviewResult<(EntityId, GatewayRevisionRecordV1, GatewayRevisionRecordV1)> {
     let consent_ref = bound_room(host, actor, &request.scenario_room)?;
     let preference = load_revision(host, GatewayRevisionKindV1::Preference, &request.preference)
         .and_then(|state| admitted_record(state, actor, &request.preference))?;
@@ -502,7 +520,7 @@ fn bound_inputs(
         &request.option_spec,
     )
     .and_then(|state| admitted_record(state, actor, &request.option_spec))?;
-    recommendation(&preference, &option_spec).map(|_| consent_ref)
+    Ok((consent_ref, preference, option_spec))
 }
 
 /// The bound room revision (step 8, D8): it must exist with `reference`'s
@@ -658,7 +676,10 @@ fn claim_fresh(
     limits: &PreviewLimitsV1,
     now: Instant,
 ) -> PreviewResult<AdmittedPreviewV1> {
-    let consent_ref = bound_inputs(host, fresh.actor, &fresh.request)?;
+    let (consent_ref, preference, option_spec) = bound_records(host, fresh.actor, &fresh.request)?;
+    // A corrupt input or a Match Score refusal is the internal-failure arm
+    // here, after the consent check and before anything is appended.
+    recommendation(&preference, &option_spec)?;
     let mut quota = limits.quota.lock().unwrap_or_else(PoisonError::into_inner);
     quota
         .check(fresh.principal_id, now)
@@ -874,28 +895,52 @@ fn claim_binding(
 /// | null, mode_profile_id, mode_profile_digest, binding_epoch]`: IDs as ULID
 /// text, digests as lower-case hex text and the epoch as an integer.
 fn provenance_digest(claimed: &ClaimedPreviewV1, mode: &DecisionPreviewModeV1) -> [u8; 32] {
-    let record = (
-        ORIGIN,
+    let leading = [
+        ORIGIN.to_owned(),
         Ulid::from_bytes(claimed.claim.principal_id).to_string(),
         claimed.claim.actor_entity_id.to_string(),
         claimed.preview_id.to_string(),
         payload_digest(&claimed.payload),
-        claimed
-            .result
-            .as_ref()
-            .map(|result| payload_digest(&result.payload)),
-        mode.profile.as_str(),
-        hex(mode.digest),
-        mode.binding_epoch.get(),
+    ];
+    let result_digest = claimed.result.as_ref().map(StoredResultV1::digest);
+    let result = result_digest.map_or_else(|| vec![CBOR_NULL], |digest| cbor_text(&digest));
+    let mut record = PROVENANCE_DOMAIN.to_vec();
+    cbor_head(&mut record, CBOR_ARRAY, PROVENANCE_FIELDS);
+    for text in &leading {
+        record.extend(cbor_text(text));
+    }
+    record.extend(result);
+    record.extend(cbor_text(mode.profile.as_str()));
+    record.extend(cbor_text(&hex(mode.digest)));
+    cbor_head(&mut record, CBOR_UNSIGNED, mode.binding_epoch.get());
+    *blake3::hash(&record).as_bytes()
+}
+
+/// Append one deterministic CBOR head: major type `major` with the
+/// argument `value` in its shortest form (RFC 8949 section 4.2.1).
+fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
+    let bytes = value.to_be_bytes();
+    let (info, argument): (u8, &[u8]) = match value {
+        0..=23 => (bytes[7], &[]),
+        24..=0xff => (24, &bytes[7..]),
+        0x100..=0xffff => (25, &bytes[6..]),
+        0x1_0000..=0xffff_ffff => (26, &bytes[4..]),
+        _ => (27, &bytes[..]),
+    };
+    out.push((major << 5) | info);
+    out.extend_from_slice(argument);
+}
+
+/// The deterministic CBOR text item of `text`.
+fn cbor_text(text: &str) -> Vec<u8> {
+    let mut item = Vec::with_capacity(text.len() + 9);
+    cbor_head(
+        &mut item,
+        CBOR_TEXT,
+        u64::try_from(text.len()).unwrap_or(u64::MAX),
     );
-    let mut cbor = Vec::new();
-    let encoded = ciborium::into_writer(&record, &mut cbor)
-        .map(|()| cbor)
-        .unwrap_or_default();
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(PROVENANCE_DOMAIN);
-    hasher.update(&encoded);
-    *hasher.finalize().as_bytes()
+    item.extend_from_slice(text.as_bytes());
+    item
 }
 
 /// BLAKE3 of `payload`, in lower-case hex.
