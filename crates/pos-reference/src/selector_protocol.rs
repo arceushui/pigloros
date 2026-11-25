@@ -999,19 +999,18 @@ fn grant_matches_execute_request(
         && grant.expected_launch_policy_digest == spx.authority.lps1_digest
 }
 
-/// A receipt binds no more NXT1 digests than planned exchanges, and none
-/// before the release (ADR-069 R16 N13).
+/// The receipt binds at most one NXT1 digest per planned exchange (ADR-069
+/// R16 N13): none without plans, as every V1 execute of #1488-a.
 ///
-/// No exchange can happen before `release1-digest` is bound: the residual
-/// clause of R16 §3.3 change C. The check is mode-independent, so it is
-/// stricter than R16 requires for the non-Local modes without a replay source.
-/// 1492-b (R16 §7) owns the checks for non-empty plans.
+/// The check is mode-independent, so it is stricter than R16 requires for every
+/// non-Local mode, `Replay` with empty plans included. The R16 residual clause
+/// ("NXT1 empty unless `release1-digest` is non-null") is specified in R16 §3.3
+/// change C, and 1492-b (R16 §7) owns the checks for non-empty plans.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
 ) -> bool {
     receipt.network_transcript_digests.len() <= spx.network_plans.len()
-        && (receipt.release1_digest.is_some() || receipt.network_transcript_digests.is_empty())
 }
 
 fn receipt_matches_grant(
@@ -3268,7 +3267,6 @@ mod tests {
         // digest, so an unsealed tamper isolates the guard in the chain.
         assert!(transcripts_fit_plans(&receipt, &spx));
         assert!(relations(&evidence, &grant, &receipt, &spx));
-        receipt.release1_digest = Some([8; 32]);
         receipt.network_transcript_digests = vec![[1; 32]];
         assert!(!transcripts_fit_plans(&receipt, &spx));
         assert!(!relations(&evidence, &grant, &receipt, &spx));
@@ -3286,14 +3284,8 @@ mod tests {
         grant.exchange_plan_digests = vec![[6; 32]];
         assert!(transcripts_fit_plans(&receipt, &spx));
         assert!(relations(&evidence, &grant, &receipt, &spx));
-        // No exchange happens before the release (R16 §3.3 change C).
-        receipt.release1_digest = None;
-        assert!(!transcripts_fit_plans(&receipt, &spx));
-        assert!(!relations(&evidence, &grant, &receipt, &spx));
         receipt.network_transcript_digests.clear();
         assert!(transcripts_fit_plans(&receipt, &spx));
-        // More transcripts than plans, after the release.
-        receipt.release1_digest = Some([8; 32]);
         receipt.network_transcript_digests = vec![[1; 32], [7; 32]];
         assert!(!transcripts_fit_plans(&receipt, &spx));
         Ok(())
