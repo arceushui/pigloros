@@ -367,6 +367,10 @@ pub use namespace_network::{
     NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
+pub use namespace_network::{
+    fb_tunnels_isolated, NetlinkUnitNetwork, UnitNetworkCheck, UnitNetworkError, FB_TUNNELS_SYSCTL,
+};
+#[cfg(target_os = "linux")]
 pub use restart::{
     reconcile_cleanup, reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup,
     ReconciledRestart, RestartReconciliationError, RootsReleased,

@@ -1,7 +1,10 @@
 //! Restart reconciliation before admission opens (ADR-069 R11 §5.1 steps 7
 //! and 9 to 11, §5.3).
 //!
-//! [`prepare_host`] runs step 7 before any socket exists: it connects the
+//! [`prepare_host`] runs step 7 before any socket exists. It first reads the
+//! fallback-tunnel sysctl `net.core.fb_tunnels_only_for_init_net` and
+//! refuses a host where it is below 1, because the unit network check
+//! (ADR-069 R14 N12) is sound only above that. Then it connects the
 //! single system bus, opens the exclusive [`SystemdAttemptRecovery`], which
 //! keeps the registry lock, opens or creates the input staging directory
 //! `/run/pigloros/sandbox/staging/` (UID 0, mode `0700`), and opens or
@@ -36,6 +39,7 @@
 
 use std::fs::File;
 use std::future::Future;
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -55,12 +59,12 @@ use super::endpoint::{open_parent, DIRECTORY_OPEN, RESOLVE, SANDBOX_STATE};
 use super::port::ExecutePort;
 use super::{ProviderRuntimeError, RuntimeAuthority};
 use crate::{
-    reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle, CleanupBudget, ControlFloor,
-    EgressProbe, EgressPropertyProbe, HostEgress, LocalEgressProbe, NamespacedLocalNetwork,
-    NetlinkNamespaceControl, NetworkNamespaces, NetworkRange, OrphanNetworkCleanup,
-    ProviderNamespaces, RestartReconciliationError, StagingDirectory, StagingLedger, StagingLimits,
-    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
-    SystemdTransientUnitTransport,
+    fb_tunnels_isolated, reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle,
+    CleanupBudget, ControlFloor, EgressProbe, EgressPropertyProbe, HostEgress, LocalEgressProbe,
+    NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkRange,
+    OrphanNetworkCleanup, ProviderNamespaces, RestartReconciliationError, StagingDirectory,
+    StagingLedger, StagingLimits, SystemdAttemptRecovery, SystemdAttemptRegistry,
+    SystemdAttemptRegistryError, SystemdTransientUnitTransport, FB_TUNNELS_SYSCTL,
 };
 
 /// The staging directory's name beneath `/run/pigloros/sandbox`.
@@ -132,20 +136,32 @@ pub(super) struct HostReconciliation<N, P> {
 pub(super) type NetlinkReconciliation =
     HostReconciliation<NetlinkNamespaceControl, LocalEgressProbe<NetlinkNamespaceControl>>;
 
-/// R11 §5.1 step 7 on this host: the system bus, the netlink orphan sweep
-/// and the SPI1 egress probe through the Local network port of the SPI1
-/// attempt range.
+/// R11 §5.1 step 7 on this host: the fallback-tunnel sysctl probe (ADR-069
+/// R14 N12), the system bus, the netlink orphan sweep and the SPI1 egress
+/// probe through the Local network port of the SPI1 attempt range.
 ///
 /// # Errors
 /// [`ProviderRuntimeError::HostUnavailable`] for any step 7 failure.
 pub(super) fn prepare_host(
     authority: &RuntimeAuthority,
 ) -> Result<NetlinkReconciliation, ProviderRuntimeError> {
-    prepare_with(
+    prepare_at(
         authority,
+        Path::new(FB_TUNNELS_SYSCTL),
         SystemdTransientUnitTransport::connect_system(),
         netlink_network,
     )
+}
+
+/// [`prepare_with`] with the fallback-tunnel sysctl probe reading the file
+/// at `sysctl`.
+fn prepare_at<N, P, E>(
+    authority: &RuntimeAuthority,
+    sysctl: &Path,
+    connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
+    network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
+) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
+    prepare_with(authority, || fb_tunnels_isolated(sysctl), connect, network)
 }
 
 /// The netlink orphan sweep, and the `probe` through the Local network port
@@ -169,10 +185,43 @@ fn netlink_network(
 
 /// Step 7 with the bus `connect` yields, and the orphan sweep and egress
 /// probe that `network` builds for the SPI1 attempt range and egress probe.
+/// `isolated` is the fallback-tunnel sysctl probe (ADR-069 R14 N12): the
+/// unit network check is sound only when it holds, so a host where it does
+/// not is refused first, before anything is opened.
+pub(super) fn prepare_with<N, P, E>(
+    authority: &RuntimeAuthority,
+    isolated: impl FnOnce() -> bool,
+    connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
+    network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
+) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
+    probed(isolated)
+        .ok_or(ProviderRuntimeError::HostUnavailable)
+        .and_then(|()| open_host(authority, connect, network))
+}
+
+/// `Some` when the fallback-tunnel sysctl probe `isolated` passes; otherwise
+/// `None`, after one line on standard error.
+fn probed(isolated: impl FnOnce() -> bool) -> Option<()> {
+    isolated()
+        .then_some(())
+        .or_else(|| report_unisolated(&mut std::io::stderr()))
+}
+
+/// Write the refusal line of a host whose fallback-tunnel sysctl is below 1
+/// to `out`, and refuse.
+fn report_unisolated(out: &mut impl Write) -> Option<()> {
+    writeln!(
+        out,
+        "pos-sandboxd: {FB_TUNNELS_SYSCTL} must be at least 1 (ADR-069 R14 N12)"
+    )
+    .ok();
+    None
+}
+
 /// The bus is connected, then the recovery owner opened, then the staging
 /// directory and the capture store opened or created; any failure refuses
 /// the whole step.
-pub(super) fn prepare_with<N, P, E>(
+fn open_host<N, P, E>(
     (admitted, installation, _): &RuntimeAuthority,
     connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
     network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),

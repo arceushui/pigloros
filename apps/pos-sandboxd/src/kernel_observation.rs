@@ -34,10 +34,14 @@ use rustix::process::pidfd_open;
 use rustix::process::Pid;
 use rustix::process::PidfdFlags;
 
+use crate::namespace_network::{UnitNetworkCheck, UnitNetworkError};
 use crate::{EffectiveLimitError, ObservedReadback, ObservedReadbackUnavailable, WorkCapacity};
 
-/// The six namespace types KOE1 records, in its order.
-const NAMESPACES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
+/// The five namespace types KOE1 records before the network namespace, in
+/// its order.
+const OTHER_NAMESPACES: [&str; 5] = ["mnt", "pid", "ipc", "uts", "user"];
+/// The network namespace, KOE1's sixth.
+const NET: &str = "net";
 /// Where the procfs directories are, and the unit's `/work` beneath one,
 /// reached through its `root` magic link.
 const PROC_PATHS: ProcPaths<'static> = ProcPaths {
@@ -148,14 +152,23 @@ impl NamespaceSet {
 
     /// Read every namespace through `procdir`, following each magic link.
     fn read(procdir: BorrowedFd<'_>) -> Result<Self, KernelObservationError> {
+        Self::read_retaining(procdir).map(|(namespaces, _)| namespaces)
+    }
+
+    /// [`Self::read`], and the descriptor of the network namespace whose
+    /// identity it read, kept so that the unit network check reads the very
+    /// namespace the observation names (ADR-069 R14 N12).
+    fn read_retaining(procdir: BorrowedFd<'_>) -> Result<(Self, OwnedFd), KernelObservationError> {
         let mut identities = [KernelIdentity {
             device: DeviceNumber { major: 0, minor: 0 },
             inode: 0,
         }; 6];
-        for (slot, name) in identities.iter_mut().zip(NAMESPACES) {
+        for (slot, name) in identities.iter_mut().zip(OTHER_NAMESPACES) {
             *slot = namespace(procdir, name)?;
         }
-        Ok(Self(identities))
+        let (net, descriptor) = namespace_file(procdir, NET)?;
+        identities[5] = net;
+        Ok((Self(identities), descriptor))
     }
 
     /// Whether no namespace of `self` is the same-type namespace of `other`.
@@ -667,6 +680,10 @@ pub enum KernelObservationError {
     /// A unit namespace is the provider's namespace of the same type.
     #[error("the unit shares a namespace with the provider")]
     SharedNamespace,
+    /// The unit's network namespace holds more than `lo`, or could not be
+    /// read (ADR-069 R14 N12).
+    #[error("the unit network namespace could not be shown to hold only lo")]
+    UnitNetwork(#[source] UnitNetworkError),
     /// A device number is out of the kernel's bounds, or a size overflowed.
     #[error("a device number or size is out of bounds")]
     Device,
@@ -723,15 +740,18 @@ impl ProcessAnchor {
     ) -> Result<ProcessFacts, KernelObservationError> {
         let procdir = self.procdir.as_fd();
         alive(self.pidfd.as_fd())
-            .and_then(|()| NamespaceSet::read(procdir))
-            .and_then(|namespaces| launcher(procdir).map(|launcher| (namespaces, launcher)))
-            .and_then(|(namespaces, launcher)| {
+            .and_then(|()| NamespaceSet::read_retaining(procdir))
+            .and_then(|(namespaces, net)| {
+                launcher(procdir).map(|launcher| (namespaces, net, launcher))
+            })
+            .and_then(|(namespaces, net, launcher)| {
                 context
                     .work
                     .then(|| observe_work(procdir, work_path))
                     .transpose()
                     .map(|work| ProcessFacts {
                         namespaces,
+                        net,
                         launcher,
                         work,
                     })
@@ -744,6 +764,8 @@ impl ProcessAnchor {
 /// What the anchored procdir showed of the live main process.
 struct ProcessFacts {
     namespaces: NamespaceSet,
+    /// The descriptor of the network namespace `namespaces` names.
+    net: OwnedFd,
     launcher: FdIdentity,
     work: Option<(WorkMount, File)>,
 }
@@ -780,10 +802,20 @@ fn namespace(
     procdir: BorrowedFd<'_>,
     name: &str,
 ) -> Result<KernelIdentity, KernelObservationError> {
+    namespace_file(procdir, name).map(|(identity, _)| identity)
+}
+
+/// One namespace's identity and the descriptor it was read from.
+fn namespace_file(
+    procdir: BorrowedFd<'_>,
+    name: &str,
+) -> Result<(KernelIdentity, OwnedFd), KernelObservationError> {
     openat(procdir, format!("ns/{name}"), READ, Mode::empty())
-        .and_then(fstat)
+        .and_then(|descriptor| fstat(&descriptor).map(|status| (status, descriptor)))
         .map_err(KernelObservationError::Namespace)
-        .and_then(|status| KernelIdentity::of(status.st_dev, status.st_ino))
+        .and_then(|(status, descriptor)| {
+            KernelIdentity::of(status.st_dev, status.st_ino).map(|identity| (identity, descriptor))
+        })
 }
 
 /// The mount ID and inode of the target of `exe`, as `statx` follows it.
@@ -949,6 +981,9 @@ fn member(cgroup: BorrowedFd<'_>, main_pid: u32) -> Result<(), KernelObservation
 
 /// Derive the kernel observation of the unit by the R9 §4.4 procedure.
 ///
+/// `network` checks that the unit's network namespace holds only `lo` (R14
+/// N12), on the descriptor read with the namespace identities.
+///
 /// `unit` reads the manager's `MainPID` and `InvocationID`; it is called
 /// before the process is anchored and again after. Every per-process fact is
 /// read through the anchored procfs directory while the pidfd shows the
@@ -960,8 +995,27 @@ fn observe_unit(
     unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
     context: &ObservationContext<'_>,
     provider: &ProviderNamespaces,
+    network: &dyn UnitNetworkCheck,
 ) -> Result<ObservedUnit, KernelObservationError> {
-    observe_unit_in(PROC_PATHS, unit, context, provider)
+    observe_unit_in(PROC_PATHS, unit, context, provider, network)
+}
+
+/// The unit shares no namespace with the provider, and its network
+/// namespace holds only `lo` (ADR-069 R14 N12). The check runs only on a
+/// namespace the provider does not share.
+fn require_isolated(
+    facts: &ProcessFacts,
+    provider: &NamespaceSet,
+    network: &dyn UnitNetworkCheck,
+) -> Result<(), KernelObservationError> {
+    facts
+        .namespaces
+        .isolated_from(provider)
+        .then_some(())
+        .ok_or(KernelObservationError::SharedNamespace)?;
+    network
+        .check(facts.net.as_fd())
+        .map_err(KernelObservationError::UnitNetwork)
 }
 
 fn observe_unit_in(
@@ -969,6 +1023,7 @@ fn observe_unit_in(
     unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
     context: &ObservationContext<'_>,
     provider: &ProviderNamespaces,
+    network: &dyn UnitNetworkCheck,
 ) -> Result<ObservedUnit, KernelObservationError> {
     let identity = unit()?;
     let (main_pid, invocation_id) = identity;
@@ -979,11 +1034,7 @@ fn observe_unit_in(
         .ok_or(KernelObservationError::IdentityChanged)?;
     let facts = anchor.read(context, main_pid, paths.work)?;
     let provider_namespaces = *provider.namespaces();
-    facts
-        .namespaces
-        .isolated_from(&provider_namespaces)
-        .then_some(())
-        .ok_or(KernelObservationError::SharedNamespace)?;
+    require_isolated(&facts, provider.namespaces(), network)?;
     let (device, inode) = context.cgroup.identity;
     let cgroup = KernelIdentity::of(device, inode)?;
     let (work, handle) = facts
@@ -1094,25 +1145,28 @@ impl KernelObservation {
 
 /// The production [`ObservedReadback`]: the R9 §4.4 procedure over procfs,
 /// against the provider's namespaces retained at startup.
-pub struct KernelObservedReadback {
+pub struct KernelObservedReadback<N> {
     provider: ProviderNamespaces,
+    network: N,
 }
 
-impl KernelObservedReadback {
-    /// The readback for one runtime, whose namespaces are `provider`.
+impl<N> KernelObservedReadback<N> {
+    /// The readback for one runtime, whose namespaces are `provider` and
+    /// whose units' network namespaces `network` checks.
     #[must_use]
-    pub const fn new(provider: ProviderNamespaces) -> Self {
-        Self { provider }
+    pub const fn new(provider: ProviderNamespaces, network: N) -> Self {
+        Self { provider, network }
     }
 }
 
-impl ObservedReadback for KernelObservedReadback {
+impl<N: UnitNetworkCheck> ObservedReadback for KernelObservedReadback<N> {
     fn observe(
         &self,
         unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
         context: &ObservationContext<'_>,
     ) -> Result<ObservedUnit, ObservedReadbackUnavailable> {
-        observe_unit(unit, context, &self.provider).map_err(ObservedReadbackUnavailable::from)
+        observe_unit(unit, context, &self.provider, &self.network)
+            .map_err(ObservedReadbackUnavailable::from)
     }
 }
 

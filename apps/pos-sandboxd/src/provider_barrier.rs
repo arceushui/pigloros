@@ -66,7 +66,7 @@ use crate::{
     CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
     KernelObservationError, LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit,
     ReleaseBarrierError, ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
-    TransientServiceUnitName,
+    TransientServiceUnitName, UnitNetworkError,
 };
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -239,13 +239,27 @@ const fn identity_error(refusal: &RecheckRefusal) -> KernelObservationError {
 }
 
 /// Why the recheck's observation failed (ADR-069 R9 §4.6.1): its manager
-/// read failed (8), the deadline passed during that read (10), or the
-/// observation itself could not be made (6).
+/// read failed (8), the deadline passed during that read (10), the
+/// observation itself could not be made (6), or it found the unit's network
+/// namespace changed (7, through [`unavailable_or_changed`]).
 fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
     match unavailable.0 {
         KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
         KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
-        _ => RecheckRefusal::RecheckObservation(unavailable),
+        _ => unavailable_or_changed(unavailable),
+    }
+}
+
+/// An observation the recheck could not make (6), or one that found the
+/// unit's network namespace now holding more than `lo` (7, R14 N12).
+const fn unavailable_or_changed(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
+    if matches!(
+        unavailable.0,
+        KernelObservationError::UnitNetwork(UnitNetworkError::Changed)
+    ) {
+        RecheckRefusal::ObservationChanged
+    } else {
+        RecheckRefusal::RecheckObservation(unavailable)
     }
 }
 
