@@ -619,9 +619,8 @@ impl MemoryCommunityDomainV1 {
     }
 }
 
-/// The record names the call's own T, G and head, a reused observation is
-/// named exactly when none is minted, and the pass facts agree with each
-/// other (R8.1(7), R15.3(2), R15.5): one member digest row per due member,
+/// The record names the call's own T, G and head, and the pass facts agree
+/// with each other (R8.1(7), R15.3(2), R15.5): one member digest row per due member,
 /// ascending by roster index, `n_due + 1` trace rows, `F_p` of two targets
 /// each, and two distinct key IDs.
 fn check_binding(input: &CommunityReserveInputV1) -> Result<(), Error> {

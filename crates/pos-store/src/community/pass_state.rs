@@ -58,10 +58,11 @@ pub(super) struct CommunityPassStateV1 {
     /// `H(CDP1)` of the profile T was initialized under.
     ///
     /// Every Reserve on T must name it and the installed profile (R10.7 5j).
-    /// A Timeline initializes once (`initialize` refuses a second with
-    /// `Conflict`), so after a reinstallation of another CDP1 every Reserve on
-    /// an initialized T gives 3 and T stays stranded until the original CDP1
-    /// is installed again. A Timeline's context is bound to its profile.
+    /// A Timeline initializes once (a second code-0 `initialize` gives
+    /// `StaleGeneration` before staging, and the writer's own check gives
+    /// `Conflict`), so after a reinstallation of another CDP1 every Reserve
+    /// on an initialized T gives 3 and T stays stranded until the original
+    /// CDP1 is installed again. A Timeline's context is bound to its profile.
     pub(super) profile_digest: Hash,
     /// `H(CSH1)`, T's selected head: the head and frontier a Reserve must
     /// still find (R10.7 step 5j).

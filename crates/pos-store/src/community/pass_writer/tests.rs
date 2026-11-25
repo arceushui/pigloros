@@ -101,16 +101,24 @@ fn genesis() -> Result<Hash, Box<dyn std::error::Error>> {
     Ok(store()?.chain_hash_at(id(1), Seq::ZERO)?)
 }
 
-/// The cut of an observation of no Events: T and its Fork child at 0.
-fn cut() -> Result<CommunityObservationCutV1, Box<dyn std::error::Error>> {
-    let store = store()?;
-    Ok(CommunityObservationCutV1 {
+/// The cut of an observation of no Events: T and its Fork child at 0. A
+/// store that cannot be built gives no heads, which every test then refuses
+/// loudly.
+fn cut() -> CommunityObservationCutV1 {
+    let chain_heads = store()
+        .map(|store| {
+            [id(1), id(2)]
+                .map(|timeline| {
+                    let hash = store.chain_hash_at(timeline, Seq::ZERO);
+                    (timeline, 0, hash.unwrap_or(Hash::zero()))
+                })
+                .to_vec()
+        })
+        .unwrap_or_default();
+    CommunityObservationCutV1 {
         through_seq: 0,
-        chain_heads: vec![
-            (id(1), 0, store.chain_hash_at(id(1), Seq::ZERO)?),
-            (id(2), 0, store.chain_hash_at(id(2), Seq::ZERO)?),
-        ],
-    })
+        chain_heads,
+    }
 }
 
 /// The domain over [`store`], with T's state, the observation a Reserve
@@ -126,7 +134,7 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
         CommunityRetainedObservationV1 {
             generation: GENERATION,
             not_after_micros: GENERATION_HORIZON,
-            cut: cut()?,
+            cut: cut(),
         },
     );
     domain.pass_states.insert(id(1), state);
@@ -232,8 +240,8 @@ fn scope_row() -> CommunityScopeMemberV1 {
     }
 }
 
-fn minted() -> Result<CommunityMintedObservationV1, Box<dyn std::error::Error>> {
-    Ok(CommunityMintedObservationV1 {
+fn minted() -> CommunityMintedObservationV1 {
+    CommunityMintedObservationV1 {
         reference: reference(),
         graph: TERMS,
         additions: counts(10),
@@ -241,8 +249,8 @@ fn minted() -> Result<CommunityMintedObservationV1, Box<dyn std::error::Error>> 
         scope_reference: hash(40),
         scope: vec![scope_row()],
         not_after_micros: GENERATION_HORIZON,
-        cut: cut()?,
-    })
+        cut: cut(),
+    }
 }
 
 /// A Reserve of 24 pass rows with `F_p` of 4 targets, minting.
@@ -257,7 +265,7 @@ fn input() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
         reservation_sample_micros: SAMPLE,
         pass_rows: 24,
         failure_reserve: 4,
-        minted: Some(minted()?),
+        minted: Some(minted()),
         reused: None,
         pass: reserved_pass()?,
     })
