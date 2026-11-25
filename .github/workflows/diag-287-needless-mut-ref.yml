@@ -1,0 +1,50 @@
+# Diagnostic for the needless_pass_by_ref_mut fix (#287). Throwaway: lives only
+# on the diag/287-needless-mut-ref branch, never on the pull request branch.
+name: diag-287-needless-mut-ref
+
+on:
+  push:
+    branches:
+      - diag/287-needless-mut-ref
+
+permissions:
+  contents: read
+
+jobs:
+  # pos-store seen by a dependent crate: test-support is NOT enabled. This is
+  # what the local pre-commit hook lints for a branch that does not touch
+  # pos-store.
+  dependent-baseline-main:
+    name: baseline (origin/main) clippy -p piglor-ledger
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: aa2a745bd
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - name: clippy -p piglor-ledger on main
+        run: cargo clippy -p piglor-ledger --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+
+  dependent-fixed:
+    name: fixed clippy -p piglor-ledger
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - name: clippy -p piglor-ledger with the fix
+        run: cargo clippy -p piglor-ledger --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: clippy -p pos-store with the fix
+        run: cargo clippy -p pos-store --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: clippy -p pos-store without test-support
+        run: cargo clippy -p pos-store --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: recipient export tests with test-support
+        run: cargo test -p pos-store --features test-support --locked --lib recipient_ -- --include-ignored
+      - name: recipient export fault tests
+        run: cargo test -p pos-store --features test-support --locked --test recipient_export_publication_faults_public -- --include-ignored
