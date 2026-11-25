@@ -405,9 +405,22 @@ class ProducerShellTests(unittest.TestCase):
         script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-0 0'
         self.shell.out(script, COLLECTOR)
         arguments = log.read_text().splitlines()
-        shell = arguments[arguments.index("-c") - 1]
-        self.assertTrue(shell.startswith("/") and shell.endswith("bash"), arguments)
+        # The harness's own bash, not a literal /bin/bash (which a NixOS guest lacks).
+        self.assertEqual(arguments[arguments.index("-c") - 1], self.shell.out('printf %s "$BASH"', COLLECTOR))
         self.assertIn("--unit=piglor-network-fb-0", arguments)
+
+    def test_systemd_runs_stderr_is_recorded_and_a_failing_journal_read_is_not_fatal(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        self.shell.stub("systemd-run", 'echo "Failed to start transient service" >&2\nexit 1')
+        self.shell.stub("journalctl", "exit 1")
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        case = self.base / "network/fb-1"
+        self.assertEqual((case / "stderr").read_text(), "Failed to start transient service\n")
+        # A journal that cannot be read still leaves the case's status and an (empty) journal file.
+        self.assertEqual((case / "status").read_text(), "1\n")
+        self.assertEqual((case / "journal").read_text(), "")
 
     def test_a_failed_ip_command_fails_the_case_even_when_the_last_one_succeeds(self):
         sysctl = self.base / "fb_tunnels"

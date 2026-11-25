@@ -173,7 +173,8 @@ impl StagedInstallation {
             certificate: &signing.certificate,
             key_description: &signing.key_description,
             // The vector image holds no executable: this fixture is never
-            // activated, so it names a placeholder `/adapter` and no arguments.
+            // mounted (activation refuses before any mount), so it names a
+            // placeholder `/adapter` and no arguments.
             executable: b"adapter",
             arguments: &[],
         })

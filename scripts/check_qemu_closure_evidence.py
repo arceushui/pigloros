@@ -155,6 +155,7 @@ HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-o
 ELF_MACHINES = {"x86_64": 62, "aarch64": 183}
 PT_LOAD, PT_INTERP = 1, 3
 EROFS_BLOCK = 4096
+MIN_TAIL_BYTES = 64
 # Far above any stand-in: a real static Rust executable is megabytes.
 MIN_EXECUTABLE_BYTES = 100_000
 ADAPTER_ARGUMENT = "honest"
@@ -479,11 +480,15 @@ class Evidence:
             raise EvidenceError("guest/network/ does not hold exactly the ADR-069 R14 records")
         for name in NETWORK_CASES:
             found = {path.name for path in (network / name).iterdir()}
-            if found not in (NETWORK_RUN_FILES, NETWORK_RUN_FILES | NETWORK_PROBE_FILES):
+            # The run's own files must all exist; the probe's may be any subset, because a
+            # failed `ip` leaves the files it had already created. check_network_case then
+            # judges status and stderr before it requires the whole probe.
+            missing = sorted(NETWORK_RUN_FILES - found)
+            unexpected = sorted(found - NETWORK_RUN_FILES - NETWORK_PROBE_FILES)
+            if missing or unexpected:
                 raise EvidenceError(
-                    f"malformed network record {name}: missing "
-                    f"{sorted(NETWORK_RUN_FILES - found)}, unexpected {sorted(found - NETWORK_RUN_FILES - NETWORK_PROBE_FILES)}"
-                    f", probe files {sorted(found & NETWORK_PROBE_FILES)}")
+                    f"malformed network record {name}: missing {missing}, unexpected {unexpected}, "
+                    f"probe files {sorted(found & NETWORK_PROBE_FILES)}")
 
     def _verify_manifest(self) -> None:
         """A sealed artifact must match its manifest, file for file."""
@@ -1015,11 +1020,19 @@ def static_executable(data: bytes, architecture: str, name: str) -> None:
     size, count = struct.unpack_from("<HH", data, 54)
     if size < 56 or offset + size * count > len(data):
         raise EvidenceError(f"the {name} has a malformed program header table")
-    kinds = [struct.unpack_from("<I", data, offset + index * size)[0] for index in range(count)]
-    if PT_LOAD not in kinds:
+    segments = [struct.unpack_from("<IIQQQQQQ", data, offset + index * size) for index in range(count)]
+    loads = [segment for segment in segments if segment[0] == PT_LOAD]
+    if not loads:
         raise EvidenceError(f"the {name} has no loadable segment")
-    if PT_INTERP in kinds:
+    if any(segment[0] == PT_INTERP for segment in segments):
         raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
+    # A truncated file keeps its headers but loses what they map, and its
+    # entry point must lie in a segment that is mapped.
+    if any(segment[2] + segment[5] > len(data) or segment[5] > segment[6] for segment in loads):
+        raise EvidenceError(f"the {name} is truncated: a loadable segment reaches beyond the file")
+    entry, = struct.unpack_from("<Q", data, 24)
+    if not any(segment[3] <= entry < segment[3] + segment[6] for segment in loads):
+        raise EvidenceError(f"the {name}'s entry point is in no loadable segment")
 
 
 def check_adapter(evidence: Evidence, architecture: str, positive: bytes) -> dict:
@@ -1028,16 +1041,21 @@ def check_adapter(evidence: Evidence, architecture: str, positive: bytes) -> dic
     The root is uncompressed EROFS, whose whole blocks of a file are stored
     contiguously but whose trailing partial block is stored inline next to
     the inode (FLAT_INLINE). So the adapter is found as its whole 4096-byte
-    blocks exactly once, then its tail at least once. The staged SIM1 binds
-    the digest, and the positive case only mounts if activation read the
-    file back.
+    blocks exactly once, then its tail at least once. The tail has no
+    position to check it at (the inode that holds it need not follow the
+    blocks), so a tail of fewer than MIN_TAIL_BYTES is left to the staged
+    SIM1's digest, which the positive case only mounts if activation read
+    back, and a longer one must not be a single repeated byte, which any
+    zero-filled block would contain.
     """
     adapter = evidence.raw("host/images/adapter")
     static_executable(adapter, architecture, "adapter")
     whole = len(adapter) - len(adapter) % EROFS_BLOCK
     blocks, tail = adapter[:whole], adapter[whole:]
-    if positive.count(blocks) != 1 or tail not in positive:
+    if positive.count(blocks) != 1:
         raise EvidenceError("the positive image does not carry the adapter exactly once")
+    if len(tail) >= MIN_TAIL_BYTES and (len(set(tail)) < 2 or tail not in positive):
+        raise EvidenceError("the positive image does not carry the adapter's tail")
     return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter)}
 
 
@@ -1317,14 +1335,16 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
     if evidence.line(f"{base}/sysctl") != value:
         raise EvidenceError(f"{name} did not run with net.core.fb_tunnels_only_for_init_net={value}")
     status = evidence.line(f"{base}/status")
-    stderr = evidence.text(f"{base}/stderr")
+    stderr = evidence.text(f"{base}/stderr").strip()
+    present = sorted(probe for probe in NETWORK_PROBE_FILES if (evidence.root / base / probe).exists())
     if status != "0":
         raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
-                            f"stderr: {stderr.strip()[:400]!r}; journal in {base}/journal")
+                            f"stderr: {stderr[:400]!r}; probe files written: {present}; "
+                            f"journal in {base}/journal")
     if stderr:
-        raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr.strip()[:400]!r}")
-    if not (evidence.root / base / "netns").exists():
-        raise EvidenceError(f"the {name} PrivateNetwork= unit completed but wrote no probe files")
+        raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr[:400]!r}")
+    if present != sorted(NETWORK_PROBE_FILES):
+        raise EvidenceError(f"the {name} PrivateNetwork= unit completed but wrote only {present}")
     netns = evidence.line(f"{base}/netns")
     if not re.fullmatch(r"net:\[[0-9]+\]", netns) or netns == init[0]:
         raise EvidenceError(f"the {name} unit did not run in a network namespace of its own")
