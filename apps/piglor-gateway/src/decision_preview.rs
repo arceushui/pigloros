@@ -417,7 +417,8 @@ impl Gateway {
             return Ok(permit);
         };
         drop(permit);
-        Err(self.recorded_denial(&authorization, pending).await)
+        let recorded = self.recorded_denial(&authorization, pending).await;
+        Err(recorded)
     }
 
     /// Run one Decision Preview store operation on the store worker.
