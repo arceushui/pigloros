@@ -29,16 +29,25 @@
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
 //! re-validates only what is cheap to check: the pass state and the entry.
-//! A Reserve is refused when its identity is pending (`Conflict`) or when
-//! another reservation of the same T is pending (`PassUnresolved`, code 7,
-//! refused at the apply only, not at stage). A Commit or Abort is refused
-//! when its entry is gone or too small, which also refuses their replay.
+//! A Reserve is refused with `Conflict` when its identity is recorded in
+//! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
+//! and again at the apply. It is refused with `PassUnresolved` (code 7)
+//! at stage when T already has an unresolved pass. A second Reserve staged
+//! before the first was applied is invisible at stage, so only the apply
+//! refuses it (`PassUnresolved`, from T's pending entries). A Commit or
+//! Abort is refused when its entry is gone or too small, which also refuses
+//! their replay.
 //!
-//! A resolved reservation identity stays in the CRI1 index, so a replay of
-//! it is refused (`Conflict`) at stage and at apply. The planner's step 4a
-//! still returns the original outcome first. Neither apply re-runs the
-//! budget, caps, head or counters compares; a token staged before another
-//! operation changed them is for the pipeline to discard.
+//! A Reserve replay is refused here as well as by the pipeline's step 4a
+//! discovery: `pass_records` keeps every pass with its status after it
+//! resolves, so a recorded identity, pending or resolved, is a `Conflict`
+//! at stage, before the generation, head and counters are compared, and
+//! again at the apply. The discovery still answers a replay from its
+//! original outcome first; this refusal is the backstop.
+//!
+//! No apply re-runs the budget, caps, head or counters compares; a token
+//! staged before another operation changed them is for the pipeline to
+//! discard.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
@@ -190,37 +199,37 @@ pub struct CommunityStagedAbortV1 {
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
-    /// Another pending reservation of T (`PassUnresolved`, code 7) is
-    /// refused here only against a recorded pass, and at
-    /// [`Self::apply_reserve`] against a pending one.
+    /// An unresolved pass of T is refused here (`PassUnresolved`, code 7). A
+    /// second reservation staged but not yet applied is invisible at stage
+    /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
-    /// Returns `InvalidBinding` when the minted rows exceed the pass rows;
+    /// In order. `InvalidBinding` when the minted rows exceed the pass rows,
     /// when the record's CPK1 Timeline or generation, or its predecessor
-    /// head, differs from the call's T, G or `selected_head`; when the pass
-    /// facts disagree (members, trace rows, `F_p`, key IDs); when the CPR1
-    /// profile is not the installed one; when the roster keys or member rows
-    /// do not fit the installed roster; or when the record's `H_g` or `H_r`
-    /// differs from the writer's own. Then `EvidenceUnavailable` with no
-    /// installed horizons, `Conflict` for a reservation identity already
-    /// recorded, resolved or not, and `PassUnresolved` (7) for another
-    /// unresolved pass of T. These come first, as R10.7 steps 4a and 4c
-    /// precede 5j; the byte-equal bound-content compare of R8.1(7) is the
-    /// call layer's. Then `EvidenceUnavailable` for a Timeline with no pass
-    /// state; `InvalidBinding` when T was initialized under another profile
-    /// than the request names; `EvidenceUnavailable` for a reused reference
-    /// no Reserve minted, and for a Logical
-    /// Head or chain that no longer matches the minted or the reused cut
-    /// (12); `EvidenceExpired` (13) when `H_g` does not outlast the
-    /// decision bound; then in the step-5j order `StaleGeneration` (5),
-    /// `StaleFrontier` (6) for a moved head or counters, a reused
-    /// observation of another generation or one that outlives less than
-    /// `H_g`, a minted observation whose records end before `H_g`, or a
-    /// budget the pending reservations now fill,
-    /// `Quarantined` (9), `CapacityExhausted` (14) and
-    /// `RecordingUnavailable` (19), and the budget read's error. A call that
-    /// names both or neither of a minted and a reused observation gives
-    /// `InvalidBinding` once the state is found.
+    /// head, differs from the call's T, G or `selected_head`, or when the
+    /// pass facts disagree (members, trace rows, `F_p`, key IDs).
+    /// `EvidenceUnavailable` with no installed horizons. `InvalidBinding`
+    /// when the CPR1 profile is not the installed one, the roster keys or
+    /// member rows do not fit the installed roster, or the record's `H_g` or
+    /// `H_r` differs from the writer's own. `Conflict` for a reservation
+    /// identity already recorded, resolved or not, and `PassUnresolved` (7)
+    /// for another unresolved pass of T; these precede 5j, as R10.7 steps 4a
+    /// and 4c do, and the byte-equal bound-content compare of R8.1(7) is the
+    /// call layer's.
+    ///
+    /// Then `EvidenceUnavailable` for a Timeline with no pass state;
+    /// `InvalidBinding` when T was initialized under another profile than
+    /// the request names; and in the step-5j order `EvidenceUnavailable` for
+    /// a reused reference no Reserve minted and for a Logical Head or chain
+    /// that no longer matches the minted or the reused cut (12), with
+    /// `InvalidBinding` for a call that names both or neither of a minted
+    /// and a reused observation; `EvidenceExpired` (13) when `H_g` does not
+    /// outlast the decision bound; `StaleGeneration` (5); `StaleFrontier`
+    /// (6) for a moved head or counters, a reused observation of another
+    /// generation or one that outlives less than `H_g`, a minted observation
+    /// whose records end before `H_g`, or a budget the pending reservations
+    /// now fill (the budget read's error otherwise); `Quarantined` (9);
+    /// `CapacityExhausted` (14); `RecordingUnavailable` (19).
     pub fn stage_reserve(
         &self,
         input: CommunityReserveInputV1,
@@ -446,15 +455,27 @@ impl MemoryCommunityDomainV1 {
     /// retains for reuse and one more control operation.
     ///
     /// # Errors
-    /// Returns `Conflict` when the reservation identity is pending already,
-    /// `PassUnresolved` (7) when another reservation of T is pending, and
-    /// `EvidenceUnavailable` when the Timeline has no pass state; the
-    /// domain is unchanged.
+    /// Returns `Conflict` when the reservation identity is recorded already,
+    /// resolved or not, `PassUnresolved` (7) when another reservation of T
+    /// is pending, and `EvidenceUnavailable` when the Timeline has no pass
+    /// state; the domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedReserveV1,
     ) -> Result<(), Error> {
+        self.check_apply(&staged)?;
+        let (timeline, _) = staged.key;
+        self.pending_reservations.insert(staged.key, staged.entry);
+        self.pass_records.insert(staged.key, staged.record);
+        self.pass_states
+            .entry(timeline)
+            .and_modify(|state| record_reserve(state, staged.minted));
+        Ok(())
+    }
+
+    /// The refusals of an apply, none of which changes the domain.
+    fn check_apply(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
         let (timeline, _) = staged.key;
         if self.pending_reservations.contains_key(&staged.key)
             || self.pass_records.contains_key(&staged.key)
@@ -469,32 +490,11 @@ impl MemoryCommunityDomainV1 {
         {
             return Err(Error::PassUnresolved);
         }
-        if !self.pass_states.contains_key(&timeline) {
-            return Err(Error::EvidenceUnavailable);
+        if self.pass_states.contains_key(&timeline) {
+            Ok(())
+        } else {
+            Err(Error::EvidenceUnavailable)
         }
-        self.pending_reservations.insert(staged.key, staged.entry);
-        self.pass_records.insert(staged.key, staged.record);
-        self.pass_states.entry(timeline).and_modify(|state| {
-            let counts = state.generations.entry(state.generation).or_default();
-            counts.outcomes = counts.outcomes.saturating_add(1);
-            if let Some(minted) = staged.minted {
-                counts.materializations = counts.materializations.saturating_add(1);
-                state.counters = add_counts(state.counters, minted.additions);
-                state.observations.insert(minted.reference, minted.graph);
-                state.retained.insert(
-                    minted.reference,
-                    CommunityRetainedObservationV1 {
-                        generation: state.generation,
-                        not_after_micros: minted.not_after_micros,
-                        cut: minted.cut,
-                    },
-                );
-                state
-                    .scope_rows
-                    .insert(minted.scope_reference, minted.scope);
-            }
-        });
-        Ok(())
     }
 
     /// Check a Commit against its pending entry: it binds no more rows than
@@ -646,6 +646,30 @@ fn check_binding(input: &CommunityReserveInputV1) -> Result<(), Error> {
         Err(Error::InvalidBinding)
     } else {
         Ok(())
+    }
+}
+
+/// One more retained outcome and, for a minted materialization, its
+/// additions to the counters, its closure terms and scope rows, the
+/// observation it retains for reuse and one more control operation.
+fn record_reserve(state: &mut CommunityPassStateV1, minted: Option<CommunityMintedObservationV1>) {
+    let counts = state.generations.entry(state.generation).or_default();
+    counts.outcomes = counts.outcomes.saturating_add(1);
+    if let Some(minted) = minted {
+        counts.materializations = counts.materializations.saturating_add(1);
+        state.counters = add_counts(state.counters, minted.additions);
+        state.observations.insert(minted.reference, minted.graph);
+        state.retained.insert(
+            minted.reference,
+            CommunityRetainedObservationV1 {
+                generation: state.generation,
+                not_after_micros: minted.not_after_micros,
+                cut: minted.cut,
+            },
+        );
+        state
+            .scope_rows
+            .insert(minted.scope_reference, minted.scope);
     }
 }
 
