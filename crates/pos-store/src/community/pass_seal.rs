@@ -26,10 +26,16 @@
 //! taken in selection order and the first with an included item keeps the
 //! pass's one CAT1 and Annotation CPN1 (R15.6(6)); an item that does not fit
 //! is omitted with reason 3 and selection continues, and every item of a
-//! later invocation is omitted with reason 4. [`CommunitySealedPassV1`]
-//! returns, per invocation, the omission reasons and the indices of the
-//! retained items, which is what a CRR1 coverage row (the retained count and
-//! the omission set) and Commit need without re-running the admission.
+//! later invocation is omitted with reason 4.
+//!
+//! The admission is a separate step. [`MemoryCommunityDomainV1::plan_annotations`]
+//! returns the retained items and the omission reasons of every invocation,
+//! which is what a CRR1 coverage row (the retained count and the omission
+//! set) and Commit need. The pipeline plans first, builds CRR1 from the
+//! plan, and then calls [`MemoryCommunityDomainV1::stage_seal`] once with
+//! the CRR1 digest and the plan. Seal recomputes the plan and refuses a
+//! plan that differs, so the recording cannot be built over another
+//! admission.
 //!
 //! What the admission re-derives, and what it does not:
 //! - `P` and `C` on the actual counts, the 8,192 control operations and the
@@ -67,7 +73,8 @@
 //! pass does not apply to it.
 //!
 //! The Reserve pipeline (A4c-3) supplies the candidate and A5 supplies the
-//! annotation context and charges the same records at Commit. The domain is
+//! annotation context and charges the same records at Commit, reusing the
+//! staged encodings. The domain is
 //! single-writer: a pass is staged and applied under one guard, so a pass
 //! that is Sealed is resolved by its Commit or Abort and a Seal replayed
 //! after either gives `InvalidBinding`. Only the digest of the sealed result
@@ -117,8 +124,6 @@ pub struct CommunitySealCandidateV1<'a> {
     pub new_member_progress_digests: CommunityDigestListV1<'a>,
     /// The complete candidate CSH1.
     pub candidate_head_digest: Hash,
-    /// The mandatory CRR1 Replay root.
-    pub replay_recording_digest: Hash,
     /// CPD1: the selected CGR1 identity.
     pub graph_root_digest: Hash,
     /// CPD1: the factual binding of a nonempty pass.
@@ -258,12 +263,19 @@ impl SealRoom {
     }
 }
 
-/// The admitted annotations: the one retained set, every invocation's
-/// omission reasons and its retained items.
-struct Admission {
-    records: Option<CommunityAnnotationRecordsV1>,
-    omissions: Vec<CommunityAnnotationOmissionsV1>,
-    retained: Vec<Vec<usize>>,
+/// The admitted annotations of a pass: the one retained set, every
+/// invocation's omission reasons and its retained items.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CommunityAnnotationPlanV1 {
+    /// The staged CAT1 and Annotation CPN1, or `None` when no item fits.
+    pub records: Option<CommunityAnnotationRecordsV1>,
+    /// Each invocation's omission reasons, in the input's order: its earlier
+    /// reasons and the reasons 3 and 4 of the admission.
+    pub omissions: Vec<CommunityAnnotationOmissionsV1>,
+    /// Each invocation's retained items, as indices into its `items`: the
+    /// CRR1 `retained_annotation_count` is the length. Only one invocation
+    /// retains any.
+    pub retained: Vec<Vec<usize>>,
 }
 
 /// R14 RN.1(6) and R15.6(6): items in selection order, each kept only if
@@ -277,8 +289,8 @@ fn admit(
     room: &SealRoom,
     additions: CommunitySharedCountsV1,
     invocations: &[CommunitySealInvocationV1<'_>],
-) -> Result<Admission, Error> {
-    let mut admission = Admission {
+) -> Result<CommunityAnnotationPlanV1, Error> {
+    let mut admission = CommunityAnnotationPlanV1 {
         records: None,
         omissions: invocations
             .iter()
@@ -317,10 +329,12 @@ fn admit(
 }
 
 impl MemoryCommunityDomainV1 {
-    /// Re-check a Seal against its pass record and stage it.
+    /// Admit the annotations of a pass: the compares, the context checks
+    /// and the selection of items, without building any record of the Seal.
     ///
-    /// A Seal of a Sealed pass is a replay: it stages the same result again
-    /// and is refused only for a different one.
+    /// The result is a pure function of the pass record and the input, so
+    /// the pipeline builds CRR1 from it and [`Self::stage_seal`] recomputes
+    /// it.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a reservation with no pass record
@@ -328,22 +342,13 @@ impl MemoryCommunityDomainV1 {
     /// `InvalidBinding` when the candidate's additions and the
     /// materialization's exceed a CBQ1 maximum or `P` or `C` without any
     /// annotation (R10.3(7) names no code; the pass is resolved by an
-    /// Abort), for an invocation context that does not match the pass, and
-    /// for the staging
-    /// errors of an item that is not an annotation of its invocation
-    /// (`InvalidBinding`), the CPD1 and CPS1 construction errors and, for a
-    /// Sealed pass, `Conflict` for a result other than the latched one.
-    pub fn stage_seal(
+    /// Abort), for an invocation context that does not match the pass and
+    /// for a defect of the trusted input that an item staging finds.
+    pub fn plan_annotations(
         &self,
         input: &CommunitySealInputV1<'_>,
-    ) -> Result<CommunityStagedSealV1, Error> {
-        let key = (input.timeline, input.reservation_operation_id);
-        let record = self
-            .pass_record(key.0, key.1)
-            .ok_or(Error::EvidenceUnavailable)?;
-        if !record.status.unresolved() {
-            return Err(Error::InvalidBinding);
-        }
+    ) -> Result<CommunityAnnotationPlanV1, Error> {
+        let record = self.unresolved_record(input.timeline, input.reservation_operation_id)?;
         let room = self.seal_room(record, input.candidate.graph_counts);
         let additions = input.candidate.additions;
         if !(room.within_quote(additions)
@@ -353,7 +358,57 @@ impl MemoryCommunityDomainV1 {
         }
         self.check_contexts(record, &input.candidate, &input.invocations)
             .and_then(|()| admit(&room, additions, &input.invocations))
-            .and_then(|admission| seal_pass(record, &input.candidate, admission))
+    }
+
+    /// The pass reserved under `(T, reservation_operation_id)`, which must
+    /// be Reserved or Sealed.
+    fn unresolved_record(
+        &self,
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+    ) -> Result<&CommunityPassRecordV1, Error> {
+        let record = self
+            .pass_record(timeline, reservation_operation_id)
+            .ok_or(Error::EvidenceUnavailable)?;
+        if record.status.unresolved() {
+            Ok(record)
+        } else {
+            Err(Error::InvalidBinding)
+        }
+    }
+
+    /// Re-check a Seal against its pass record and stage it.
+    ///
+    /// `replay_recording_digest` is the CRR1 the pipeline built from
+    /// `planned`, the result of [`Self::plan_annotations`]. A Seal of a
+    /// Sealed pass is a replay: it stages the same result again and is
+    /// refused only for a different one. A replay is also a fresh read of
+    /// the store-wide live key count, so one that comes after the count
+    /// grew to its limit can be refused with `Conflict` (fail closed). The
+    /// clean fix is a flag on the pass record saying whether the trace key
+    /// was provisioned at Reserve (R11.1(6)).
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::plan_annotations`], `InvalidBinding`
+    /// for a `planned` that is not the plan Seal computes, the CPD1 and CPS1
+    /// construction errors and, for a Sealed pass, `Conflict` for a result
+    /// other than the latched one.
+    pub fn stage_seal(
+        &self,
+        input: &CommunitySealInputV1<'_>,
+        replay_recording_digest: Hash,
+        planned: &CommunityAnnotationPlanV1,
+    ) -> Result<CommunityStagedSealV1, Error> {
+        let key = (input.timeline, input.reservation_operation_id);
+        let record = self.unresolved_record(key.0, key.1)?;
+        self.plan_annotations(input)
+            .and_then(|plan| {
+                if plan == *planned {
+                    seal_pass(record, &input.candidate, replay_recording_digest, plan)
+                } else {
+                    Err(Error::InvalidBinding)
+                }
+            })
             .and_then(|sealed| {
                 if record.status == CommunityPassStatusV1::Sealed
                     && record.sealed_result_digest != Some(sealed.result_digest)
@@ -367,9 +422,10 @@ impl MemoryCommunityDomainV1 {
 
     /// What a Seal binds of each invocation's annotation context to the
     /// pass (journal 23071, item 8): the invocations are in roster order,
-    /// and each names this pass's CPK1, native producer, store incarnation,
-    /// member and CPI1 and a horizon within the outcome horizon (R13.2(4a):
-    /// the trace horizon is at most `H_r`).
+    /// and each names this pass's CPK1, native producer (its own and its
+    /// step's: the pass producer mints both), store incarnation, member and
+    /// the CPI1 at the member's position, and a horizon within the outcome
+    /// horizon (R13.2(4a): the trace horizon is at most `H_r`).
     fn check_contexts(
         &self,
         record: &CommunityPassRecordV1,
@@ -388,14 +444,16 @@ impl MemoryCommunityDomainV1 {
                     .position(|member| member.cmb1_digest == context.member_binding_digest);
                 let producer = reservation.native_producer_ordinal;
                 let same_pass = context.pass_key == reservation.pass_key;
-                let named_step = candidate
-                    .invocation_step_digests
-                    .iter()
-                    .any(|digest| digest == context.invocation_step_digest);
+                // Both lists are in due-roster order: the member's CPI1 is the
+                // one at its own position.
+                let named_step = position
+                    .and_then(|at| candidate.invocation_step_digests.iter().nth(at))
+                    == Some(context.invocation_step_digest);
                 let bound = same_pass
                     && context.producer_ordinal == producer
                     && context.evidence_not_after_micros <= reserved.outcome_horizon_micros
                     && context.step.store_incarnation == self.store_incarnation
+                    && context.step.producer_ordinal == producer
                     && named_step
                     && position > previous;
                 if bound {
@@ -465,10 +523,14 @@ impl MemoryCommunityDomainV1 {
 fn seal_pass(
     record: &CommunityPassRecordV1,
     candidate: &CommunitySealCandidateV1<'_>,
-    admission: Admission,
+    replay_recording_digest: Hash,
+    plan: CommunityAnnotationPlanV1,
 ) -> Result<CommunitySealedPassV1, Error> {
     let reservation = record.reserved.reservation;
-    let annotation = admission.records.map(|records| records.charge());
+    let annotation = plan
+        .records
+        .as_ref()
+        .map(CommunityAnnotationRecordsV1::charge);
     let charge = annotation.unwrap_or_default();
     let shared_counts = CommunitySharedCountsV1 {
         nodes: candidate.additions.nodes.saturating_add(charge.nodes),
@@ -479,8 +541,14 @@ fn seal_pass(
             .encoded_record_bytes
             .saturating_add(charge.bytes),
     };
-    let trace_root = admission.records.map(|records| records.node().node_digest);
-    let manifest_digest = admission.records.map(|records| records.manifest_digest());
+    let trace_root = plan
+        .records
+        .as_ref()
+        .map(|records| records.node().node_digest);
+    let manifest_digest = plan
+        .records
+        .as_ref()
+        .map(CommunityAnnotationRecordsV1::manifest_digest);
     CommunityDependencyBundleV1::new(CommunityDependencyBundleInputV1 {
         pass_key: reservation.pass_key,
         native_producer_ordinal: reservation.native_producer_ordinal,
@@ -489,7 +557,7 @@ fn seal_pass(
         required_node_digests: candidate.required_node_digests,
         optional_evidence_roots: CommunityEvidenceRootsV1 {
             presentation_trace: trace_root,
-            replay_recording: Some(candidate.replay_recording_digest),
+            replay_recording: Some(replay_recording_digest),
         },
         shared_counts,
         graph_counts: candidate.graph_counts,
@@ -510,7 +578,7 @@ fn seal_pass(
                     candidate_head_digest: candidate.candidate_head_digest,
                     dependency_bundle_digest,
                     annotation_manifest_digest: manifest_digest,
-                    replay_recording_digest: candidate.replay_recording_digest,
+                    replay_recording_digest,
                     evidence_not_after_micros: reservation.evidence_not_after_micros,
                 })
             })
@@ -521,8 +589,8 @@ fn seal_pass(
                 trace_root,
                 annotation: charge,
                 shared_counts,
-                omissions: admission.omissions,
-                retained: admission.retained,
+                omissions: plan.omissions,
+                retained: plan.retained,
             })
     })
 }
