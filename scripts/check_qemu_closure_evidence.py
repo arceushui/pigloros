@@ -1005,8 +1005,10 @@ def static_executable(data: bytes, architecture: str, name: str) -> None:
         raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
     # A truncated file keeps its headers but loses what they map, and its
     # entry point must lie in a segment that is mapped and executable.
-    if any(segment[2] + segment[5] > len(data) or segment[5] > segment[6] for segment in loads):
+    if any(segment[2] + segment[5] > len(data) for segment in loads):
         raise EvidenceError(f"the {name} is truncated: a loadable segment reaches beyond the file")
+    if any(segment[5] > segment[6] for segment in loads):
+        raise EvidenceError(f"the {name} has a loadable segment whose file size exceeds its memory size")
     entry, = struct.unpack_from("<Q", data, 24)
     if not any(segment[1] & PF_X and segment[3] <= entry < segment[3] + segment[6] for segment in loads):
         raise EvidenceError(f"the {name}'s entry point is in no executable loadable segment")

@@ -315,9 +315,25 @@ WRONG_EXECUTABLE = "is not an executable for"
 BAD_HEADERS = "malformed program header table"
 NO_LOAD = "no loadable segment"
 DYNAMIC = "dynamically linked"
-TRUNCATED = "is truncated"
+TRUNCATED = "is truncated: a loadable segment reaches beyond the file"
+SEGMENT_SIZES = "file size exceeds its memory size"
 BAD_ENTRY = "entry point is in no executable loadable segment"
 NOT_CARRIED = "does not carry the adapter exactly once"
+
+
+def elf_accepted() -> list[bytes]:
+    """Valid static x86-64 executables at the edges of the rules."""
+    total = len(X86_ADAPTER)
+
+    def patched(offset: int, data: bytes) -> bytes:
+        return X86_ADAPTER[:offset] + data + X86_ADAPTER[offset + len(data):]
+
+    # The entry at the first byte of its segment, and in the part of a segment that the file does not
+    # hold (a file size below the memory size, with the entry in that zero-filled tail).
+    bss = patched(104, struct.pack("<Q", total + 5000))
+    bss = bss[:96] + struct.pack("<Q", total - 1000) + bss[104:]
+    bss = bss[:24] + struct.pack("<Q", 0x400000 + total + 100) + bss[32:]
+    return [patched(24, struct.pack("<Q", 0x400000)), bss]
 
 
 def elf_defects() -> list[tuple[str, bytes]]:
@@ -346,10 +362,11 @@ def elf_defects() -> list[tuple[str, bytes]]:
         (NO_LOAD, patched(56, struct.pack("<H", 0))), (NO_LOAD, patched(64, struct.pack("<I", 4))),
         # A program header table beyond the file, or too small an entry.
         (BAD_HEADERS, patched(32, struct.pack("<Q", 10**9))), (BAD_HEADERS, patched(54, struct.pack("<H", 8))),
-        # Truncated above the size floor with the headers intact; a segment larger than the file;
-        # and one whose file size exceeds its memory size while still inside the file.
+        # Truncated above the size floor with the headers intact; and a segment larger than the file.
         (TRUNCATED, X86_ADAPTER[:150_000]), (TRUNCATED, patched(96, struct.pack("<Q", 300_000))),
-        (TRUNCATED, patched(104, struct.pack("<Q", 100))),
+        # A file size above the memory size while inside the file, with the entry point still inside
+        # the memory size (176 < 200), so that no other rule refuses it.
+        (SEGMENT_SIZES, patched(104, struct.pack("<Q", 200))),
         # One byte more than the file holds, with the memory size to match.
         (TRUNCATED, patched(104, struct.pack("<Q", len(X86_ADAPTER) + 1),
                             patched(96, struct.pack("<Q", len(X86_ADAPTER) + 1)))),
@@ -1264,23 +1281,27 @@ class EvidenceTests(unittest.TestCase):
         code = text[start:text.index("' \"${architecture}\" \"${ADAPTER}\"", start)]
         aarch64 = static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")
         names = {"x86-64": "x86_64", "arm64": "aarch64"}
-        cases = [("x86-64", X86_ADAPTER, True), ("arm64", aarch64, True)]
-        cases += [("x86-64", defect, False) for _, defect in elf_defects()]
+        # Each case is accepted (no message) or refused by the rule whose message both copies give.
+        cases = [("x86-64", X86_ADAPTER, None), ("arm64", aarch64, None)]
+        cases += [("x86-64", accepted, None) for accepted in elf_accepted()]
+        cases += [("x86-64", defect, message) for message, defect in elf_defects()]
         # Each architecture's adapter is wrong for the other.
-        cases += [("x86-64", aarch64, False), ("arm64", X86_ADAPTER, False)]
+        cases += [("x86-64", aarch64, WRONG_EXECUTABLE), ("arm64", X86_ADAPTER, WRONG_EXECUTABLE)]
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "adapter"
-            for name, adapter, accepted in cases:
+            for name, adapter, message in cases:
                 path.write_bytes(adapter)
                 script = subprocess.run([sys.executable, "-I", "-c", code, name, str(path)],
                                         capture_output=True, text=True, check=False)
-                try:
-                    checker.static_executable(adapter, names[name], "adapter")
-                    checked = True
-                except checker.EvidenceError:
-                    checked = False
-                with self.subTest(name=name, size=len(adapter), accepted=accepted):
-                    self.assertEqual((script.returncode == 0, checked), (accepted, accepted), script.stderr)
+                with self.subTest(name=name, size=len(adapter), message=message):
+                    if message is None:
+                        self.assertEqual(script.returncode, 0, script.stderr)
+                        checker.static_executable(adapter, names[name], "adapter")
+                    else:
+                        self.assertNotEqual(script.returncode, 0)
+                        self.assertRegex(script.stderr, message)
+                        with self.assertRaisesRegex(checker.EvidenceError, message):
+                            checker.static_executable(adapter, names[name], "adapter")
 
     def test_mount_image_case_fabrication_fails_closed(self):
         positive, tampered = "guest/cases/positive", "guest/cases/tampered"
