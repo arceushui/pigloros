@@ -315,29 +315,28 @@ async fn an_exact_retry_finishes_an_interrupted_preview() -> TestResult {
         interrupted(host, &claimed, "k-1", consent, None)
     })
     .await?;
-    let gateway = &served.gateway;
     let read = admitted(
-        gateway
-            .read_decision_preview(permit(gateway).await?, preview_id)
+        served.gateway
+            .read_decision_preview(permit(&served.gateway).await?, preview_id)
             .await,
     )?;
     assert_eq!(read.state, DecisionPreviewStateV1::Admitted);
     let receipt = admitted(
-        gateway
-            .create_decision_preview(permit(gateway).await?, "k-1", request)
+        served.gateway
+            .create_decision_preview(permit(&served.gateway).await?, "k-1", request)
             .await,
     )?;
     assert_eq!(receipt.preview_id, preview_id);
     let read = admitted(
-        gateway
-            .read_decision_preview(permit(gateway).await?, preview_id)
+        served.gateway
+            .read_decision_preview(permit(&served.gateway).await?, preview_id)
             .await,
     )?;
     assert!(matches!(
         read.state,
         DecisionPreviewStateV1::Committed { .. }
     ));
-    assert_eq!(previews_events(gateway).await?, 2);
+    assert_eq!(previews_events(&served.gateway).await?, 2);
     served.gateway.shutdown().await?;
     drop(served);
     Ok(())
@@ -499,8 +498,7 @@ async fn the_in_flight_slot_bounds_concurrent_requests() -> TestResult {
     let directory = tempfile::tempdir()?;
     let served = served(&directory).await?;
     let request = seed(&served).await?;
-    let gateway = &served.gateway;
-    let in_flight = &gateway.decision_previews.in_flight;
+    let in_flight = &served.gateway.decision_previews.in_flight;
     let mut slots = (0..MAX_IN_FLIGHT_PER_PRINCIPAL)
         .map(|_| InFlightSlotV1::take(in_flight, PRINCIPAL))
         .collect::<Option<Vec<_>>>()
@@ -510,8 +508,8 @@ async fn the_in_flight_slot_bounds_concurrent_requests() -> TestResult {
     assert!(InFlightSlotV1::take(in_flight, [8; 16]).is_some());
     assert_eq!(
         refused(
-            gateway
-                .create_decision_preview(permit(gateway).await?, "k-1", request.clone())
+            served.gateway
+                .create_decision_preview(permit(&served.gateway).await?, "k-1", request.clone())
                 .await
         ),
         "InFlightLimit"
@@ -519,8 +517,8 @@ async fn the_in_flight_slot_bounds_concurrent_requests() -> TestResult {
     drop(slots.pop());
     assert_eq!(
         refused(
-            gateway
-                .create_decision_preview(permit(gateway).await?, "k-1", request)
+            served.gateway
+                .create_decision_preview(permit(&served.gateway).await?, "k-1", request)
                 .await
         ),
         "IncompatibleProfile"
