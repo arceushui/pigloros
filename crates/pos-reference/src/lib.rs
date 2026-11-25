@@ -125,6 +125,14 @@ pub mod selector_transport_test_fixture {
             )
         }
 
+        pub(crate) fn sign_runtime_record(
+            &self,
+            magic: &str,
+            unsigned: Value,
+        ) -> TestResult<Vec<u8>> {
+            sign_record(magic, unsigned, &self.fixture.authority.runtime)
+        }
+
         pub(crate) fn describe_response_for_provider(
             &self,
             request: &[u8],
