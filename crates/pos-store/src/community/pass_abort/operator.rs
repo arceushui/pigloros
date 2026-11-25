@@ -404,8 +404,7 @@ impl MemoryCommunityDomainV1 {
     /// The CAV1 of the Abort, read inside its guard (R15.1(5)): T's current
     /// selection (the initial frontier with no head ref until A5 commits a
     /// pass), the abort decision's authority row, the trust row of each
-    /// Plugin a due member runs, the pass metadata key's row and the clock
-    /// latch.
+    /// roster Plugin, the pass metadata key's row and the clock latch.
     fn abort_view(
         &self,
         context: CommunityQuarantineContextV1<'_>,
@@ -417,7 +416,7 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityCurrentViewV1, Error> {
         let pass_key = record.reserved.reservation.pass_key;
         let authority_rows = self.authority_rows(inputs)?;
-        let trust_rows = self.abort_trust_rows(context, lifecycle.trust_scope(), record)?;
+        let trust_rows = self.abort_trust_rows(context, lifecycle.trust_scope())?;
         CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
             CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
                 store_incarnation: self.store_incarnation,
@@ -459,22 +458,20 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// One trust row per distinct Plugin of the pass's due members, read
-    /// now from this domain's own registry. A CAV1 needs at least one row
-    /// (R6.5(4)); a Plugin with no active release has none, and an Abort
-    /// never refuses a Plugin's release for changing since the Reserve.
+    /// One trust row per distinct Plugin of the roster (R6.5(4)), read now
+    /// from this domain's own registry. A Plugin with no active release has
+    /// none: the accepted text gives no row for that state, and an
+    /// operator Abort is not refused for it (open point for the owner).
     fn abort_trust_rows(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         scope: &str,
-        record: &CommunityPassRecordV1,
     ) -> Result<Vec<CommunityTrustViewRowV1>, Error> {
-        let roster = context.profile.as_input().roster;
-        let plugins: BTreeSet<&str> = record
-            .reserved
-            .members
+        let plugins: BTreeSet<&str> = context
+            .profile
+            .as_input()
+            .roster
             .iter()
-            .filter_map(|member| roster.get(member.roster_index))
             .map(|row| row.implementation().plugin_id())
             .collect();
         let policy = CommunityStoreDomainV1::plugin_trust_policy(self, scope)?;
