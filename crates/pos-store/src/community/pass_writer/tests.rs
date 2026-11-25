@@ -240,8 +240,8 @@ fn scope_row() -> CommunityScopeMemberV1 {
     }
 }
 
-fn minted() -> Result<CommunityMintedObservationV1, Box<dyn std::error::Error>> {
-    Ok(CommunityMintedObservationV1 {
+fn minted(cut: CommunityObservationCutV1) -> CommunityMintedObservationV1 {
+    CommunityMintedObservationV1 {
         reference: reference(),
         graph: TERMS,
         additions: counts(10),
@@ -249,13 +249,13 @@ fn minted() -> Result<CommunityMintedObservationV1, Box<dyn std::error::Error>> 
         scope_reference: hash(40),
         scope: vec![scope_row()],
         not_after_micros: GENERATION_HORIZON,
-        cut: cut()?,
-    })
+        cut,
+    }
 }
 
 /// A Reserve of 24 pass rows with `F_p` of 4 targets, minting.
 fn input() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
-    Ok(CommunityReserveInputV1 {
+    cut().map(|cut| CommunityReserveInputV1 {
         timeline: id(1),
         generation: GENERATION,
         reservation_operation_id: OPERATION,
@@ -265,7 +265,7 @@ fn input() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
         reservation_sample_micros: SAMPLE,
         pass_rows: 24,
         failure_reserve: 4,
-        minted: Some(minted()?),
+        minted: Some(minted(cut)),
         reused: None,
         request: request_input(),
         pass: facts(),
@@ -339,10 +339,10 @@ fn expected_reservation(
 }
 
 fn reuse() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
-    Ok(CommunityReserveInputV1 {
+    input().map(|call| CommunityReserveInputV1 {
         minted: None,
         reused: Some(reference()),
-        ..input()?
+        ..call
     })
 }
 
@@ -1308,11 +1308,20 @@ fn an_unsealed_pass_commits_or_aborts() -> TestResult {
 fn an_apply_over_a_record_or_a_bare_entry_fails_loudly() -> TestResult {
     let mut domain = domain()?;
     let first = domain.stage_reserve(input()?)?;
-    let second = domain.stage_reserve(input()?)?;
+    let mut second = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, first)?;
     let abort = domain.stage_abort(id(1), OPERATION, 0)?;
     domain.apply_abort(&SEAL, &abort)?;
-    // The entry is gone but the record stays: the second token conflicts.
+    // The entry is gone but the record stays: the second token conflicts,
+    // though its ordinals are the next ones again, so only the recorded
+    // identity can refuse it.
+    let floor = domain
+        .pass_states
+        .get(&id(1))
+        .ok_or("state")?
+        .highest_pass_ordinal;
+    second.native_ordinal = domain.native_producer_ordinal + 1;
+    second.pass_ordinal = floor + 1;
     assert_eq!(
         domain.apply_reserve(&SEAL, second).err(),
         Some(Error::Conflict)
@@ -1843,6 +1852,7 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
     // Trace rows, `F_p` and the key IDs, each alone.
     let mut rows = input()?;
     rows.pass.trace_rows = 3;
+    rows.failure_reserve = 6;
     assert_eq!(refused(rows), Some(Error::InvalidBinding));
     let mut reserve = input()?;
     reserve.failure_reserve = 5;
@@ -2285,8 +2295,7 @@ fn the_request_must_name_the_pass_members() -> TestResult {
         Some(Error::InvalidBinding)
     );
     two.pass.members = vec![member(0, 110), member(1, 110)];
-    two.request.prepared_input_set_digest =
-        input_set(&[(hash(110), hash(86)), (hash(110), hash(86))]);
+    two.request.prepared_input_set_digest = input_set(&[(hash(110), hash(86))]);
     assert_eq!(domain.stage_reserve(two).err(), Some(Error::InvalidBinding));
     Ok(())
 }
