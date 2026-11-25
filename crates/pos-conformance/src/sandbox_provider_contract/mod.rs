@@ -15,10 +15,10 @@ pub use authority::{
     SandboxProviderManifestV1, SandboxSyscallSetV1, SignedImageManifestV1,
 };
 pub use operations::{
-    SandboxCancelRequestV1, SandboxCancelResponseV1, SandboxCancelResultV1,
-    SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxLocalErrorCodeV1,
-    SandboxLocalErrorPhaseV1, SandboxLocalErrorV1, SandboxProviderOperationV1,
-    SandboxReconcileRequestV1, SandboxReconcileResponseV1,
+    ReconciliationEvidenceV1, SandboxCancelRequestV1, SandboxCancelResponseV1,
+    SandboxCancelResultV1, SandboxDescribeRequestV1, SandboxDescribeResponseV1,
+    SandboxLocalErrorCodeV1, SandboxLocalErrorPhaseV1, SandboxLocalErrorV1,
+    SandboxProviderOperationV1, SandboxReconcileRequestV1, SandboxReconcileResponseV1,
 };
 pub use protocol::{
     AdmissionAuthorityV1, AdmissionGrantV1, NetworkExchangePlanV1, PayloadDescriptorV1,

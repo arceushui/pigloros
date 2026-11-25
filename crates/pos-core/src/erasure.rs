@@ -6937,7 +6937,7 @@ use persistence::RecoveredErasureV1;
 pub struct ErasureCoordinatorStateMachineV1<P> {
     port: P,
     coordinator: ErasureReferenceV1,
-    records: Vec<RecoveredErasureV1>,
+    records: BTreeMap<ErasureReferenceV1, RecoveredErasureV1>,
 }
 
 mod coordinator;
