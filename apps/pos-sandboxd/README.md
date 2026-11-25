@@ -386,11 +386,12 @@ installs it yet. The #444 QEMU guest does not set the key either: the #444
 work wires the drop-in into the guest (`guest.nix`, a boot-sysctl expectation
 of 1, the pinned hashes) when this lands. The runtime reads the sysctl at
 startup, before it connects the bus, and exits without binding its sockets
-(admission closed) when the value is below 1 or cannot be read. After `ReadyV1`, the first kernel observation
-enters the unit's retained `ns/net` descriptor and reads its links and main
-table; any other link, any route off `lo` (a blackhole, prohibit or
-unreachable route counts), or a failed read is KOE1 status 2. At the release
-recheck a transport failure is barrier failure 6 and a changed namespace is 7.
+(admission closed) when the value is below 1 or cannot be read. After
+`ReadyV1`, the first kernel observation enters the unit's retained `ns/net`
+descriptor and reads its links and main table; any other link, any route off
+`lo` (a blackhole, prohibit or unreachable route counts), or a failed read is
+KOE1 status 2. At the release recheck a transport failure is barrier failure 6
+and a changed namespace is 7.
 
 Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
 an IPv6 endpoint is admitted only when it is an address of the host itself,

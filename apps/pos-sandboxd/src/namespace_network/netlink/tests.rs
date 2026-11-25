@@ -505,6 +505,8 @@ fn unrepresentable_links_and_foreign_replies_fail() {
     assert!(matches!(links(&session), Err(NetlinkError::Unexpected)));
 }
 
+/// A failed thread spawn cannot be forced in a test, so this pins only the
+/// conversion `in_namespace` applies to it through `.map_err(NetlinkError::from)`.
 #[test]
 fn a_thread_that_cannot_be_spawned_is_an_io_failure() {
     let os = std::io::Error::from_raw_os_error(Errno::NOMEM.raw_os_error());

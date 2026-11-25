@@ -21,9 +21,9 @@ use tokio::time::Instant;
 use zbus::OwnedObjectPath;
 
 use super::{
-    capture_store_over, ledger, open_capture_store, open_staging, prepare_host, prepare_with,
-    retained_floor, sweep_captures, sweep_staging, HostReconciliation, Reconcile, ReconcileError,
-    ROOT,
+    capture_store_over, ledger, netlink_network, open_capture_store, open_staging, prepare_host,
+    prepare_with, retained_floor, sweep_captures, sweep_staging, HostReconciliation, Reconcile,
+    ReconcileError, ROOT,
 };
 use crate::provider_runtime::tests::{
     bind_as_provider, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -509,6 +509,25 @@ fn serves_nothing_over_an_unsafe_store(
     Ok(())
 }
 
+/// Step 7 on this host is refused whatever the runner's sysctl: `prepare_host`
+/// stops at the sysctl probe or, when it passes, at the missing system bus,
+/// and the real network ports with a passing probe stop at the bus too.
+fn refuses_step_7_on_this_host(authority: &RuntimeAuthority) {
+    assert!(matches!(
+        prepare_host(authority),
+        Err(ProviderRuntimeError::HostUnavailable)
+    ));
+    assert!(matches!(
+        prepare_with(
+            authority,
+            || true,
+            SystemdTransientUnitTransport::connect_system(),
+            netlink_network,
+        ),
+        Err(ProviderRuntimeError::HostUnavailable)
+    ));
+}
+
 /// Step 7 over a host whose sysctl probe passes and whose network is clean.
 fn prepare_clean(
     authority: &RuntimeAuthority,
@@ -559,9 +578,7 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let authority = bind_as_provider()??;
     let (admitted, installation, _) = &authority;
     let captures = Path::new(SANDBOX_ARTIFACT_ROOT).join("captures");
-    // Step 7 here has no system bus, and creates no capture store.
-    let host = prepare_host(&authority);
-    assert!(matches!(host, Err(ProviderRuntimeError::HostUnavailable)));
+    refuses_step_7_on_this_host(&authority);
     assert!(!captures.exists(), "the capture store was created");
     creates_a_private_store_under_a_strict_umask(admitted.bootstrap().installed(), &captures)?;
     provider_state()?;

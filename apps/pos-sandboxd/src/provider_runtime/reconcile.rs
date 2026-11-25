@@ -174,24 +174,41 @@ fn netlink_network(
 /// `isolated` is the fallback-tunnel sysctl probe (ADR-069 R14 N12): the
 /// unit network check is sound only when it holds, so a host where it does
 /// not is refused first, before anything is opened.
-///
-/// The bus is connected, then the recovery owner opened, then the staging
-/// directory and the capture store opened or created; any failure refuses
-/// the whole step.
 pub(super) fn prepare_with<N, P, E>(
-    (admitted, installation, _): &RuntimeAuthority,
+    authority: &RuntimeAuthority,
     isolated: impl FnOnce() -> bool,
     connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
     network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
 ) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
-    if !isolated() {
-        writeln!(
-            std::io::stderr(),
-            "pos-sandboxd: {FB_TUNNELS_SYSCTL} must be at least 1 (ADR-069 R14 N12)"
-        )
-        .ok();
-        return Err(ProviderRuntimeError::HostUnavailable);
-    }
+    probed(isolated)
+        .ok_or(ProviderRuntimeError::HostUnavailable)
+        .and_then(|()| open_host(authority, connect, network))
+}
+
+/// `Some` when the fallback-tunnel sysctl probe `isolated` passes; otherwise
+/// `None`, after one line on standard error.
+fn probed(isolated: impl FnOnce() -> bool) -> Option<()> {
+    isolated().then_some(()).or_else(report_unisolated)
+}
+
+/// The refusal line of a host whose fallback-tunnel sysctl is below 1.
+fn report_unisolated() -> Option<()> {
+    writeln!(
+        std::io::stderr(),
+        "pos-sandboxd: {FB_TUNNELS_SYSCTL} must be at least 1 (ADR-069 R14 N12)"
+    )
+    .ok();
+    None
+}
+
+/// The bus is connected, then the recovery owner opened, then the staging
+/// directory and the capture store opened or created; any failure refuses
+/// the whole step.
+fn open_host<N, P, E>(
+    (admitted, installation, _): &RuntimeAuthority,
+    connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
+    network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
+) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
     let (network, egress) = network(installation.attempt_range(), installation.egress_probe());
     // Multi-thread: every attempt's release barrier blocks in place on it.
     tokio::runtime::Builder::new_multi_thread()
