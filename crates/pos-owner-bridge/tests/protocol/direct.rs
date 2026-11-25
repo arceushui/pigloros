@@ -404,13 +404,20 @@ fn buffer_bridge(port: &Shared) -> Result<BufferBridge, Box<dyn std::error::Erro
 #[test]
 fn a_buffer_enrollment_unlocks_through_run_direct_with_the_same_prf() -> TestResult {
     let port = Shared(Rc::new(RefCell::new(FixturePort::new(FakeClock::start())?)));
+    let before = Instant::now();
     let mut bridge = buffer_bridge(&port)?;
     let mut enrollment = FakeEnrollment::new();
     bridge.enroll(&context(), &mut enrollment)?;
     let (_, prf_input, _) = enrollment.sealed_over.clone().ok_or("nothing was sealed")?;
     let committed = enrollment.committed.ok_or("nothing was committed")?;
     let binding = committed.binding().boxed()?;
-    assert_eq!(port.0.borrow().deadlines.len(), 3);
+    let deadlines = port.0.borrow().deadlines.clone();
+    assert_eq!(deadlines.len(), 3);
+    // The page gives the port the interaction bound from its own clock, which started after
+    // `before`: every deadline lies at least that far ahead.
+    assert!(deadlines
+        .iter()
+        .all(|deadline| *deadline >= before + INTERACTION));
 
     let clock = FakeClock::start();
     let host = DirectHost::new(port, clock.clone());

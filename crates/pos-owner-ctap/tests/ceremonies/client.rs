@@ -153,6 +153,20 @@ fn uv_attempts_are_capped_at_the_first_retry_count() -> TestResult {
     assert_eq!(rig.commands(&KNOWN), expected);
     assert_eq!(rig.prompt.asked(), [8]);
 
+    // A later answer of zero ends the loop even while attempts from the first answer remain.
+    let mut rig = Rig::new(true);
+    rig.device.override_reply(UV_RETRIES, &three);
+    rig.device.override_reply(TOKEN_UV, &[0x3f]);
+    rig.device
+        .override_reply(UV_RETRIES, &ok(&map(&[(head(0, 5), head(0, 0))])));
+    rig.prompt.enter(PIN);
+    rig.create(&Ceremony::drawn("create"))?;
+    assert_eq!(rig.commands(&KNOWN), [0, 2, 3, 4, 2, 1, 3, 5, 6]);
+    assert_eq!(
+        rig.prompt.notices()[..1],
+        [Notice::UserVerification { retries: 3 }]
+    );
+
     let mut rig = Rig::new(true);
     rig.device.override_reply(UV_RETRIES, &three);
     rig.device.override_reply(UV_RETRIES, &[0x01]);
