@@ -30,15 +30,20 @@
 //! failure (journal 22582). Then `describe` gets the SDY1 of the startup
 //! authority in every state. Execute read uncharged gets SPE1 `11
 //! SandboxUnavailable`: the runtime is not `Open`, or its execute admission
-//! closed. Cancel is answered by the port while its execute admission is
-//! open, gets `12` beyond the answered pool, and `11` otherwise: an
-//! attempt it names may be held by a port that was not consulted.
-//! Reconcile gets SPE1 `11` while the runtime is `Starting` or
-//! `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is `Open` (R11
-//! §10 invariant 15). Whatever the request left unread is read
-//! first, so the peer sees the answer and a clean EOF. Each record is
-//! signed by the runtime key, verified before emission, written under its
-//! own short deadline and followed by server write EOF.
+//! closed. Whatever the request left unread is read first, so the peer sees
+//! the answer and a clean EOF. Each record is signed by the runtime key,
+//! verified before emission, written under its own short deadline and
+//! followed by server write EOF.
+//!
+//! Cancel and reconcile are answered from their own control pool of
+//! `min(BHC1 13, 256)` places (ADR-069 R15 N13). The operation is known only
+//! after the first record: an answered worker or a refusal reader that reads
+//! an SCQ1 or SRQ1 hands the connection, at its stream position, to the
+//! control pool, which frees its execute worker or reader place; a full
+//! control pool gets `12`. After step 6 the admission state is checked
+//! again: `Revoked` writes zero bytes, `Starting` and `ReconcileFailed` get
+//! `11`, and an `Open` runtime answers from its lifecycle, also once fenced
+//! or with execute admission closed (R15 §3.3).
 //!
 //! A root control connection is answered by the one
 //! [`super::RevocationUpdateResponder`] (R11 §8), on the acceptor itself:
@@ -60,7 +65,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::thread::{self, Scope, ScopedJoinHandle};
+use std::thread::{self, Scope};
 use std::time::{Duration, Instant};
 
 use pos_reference::control_framing;
@@ -72,7 +77,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxReconcileRequest,
 };
 use pos_reference::sandbox_provider_protocol::{
-    SandboxRevocationSnapshot, SandboxTrustRole, SandboxTrustSnapshot,
+    SandboxLimit, SandboxRevocationSnapshot, SandboxTrustRole, SandboxTrustSnapshot,
 };
 use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthorityResolution,
@@ -81,7 +86,7 @@ use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
 use super::port::ExecutePort;
-use super::refusal_pool::{ReaderPermit, RefusalPool};
+use super::refusal_pool::{Place, Places, ReaderPermit, RefusalPool};
 use super::{
     unavailable, AdmissionState, ExchangeObserver, ExchangeOutcome, LiveAttempts,
     ProviderRuntimeError, RevocationUpdateResponder,
@@ -222,6 +227,30 @@ struct RequestIdentity {
     attempt_id: Option<[u8; 16]>,
 }
 
+/// An authenticated cancel or reconcile request, for the control pool.
+#[derive(Debug)]
+enum Control {
+    Cancel(SandboxCancelRequest),
+    Reconcile(SandboxReconcileRequest),
+}
+
+/// A request that passed steps 1 to 6: its identities, and the decoded
+/// request of a cancel or reconcile.
+#[derive(Debug)]
+struct Classified {
+    identity: RequestIdentity,
+    control: Option<Control>,
+}
+
+impl From<RequestIdentity> for Classified {
+    fn from(identity: RequestIdentity) -> Self {
+        Self {
+            identity,
+            control: None,
+        }
+    }
+}
+
 /// Why a request gets an SPE1, and which identities it binds.
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
@@ -278,7 +307,11 @@ pub(super) struct Responder<'a> {
     revocation:
         RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>, ControlState<'a>>,
     peer_uid: u32,
-    pool: usize,
+    /// The answered execute workers, at most `min(BHC1 13, 256)`.
+    answered: Places,
+    /// The control pool that answers cancel and reconcile, of the same
+    /// bound (R15 N13).
+    control: Places,
     refusals: RefusalPool,
     /// The joins of exact repeats beyond the answered pool (item P10): at
     /// most `max(pool, 1)` wait and deliver at once, so a busy connection's
@@ -317,7 +350,8 @@ impl<'a> Responder<'a> {
                 },
             ),
             peer_uid: ROOT_UID,
-            pool,
+            answered: Places::new(pool),
+            control: Places::new(pool),
             refusals: RefusalPool::new(pool),
             joins: RefusalPool::new(pool),
         }
@@ -329,12 +363,9 @@ impl<'a> Responder<'a> {
         execute: &ProviderEndpoint,
         control: &ProviderEndpoint,
     ) -> ProviderRuntimeError {
-        thread::scope(|scope| {
-            let mut answered = Vec::new();
-            loop {
-                if let Err(error) = self.serve_once(scope, &mut answered, execute, control) {
-                    break error;
-                }
+        thread::scope(|scope| loop {
+            if let Err(error) = self.serve_once(scope, execute, control) {
+                break error;
             }
         })
     }
@@ -342,12 +373,10 @@ impl<'a> Responder<'a> {
     fn serve_once<'scope>(
         &'scope self,
         scope: &'scope Scope<'scope, '_>,
-        answered: &mut Vec<ScopedJoinHandle<'scope, ()>>,
         execute: &ProviderEndpoint,
         control: &ProviderEndpoint,
     ) -> Result<(), ProviderRuntimeError> {
-        answered.retain(|worker| !worker.is_finished());
-        let accepting = accepting(answered.len(), self.refusals.has_room(), self.pool);
+        let accepting = accepting(self.answered.has_room(), self.refusals.has_room());
         let mut ready = [
             PollFd::new(control.listener(), PollFlags::IN),
             PollFd::new(
@@ -385,7 +414,10 @@ impl<'a> Responder<'a> {
                     .map(|control_missed| (control_missed, execute_ready))
             })
             .and_then(|(control_missed, execute_ready)| {
-                let admission = if answered.len() < self.pool {
+                // An answered place is taken before the accept, so the
+                // acceptor never admits more than the pool.
+                let place = execute_ready.then(|| self.answered.take()).flatten();
+                let admission = if place.is_some() {
                     Admission::Answered
                 } else {
                     Admission::Busy
@@ -395,21 +427,21 @@ impl<'a> Responder<'a> {
                         (
                             missed(control_missed, execute_ready, accepted.is_some()),
                             admission,
-                            (accepted, permit),
+                            (accepted, permit, place),
                         )
                     })
             })
-            .map(|(missed, admission, (accepted, permit))| {
+            .map(|(missed, admission, (accepted, permit, place))| {
                 thread::sleep(ACCEPT_BACKOFF * u32::from(missed));
-                // A worker that cannot be spawned drops its connection.
-                let spawned = accepted.and_then(|stream| {
+                // A worker that cannot be spawned drops its connection and
+                // frees its place.
+                accepted.and_then(|stream| {
                     thread::Builder::new()
-                        .spawn_scoped(scope, move || self.answer(stream, admission, permit))
+                        .spawn_scoped(scope, move || {
+                            self.answer_placed(stream, admission, permit, place);
+                        })
                         .ok()
                 });
-                if admission == Admission::Answered {
-                    answered.extend(spawned);
-                }
             })
     }
 
@@ -437,12 +469,26 @@ impl<'a> Responder<'a> {
             .map(Option::unwrap_or_default)
     }
 
-    /// Answer one execute-socket connection, then send server write EOF. A
-    /// peer that is not root is dropped with zero bytes read and written; so
-    /// is every peer once the runtime is `Revoked`, after the peer check.
+    /// Answer one execute-socket connection holding no answered place.
+    #[cfg(test)]
     fn answer(&self, stream: UnixStream, admission: Admission, permit: Option<ReaderPermit<'_>>) {
+        self.answer_placed(stream, admission, permit, None);
+    }
+
+    /// Answer one execute-socket connection, holding its answered `place`
+    /// until it is answered or handed to the control pool, then send server
+    /// write EOF. A peer that is not root is dropped with zero bytes read
+    /// and written; so is every peer once the runtime is `Revoked`, after
+    /// the peer check.
+    fn answer_placed(
+        &self,
+        stream: UnixStream,
+        admission: Admission,
+        permit: Option<ReaderPermit<'_>>,
+        place: Option<Place<'_>>,
+    ) {
         if self.answers(&stream) {
-            self.answer_root(stream, admission, permit);
+            self.answer_root(stream, admission, (permit, place));
         }
     }
 
@@ -475,6 +521,16 @@ impl<'a> Responder<'a> {
         )
     }
 
+    /// The execute port of an `Open` runtime, whatever its execute
+    /// admission and control state: cancel and reconcile are answered from
+    /// its lifecycle (R15 §3.3).
+    fn opened(&self) -> Option<&ExecutePort> {
+        match self.admission.get() {
+            Some(AdmissionState::Open(port)) => Some(port),
+            _ => None,
+        }
+    }
+
     /// The execute port, while the runtime is `Open` with execute admission
     /// still open on it and in the control state.
     fn open_port(&self) -> Option<&ExecutePort> {
@@ -496,11 +552,11 @@ impl<'a> Responder<'a> {
         &self,
         stream: UnixStream,
         admission: Admission,
-        permit: Option<ReaderPermit<'_>>,
+        (permit, place): (Option<ReaderPermit<'_>>, Option<Place<'_>>),
     ) {
         match (self.open_port(), admission) {
-            (Some(port), Admission::Answered) => self.serve_port(port, stream),
-            _ => self.answer_uncharged(&stream, admission, permit),
+            (Some(port), Admission::Answered) => self.serve_port(port, stream, place),
+            _ => self.answer_uncharged(&stream, admission, (permit, place)),
         }
     }
 
@@ -511,12 +567,11 @@ impl<'a> Responder<'a> {
         &self,
         stream: &UnixStream,
         admission: Admission,
-        permit: Option<ReaderPermit<'_>>,
+        (permit, place): (Option<ReaderPermit<'_>>, Option<Place<'_>>),
     ) {
-        let limits = self.admitted.provider().broker_hard_caps();
         let mut reading = Deadlined::new(
             stream,
-            Duration::from_millis(limits[CONTROL_DEADLINE_LIMIT_ID].value),
+            control_interval(self.admitted.provider().broker_hard_caps()),
         );
         let until = reading.until;
         let Some(permit) = permit.or_else(|| self.refusals.wait(until)) else {
@@ -524,14 +579,97 @@ impl<'a> Responder<'a> {
         };
         let classified = self.classify(&mut reading);
         drop(permit);
+        self.answer_classified(stream, (classified, admission), until, place);
+    }
+
+    /// Answer a request read uncharged by its classification: a cancel or
+    /// reconcile through the control pool, any other authenticated request
+    /// by its admission, and a refusal by its SPE1.
+    fn answer_classified(
+        &self,
+        stream: &UnixStream,
+        (classified, admission): (Result<Classified, Refusal>, Admission),
+        until: Instant,
+        place: Option<Place<'_>>,
+    ) {
         match (classified, admission) {
-            (Ok(identity), Admission::Busy) => self.answer_busy(stream, identity, until, false),
-            (Ok(identity), Admission::Answered) => {
+            (
+                Ok(Classified {
+                    identity,
+                    control: Some(control),
+                }),
+                _,
+            ) => self.answer_control(stream, (identity, control), until, place),
+            (Ok(Classified { identity, .. }), Admission::Busy) => {
+                self.answer_busy(stream, identity, until, false);
+            }
+            (Ok(Classified { identity, .. }), Admission::Answered) => {
                 let response = self.answer_identity(identity);
                 Self::conclude(stream, response);
             }
             (Err(refusal), _) => Self::conclude(stream, self.refuse(refusal)),
         }
+    }
+
+    /// Hand an authenticated cancel or reconcile, read in full, to the
+    /// control pool (R15 N13), by [`control_route`]. An answer holds its
+    /// control place until it is written, and frees the execute worker
+    /// `place` first. A refusal (`11` for a runtime that is not `Open`, `12`
+    /// for a full control pool) is written holding the execute place, or
+    /// else an uncharged reader's place (item P7); with neither free the
+    /// connection closes with zero bytes. `Revoked` writes zero bytes.
+    fn answer_control(
+        &self,
+        stream: &UnixStream,
+        (identity, control): (RequestIdentity, Control),
+        until: Instant,
+        place: Option<Place<'_>>,
+    ) {
+        let opened = self.opened();
+        let held = opened.and_then(|_| self.control.take());
+        match control_route(self.revocation.observer().revoked(), opened, held.is_some()) {
+            ControlRoute::Silent => {}
+            ControlRoute::Answer(port) => {
+                drop(place);
+                Self::conclude(stream, self.control_answer(port, identity, &control, until));
+            }
+            ControlRoute::Refused(code) => {
+                let reader = place.is_none().then(|| self.refusals.wait(until)).flatten();
+                if place.is_some() || reader.is_some() {
+                    Self::conclude(stream, self.authenticated(identity, code));
+                } else {
+                    stream.shutdown(std::net::Shutdown::Both).ok();
+                }
+            }
+        }
+        drop(held);
+    }
+
+    /// The SCY1 or SRY1 that answers `control`, or its SPE1; nothing when
+    /// the answer cannot be signed (R9 §5).
+    fn control_answer(
+        &self,
+        port: &ExecutePort,
+        identity: RequestIdentity,
+        control: &Control,
+        until: Instant,
+    ) -> Option<Vec<u8>> {
+        let signing = (&**self.signer, self.key());
+        let answered = match control {
+            Control::Cancel(request) => port.cancel(
+                request,
+                (
+                    until,
+                    control_interval(self.admitted.provider().broker_hard_caps()),
+                ),
+                signing,
+            ),
+            Control::Reconcile(request) => port.reconcile(request, until, signing),
+        };
+        answered.map_or_else(
+            |code| code.and_then(|code| self.authenticated(identity, code)),
+            Some,
+        )
     }
 
     /// An authenticated request beyond the answered pool: an exact repeat
@@ -564,13 +702,14 @@ impl<'a> Responder<'a> {
         }
     }
 
-    /// The answer of an authenticated request read in full: the SDY1 of
-    /// describe, and the R11 §7.1 refusal of any other operation.
+    /// The answer of an authenticated describe or execute read in full: the
+    /// SDY1 of describe, and SPE1 `11` for an execute the port does not
+    /// answer (R11 §7.1).
     fn answer_identity(&self, identity: RequestIdentity) -> Option<Vec<u8>> {
         if identity.operation == DESCRIBE {
             self.describe(identity.request_id)
         } else {
-            self.authenticated(identity, self.closed(identity.operation))
+            self.authenticated(identity, SandboxProviderErrorCode::SandboxUnavailable)
         }
     }
 
@@ -612,10 +751,10 @@ impl<'a> Responder<'a> {
     /// the request, or its refusal. Execute's SPX1 follows its EVR1 and the
     /// selector sends nothing more before AGR1; after any other record the
     /// rest of the request is read up to its EOF.
-    fn classify(&self, stream: &mut Deadlined<'_>) -> Result<RequestIdentity, Refusal> {
+    fn classify(&self, stream: &mut Deadlined<'_>) -> Result<Classified, Refusal> {
         match read_record(stream) {
             Ok(first) if record_operation(&first) == Some(EXECUTE) => {
-                self.classify_execute(&first, stream)
+                self.classify_execute(&first, stream).map(Classified::from)
             }
             first => {
                 let classified = first.and_then(|first| self.classify_single(&first));
@@ -626,7 +765,7 @@ impl<'a> Responder<'a> {
     }
 
     /// Describe, cancel, reconcile, or a record that names none of them.
-    fn classify_single(&self, first: &[u8]) -> Result<RequestIdentity, Refusal> {
+    fn classify_single(&self, first: &[u8]) -> Result<Classified, Refusal> {
         match record_operation(first) {
             Some(DESCRIBE) => SandboxDescribeRequest::from_canonical_cbor(first)
                 .map_err(|error| Refusal::invalid(DESCRIBE, request_step(error)))
@@ -641,7 +780,8 @@ impl<'a> Responder<'a> {
                             attempt_id: None,
                         },
                     )
-                }),
+                })
+                .map(Classified::from),
             Some(CANCEL) => SandboxCancelRequest::from_canonical_cbor(first)
                 .map_err(|error| Refusal::invalid(CANCEL, request_step(error)))
                 .and_then(|request| {
@@ -655,6 +795,10 @@ impl<'a> Responder<'a> {
                             attempt_id: Some(request.attempt_id),
                         },
                     )
+                    .map(|identity| Classified {
+                        identity,
+                        control: Some(Control::Cancel(request)),
+                    })
                 }),
             Some(RECONCILE) => SandboxReconcileRequest::from_canonical_cbor(first)
                 .map_err(|error| Refusal::invalid(RECONCILE, request_step(error)))
@@ -669,6 +813,10 @@ impl<'a> Responder<'a> {
                             attempt_id: Some(request.attempt_id),
                         },
                     )
+                    .map(|identity| Classified {
+                        identity,
+                        control: Some(Control::Reconcile(request)),
+                    })
                 }),
             _ => Err(Refusal::UNIDENTIFIED),
         }
@@ -748,19 +896,6 @@ impl<'a> Responder<'a> {
         }
     }
 
-    /// The SPE1 code of an authenticated execute, cancel or reconcile
-    /// request the port does not answer (module docs, R11 §7.1). A cancel
-    /// names an attempt the port may hold, so without consulting it the
-    /// answer is `11`, never `15`.
-    fn closed(&self, operation: u8) -> SandboxProviderErrorCode {
-        match (self.admission.get(), operation) {
-            (Some(AdmissionState::Open { .. }), RECONCILE) => {
-                SandboxProviderErrorCode::UnknownAttempt
-            }
-            _ => SandboxProviderErrorCode::SandboxUnavailable,
-        }
-    }
-
     fn key(&self) -> AdmittedRuntimeKey<'_> {
         AdmittedRuntimeKey::new(
             &self
@@ -827,13 +962,44 @@ impl<'a> Responder<'a> {
     }
 }
 
-/// Whether the acceptor polls the execute listener, given its `answered`
-/// workers and whether the uncharged reader pool has room: while every
-/// answered slot is busy and the reader pool has no room (or a hand-off
-/// waits for it) it is not polled; the control listener and both endpoint
-/// checks still are.
-const fn accepting(answered: usize, room: bool, pool: usize) -> bool {
-    answered < pool || room
+/// One initial control interval: BHC1 limit 16 of `caps`, in milliseconds.
+/// It bounds every request read, and a cancellation's wait for the signed
+/// response after its attempt ended (R15 §3.6 item 2(a)).
+fn control_interval(caps: &[SandboxLimit]) -> Duration {
+    Duration::from_millis(caps[CONTROL_DEADLINE_LIMIT_ID].value)
+}
+
+/// How a cancel or reconcile that passed step 6 is answered (R15 §3.3,
+/// N13).
+#[derive(Debug, Eq, PartialEq)]
+enum ControlRoute<P> {
+    /// `Revoked`: zero bytes.
+    Silent,
+    /// The SPE1 of a runtime that is not `Open` (`11`) or of a full
+    /// control pool (`12`).
+    Refused(SandboxProviderErrorCode),
+    /// Answered from this `Open` runtime's lifecycle, on a control place.
+    Answer(P),
+}
+
+/// The route of a control request: `revoked` first, then whether the
+/// runtime is `opened`, then whether a control place was `taken`.
+fn control_route<P>(revoked: bool, opened: Option<P>, taken: bool) -> ControlRoute<P> {
+    match opened {
+        _ if revoked => ControlRoute::Silent,
+        None => ControlRoute::Refused(SandboxProviderErrorCode::SandboxUnavailable),
+        Some(_) if !taken => ControlRoute::Refused(SandboxProviderErrorCode::AdmissionBusy),
+        Some(port) => ControlRoute::Answer(port),
+    }
+}
+
+/// Whether the acceptor polls the execute listener, given whether an
+/// answered place is free and whether the uncharged reader pool has room:
+/// while every answered place is taken and the reader pool has no room (or
+/// a hand-off waits for it) it is not polled; the control listener and both
+/// endpoint checks still are.
+const fn accepting(answered: bool, room: bool) -> bool {
+    answered || room
 }
 
 /// The refusal of a connection that waited for an uncharged reader until
