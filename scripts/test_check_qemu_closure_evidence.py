@@ -560,7 +560,7 @@ RUNTIME_TREE = ("\td\t700\nsandbox\td\t700\nsandbox/staging\td\t700\nsandbox/reg
 LAUNCHER_HEADERS = ("ELF Header:\n  Type:                              EXEC (Executable file)\n"
                     "Program Headers:\n  Type           Offset   VirtAddr\n  LOAD           0x000000 0x400000\n"
                     "  GNU_STACK      0x000000 0x000000\n\nThere is no dynamic section in this file.\n")
-LAUNCHER_DIGEST = "c" * 64
+LAUNCHER_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def daemon_files() -> dict[str, bytes | str]:
@@ -1585,7 +1585,12 @@ class EvidenceTests(unittest.TestCase):
                   LAUNCHER_DIGEST + "  /tmp/pos-sandboxd",
                   LAUNCHER_DIGEST + "  nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
                   LAUNCHER_DIGEST + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd  x",
-                  LAUNCHER_DIGEST + " /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd")],
+                  LAUNCHER_DIGEST + " /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  # A bare digest has one field; the path must start with /nix/store/ exactly.
+                  LAUNCHER_DIGEST,
+                  LAUNCHER_DIGEST + "  /nix/other/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /nix/storefoo/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /tmp/nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd")],
             # The ELF Type line: only an executable or a position-independent executable passes.
             (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
                 "EXEC (Executable file)", "REL (Relocatable file)")}),
@@ -1595,6 +1600,20 @@ class EvidenceTests(unittest.TestCase):
              "not a loadable statically linked"),
             (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
                 "EXEC (Executable file)", "CORE (Core file)")}),
+             "not a loadable statically linked"),
+            # The Type value must be exactly EXEC or DYN followed by its description, and the
+            # line must start with `Type:`.
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "NONE (None)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "EXECUTABLE (Executable file)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "DYNAMIC (Shared object file)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "  Type:  ", "  Machine type: Type:  ")}),
              "not a loadable statically linked"),
             (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS + "  INTERP  0x0\n"}),
              "not a loadable statically linked"),
