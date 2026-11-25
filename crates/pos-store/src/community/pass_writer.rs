@@ -29,22 +29,32 @@
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
 //! re-validates only what is cheap to check: the pass state and the entry.
-//! A Reserve is refused when its identity is pending (`Conflict`) or when
-//! another reservation of the same T is pending (`PassUnresolved`, code 7,
-//! refused at the apply only, not at stage). A Commit or Abort is refused
-//! when its entry is gone or too small, which also refuses their replay.
+//! A Reserve is refused with `Conflict` when its identity is recorded in
+//! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
+//! and again at the apply. It is refused with `PassUnresolved` (code 7)
+//! at stage when T already has an unresolved pass. A second Reserve staged
+//! before the first was applied is invisible at stage, so only the apply
+//! refuses it (`PassUnresolved`, from T's pending entries). A Commit or
+//! Abort is refused when its entry is gone or too small, which also refuses
+//! their replay.
 //!
 //! A Reserve allocates its native producer ordinal and its pass ordinal
 //! (annex §4): `stage_reserve` computes the next of each without changing
 //! anything, and `apply_reserve` refuses (`Conflict`) a token whose ordinals
 //! another burn or pass has moved since, then advances both. A minted
-//! materialization must carry the ordinal the step-5h burn made last.
+//! materialization must carry the ordinal the step-5h burn made last, which
+//! no Reserve has consumed yet.
 //!
-//! A resolved reservation identity stays in the CRI1 index, so a replay of
-//! it is refused (`Conflict`) at stage and at apply. The planner's step 4a
-//! still returns the original outcome first. Neither apply re-runs the
-//! budget, caps, head or counters compares; a token staged before another
-//! operation changed them is for the pipeline to discard.
+//! A Reserve replay is refused here as well as by the pipeline's step 4a
+//! discovery: `pass_records` keeps every pass with its status after it
+//! resolves, so a recorded identity, pending or resolved, is a `Conflict`
+//! at stage and at apply, before the head and counters are compared. The
+//! discovery still answers a replay from its original outcome first; this
+//! refusal is the backstop.
+//!
+//! Neither apply re-runs the budget, caps, head or counters compares; a
+//! token staged before another operation changed them is for the pipeline
+//! to discard.
 
 use pos_core::community_lifecycle::{
     community_prepared_input_set_digest_v1, CommunityGraphCountsV1,
@@ -233,9 +243,9 @@ pub struct CommunityStagedAbortV1 {
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
-    /// Another pending reservation of T (`PassUnresolved`, code 7) is
-    /// refused here only against a recorded pass, and at
-    /// [`Self::apply_reserve`] against a pending one.
+    /// An unresolved pass of T is refused here (`PassUnresolved`, code 7). A
+    /// second reservation staged but not yet applied is invisible at stage
+    /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
     /// Returns `InvalidBinding` when the minted rows exceed the pass rows;
@@ -550,11 +560,11 @@ impl MemoryCommunityDomainV1 {
     /// retains for reuse and one more control operation.
     ///
     /// # Errors
-    /// Returns `Conflict` when the reservation identity is pending already
-    /// or recorded, or when the ordinals staged are no longer the next ones
-    /// (another burn or pass moved them), `PassUnresolved` (7) when another
-    /// reservation of T is pending, and `EvidenceUnavailable` when the
-    /// Timeline has no pass state; the domain is unchanged.
+    /// Returns `Conflict` when the reservation identity is recorded already,
+    /// resolved or not, or when the ordinals staged are no longer the next
+    /// ones (another burn or pass moved them), `PassUnresolved` (7) when
+    /// another reservation of T is pending, and `EvidenceUnavailable` when
+    /// the Timeline has no pass state; the domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
