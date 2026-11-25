@@ -196,19 +196,19 @@ fn init_skips_replies_to_another_nonce_and_never_cancels_the_broadcast() {
 }
 
 #[test]
-fn init_gives_up_at_the_deadline_between_replies_to_another_nonce() {
+fn init_gives_up_at_the_deadline_after_a_reply_to_another_nonce() {
     let clock = FakeClock::start();
     let mut other = nonce();
     other[0] ^= 1;
     let mut device = Scripted::new(&clock, init_reply(other, 0x04));
     let ticking = Ticking::new(&clock);
-    let deadline = ticking.now() + Duration::from_millis(2);
+    let deadline = ticking.now() + Duration::from_millis(4);
     assert_eq!(
         Channel::open(&mut device, &ticking, deadline, nonce()).map(|_| ()),
         Err(TIMEOUT)
     );
     assert_eq!(device.writes.len(), 1);
-    assert_eq!(device.reads.len(), 1);
+    assert!(device.reads.is_empty());
 }
 
 #[test]

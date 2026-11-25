@@ -106,6 +106,8 @@ impl<'a> Channel<'a> {
         };
         channel.send(CMD_INIT, &nonce, MAX_MESSAGE_BYTES)?;
         let reply = loop {
+            // Bounds the loop on its own, so a replaced `receive` cannot spin it past the
+            // deadline; otherwise `next_report` already enforces the same deadline.
             if channel.remaining().is_zero() {
                 return Err(TIMEOUT);
             }
