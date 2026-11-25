@@ -167,8 +167,10 @@ impl CommunityAnnotationRecordsV1 {
     }
 
     /// Whether the closure of the two records on top of `selected` stays
-    /// within every graph maximum. The Annotation CPN1 is one level above its
-    /// step, which is at most as deep as the selected graph.
+    /// within every graph maximum. It is a per-pass bound that does not
+    /// accumulate across passes, and a fail-closed one: the step's ancestry
+    /// is already in `selected`, and the Annotation CPN1 is one level above
+    /// its step, which is at most as deep as the selected graph.
     #[must_use]
     pub fn fits_graph(&self, selected: CommunityGraphCountsV1) -> bool {
         CommunityGraphCountsV1 {
