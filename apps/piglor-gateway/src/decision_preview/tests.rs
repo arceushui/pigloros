@@ -87,7 +87,8 @@ async fn send(
 
 /// The Local Principal of the fixture actor and [`OTHER_ACTOR`], with one
 /// consent the fixture actor grants itself, the two Decision Preview grants,
-/// the Session read and consent revocation.
+/// the Session read and consent revocation. The consent governs the preview
+/// creation; a consent that governs no operation is not provisionable.
 fn provision() -> TestResult<LocalPrincipalProvisionV1> {
     let actor = actor()?;
     Ok(LocalPrincipalProvisionV1::try_new_provisioned(
@@ -104,7 +105,7 @@ fn provision() -> TestResult<LocalPrincipalProvisionV1> {
             grantee: actor,
             grants: vec![LocalConsentGrantDraftV1 {
                 purpose: "operation".to_owned(),
-                data_categories: vec!["timeline".to_owned()],
+                data_categories: vec!["decision-preview".to_owned()],
                 export_permitted: true,
             }],
         }),
