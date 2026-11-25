@@ -47,6 +47,8 @@ The path without its query names one route; any other path is outside the gramma
 | rooms | `POST /v1/scenario-rooms` | `scenario-room.create` |
 | revisions | `POST /v1/scenario-rooms/:room/revisions` | `scenario-room.derive` |
 | revision | `GET /v1/scenario-rooms/:room/revisions/:revision` | `scenario-room.read` |
+| previews | `POST /v1/decision-previews` | `decision-preview.create` |
+| preview | `GET /v1/decision-previews/:preview` | `decision-preview.read` |
 
 An exchange whose route capability the attempt does not hold is not sent; its observation is
 `{"refused": "capability-denied"}`. The literal `{timeline}` in a path is replaced by the `id`
@@ -55,7 +57,8 @@ of the response of the last earlier sent exchange of the sub-case that sets `cap
 `{room}` in a path is likewise the `id` of the response of the last earlier sent exchange that
 sets `capture` to `room`, and `:revision` is a positive decimal integer without a leading zero.
 The literal `{erasure}` in a path is the `request_id` of the response of the last earlier sent
-exchange that sets `capture` to `erasure`.
+exchange that sets `capture` to `erasure`. `:preview` is any non-empty segment; no capture fills
+it, since no fixture Gateway admits a Decision Preview before an EPF1 is installed (#305).
 The literal
 `{consent}` in a request body is replaced by the `consent_ref` of the first member of
 `consents` of the response of the last earlier sent exchange that sets `capture` to `consent`;
@@ -105,8 +108,10 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   is the same Principal served with the closed erasure authority.
 - `authorized-rooms`: the `authorized` composition (#303) whose fixture Local Principal is
   granted `timeline.create`, `session.read`, `consent.revoke`, `scenario-room.create` (resource `scenario-room`,
-  action `create`), `scenario-room.derive` (resource `scenario-room.revision`, action `derive`)
-  and `scenario-room.read` (resource `scenario-room.revisions`, action `read`), records the
+  action `create`), `scenario-room.derive` (resource `scenario-room.revision`, action `derive`),
+  `scenario-room.read` (resource `scenario-room.revisions`, action `read`),
+  `decision-preview.create` (resource `decision-preview`, action `create`) and
+  `decision-preview.read` (resource `decision-preview.status`, action `read`) (#305), records the
   single-participant governance record `01JC0GATEWAYW90G0VERN00001`, and binds one consent of
   the fixture actor to itself, purpose `operation`, data category `timeline`, export permitted,
   so it governs `timeline.create` and a room may name it as its `privacy_export_ref`. Its
@@ -220,7 +225,10 @@ are 0.
   `unauthenticated` problem; on `authorized-erasure-closed` an erasure request is the
   non-retryable `503` `temporarily-unavailable` problem and a read is `404`; on
   `authorized-erasure-expired` an erasure request is the non-retryable `503`
-  `temporarily-unavailable` problem.
+  `temporarily-unavailable` problem; on `authorized-rooms` a Decision Preview request without
+  the actor header is the `401` `unauthenticated` problem and a read of an unknown preview the
+  `404` `not-found-or-unavailable` problem, and on `authorized`, which holds no Decision Preview
+  grant, a request is the `403` `unauthorized` problem (#305).
 - **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are the `400`
   `invalid-request` problem; a Timeline ID that is not a ULID is `400` `invalid-request`;
   integer action `params` are the `422` `admission-rejected` problem, and nothing is committed;
@@ -228,7 +236,9 @@ are 0.
   `admission-rejected` problem; on `authorized-erasure` an erasure request whose
   `impact_acknowledged` is false is `400` `invalid-request`, one for `public-record` is the
   `400` `erasure-scope-retained` problem and an erasure ID that is not a ULID is `400`
-  `invalid-request`.
+  `invalid-request`; on `authorized-rooms` a Decision Preview request without `profile_id` is
+  `400` `invalid-request` and one of `schema_version` 2 the `400` `unsupported-version`
+  problem, both before the authority decision (#305).
 - **resource-exhaustion** (`resource-limit`): 64 root Timelines are created and the 65th is the
   `429` `resource-limit-exceeded` problem; on `authorized-erasure-held` another erasure request
   of the subject is the retryable `429` `resource-limit-exceeded` problem.
@@ -239,7 +249,10 @@ are 0.
   redaction from the public surface, not ADR-060 deletion (see `support/limitations.md`).
 - **downgrade** (`incompatible-contract`): the legacy `world.action` event type is the `400`
   `unsupported-version` problem and the legacy `world.action.submit` capability is the `403`
-  `unauthorized` problem, with no fallback and nothing committed.
+  `unauthorized` problem, with no fallback and nothing committed; on `authorized-rooms` a
+  Decision Preview of `deterministic-local-v1`, which has no installed EPF1, and one of the
+  Air-Gapped `deterministic-air-gapped-v1` are the `409` `incompatible-profile` problem, with
+  no fallback and nothing recorded (#305).
 - **independent-evaluation:** the digests of a health exchange and of a created Timeline with
   its empty page.
 
