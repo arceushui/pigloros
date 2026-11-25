@@ -553,7 +553,7 @@ fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult
         declared_inputs: 30,
         encoded_record_bytes: 40,
     };
-    let state = CommunityPassStateV1::initialized([0x20; 16], history, &graph);
+    let state = CommunityPassStateV1::initialized([0x20; 16], hash(0x45), history, &graph);
     assert_eq!(state.generation, [0x20; 16]);
     // The head is a real digest; the end-to-end head test is A4c-3's.
     assert_ne!(state.head, Hash::from_bytes([0; 32]));
