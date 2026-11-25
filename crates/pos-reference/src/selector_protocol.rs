@@ -1002,8 +1002,8 @@ fn grant_matches_execute_request(
 /// The receipt binds at most one NXT1 digest per planned exchange (ADR-069
 /// R16 N13): none without plans, as every V1 execute of #1488-a.
 ///
-/// The check is mode-independent, so it is stricter for `AirGapped` and `Fork`
-/// than R16 requires. The R16 residual clause ("NXT1 empty unless
+/// The check is mode-independent, so it is stricter than R16 requires for every
+/// non-Local mode, `Replay` with empty plans included. The R16 residual clause ("NXT1 empty unless
 /// `release1-digest` is non-null") is specified in R16 §3.3 change C, and
 /// 1492-b (R16 §7) owns the checks for non-empty plans.
 const fn transcripts_fit_plans(
@@ -3358,9 +3358,8 @@ mod tests {
             );
         }
 
-        // A transcript with no plan to bind it: refused as a whole, belt and
-        // braces over the isolated guard test above (the tamper breaks the SPR1
-        // digest too).
+        // A transcript with no plan to bind it: the same guard, reached
+        // through `validate_evidence`.
         let mut receipt = evidence.receipt.clone();
         receipt.network_transcript_digests = vec![[99; 32]];
         assert_eq!(

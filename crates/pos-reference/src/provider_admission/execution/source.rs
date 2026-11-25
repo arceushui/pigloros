@@ -2256,8 +2256,8 @@ mod tests {
         Ok(())
     }
 
-    /// Row 7: a non-empty plan list is never adopted from SPX1, so the plans
-    /// every served mode (Replay included, #1488-a) reconstructs stay empty.
+    /// Row 7: a non-empty plan list is never adopted from SPX1: the equality
+    /// with the reconstructed request is mode-independent.
     #[test]
     fn a_request_carrying_plans_is_refused_at_row_7() -> TestResult {
         if !isolated("a_request_carrying_plans_is_refused_at_row_7")? {
