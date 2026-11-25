@@ -245,11 +245,20 @@ fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefus
     match unavailable.0 {
         KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
         KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
-        // The unit's network namespace now holds more than `lo` (R14 N12).
-        KernelObservationError::UnitNetwork(UnitNetworkError::Changed) => {
-            RecheckRefusal::ObservationChanged
-        }
-        _ => RecheckRefusal::RecheckObservation(unavailable),
+        _ => unavailable_or_changed(unavailable),
+    }
+}
+
+/// An observation the recheck could not make (6), or one that found the
+/// unit's network namespace now holding more than `lo` (7, R14 N12).
+const fn unavailable_or_changed(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
+    if matches!(
+        unavailable.0,
+        KernelObservationError::UnitNetwork(UnitNetworkError::Changed)
+    ) {
+        RecheckRefusal::ObservationChanged
+    } else {
+        RecheckRefusal::RecheckObservation(unavailable)
     }
 }
 

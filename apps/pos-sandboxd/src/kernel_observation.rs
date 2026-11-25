@@ -1000,6 +1000,24 @@ fn observe_unit(
     observe_unit_in(PROC_PATHS, unit, context, provider, network)
 }
 
+/// The unit shares no namespace with the provider, and its network
+/// namespace holds only `lo` (ADR-069 R14 N12). The check runs only on a
+/// namespace the provider does not share.
+fn require_isolated(
+    facts: &ProcessFacts,
+    provider: &NamespaceSet,
+    network: &dyn UnitNetworkCheck,
+) -> Result<(), KernelObservationError> {
+    facts
+        .namespaces
+        .isolated_from(provider)
+        .then_some(())
+        .ok_or(KernelObservationError::SharedNamespace)?;
+    network
+        .check(facts.net.as_fd())
+        .map_err(KernelObservationError::UnitNetwork)
+}
+
 fn observe_unit_in(
     paths: ProcPaths<'_>,
     unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
@@ -1016,14 +1034,7 @@ fn observe_unit_in(
         .ok_or(KernelObservationError::IdentityChanged)?;
     let facts = anchor.read(context, main_pid, paths.work)?;
     let provider_namespaces = *provider.namespaces();
-    facts
-        .namespaces
-        .isolated_from(&provider_namespaces)
-        .then_some(())
-        .ok_or(KernelObservationError::SharedNamespace)?;
-    network
-        .check(facts.net.as_fd())
-        .map_err(KernelObservationError::UnitNetwork)?;
+    require_isolated(&facts, &provider_namespaces, network)?;
     let (device, inode) = context.cgroup.identity;
     let cgroup = KernelIdentity::of(device, inode)?;
     let (work, handle) = facts
