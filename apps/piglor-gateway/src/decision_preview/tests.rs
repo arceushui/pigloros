@@ -268,6 +268,7 @@ async fn a_preview_is_admitted_retried_and_read_through_the_seam() -> TestResult
         "NotFound"
     );
     assert_eq!(previews_events(&gateway).await?, 2);
+    drop(gateway);
     served.gateway.shutdown().await?;
     drop(served);
     Ok(())
@@ -413,6 +414,7 @@ async fn a_revoked_consent_refuses_retries_reads_and_fresh_requests() -> TestRes
     }
     // Two Events of the first preview and the unfinished claim: no result.
     assert_eq!(previews_events(&gateway).await?, 3);
+    drop(gateway);
     served.gateway.shutdown().await?;
     drop(served);
     let outcomes = SqliteStore::open(&store_path(&directory)?)?
@@ -467,6 +469,7 @@ async fn the_consent_check_comes_before_the_internal_failure_arm() -> TestResult
     let refusal = gateway
         .create_decision_preview(permit(&gateway).await?, "k-1", request)
         .await;
+    drop(gateway);
     assert!(
         matches!(
             refusal,
@@ -579,20 +582,20 @@ async fn a_preview_fails_closed_without_a_decision_a_host_or_an_executor() -> Te
     );
     open.shutdown().await?;
     drop(open);
-    let permit = permit(gateway).await?;
-    gateway
-        .store
-        .shutdown()
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    assert_eq!(
+    let outcome = {
+        let permit = permit(gateway).await?;
+        gateway
+            .store
+            .shutdown()
+            .await
+            .map_err(|error| format!("{error:?}"))?;
         refused(
             gateway
                 .create_decision_preview(permit, "k-1", request)
-                .await
-        ),
-        "Gateway(StoreExecutorClosed)"
-    );
+                .await,
+        )
+    };
+    assert_eq!(outcome, "Gateway(StoreExecutorClosed)");
     drop(served);
     Ok(())
 }
