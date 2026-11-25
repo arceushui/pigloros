@@ -23,6 +23,7 @@ use super::erasure_budget::CommunityPendingErasureV1;
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::native_graph::{CommunityAssembledRecordV1, CommunityInitializationGraphV1};
 use super::pass_planner::CommunityPassReadPortV1;
+use super::pass_writer::CommunityObservationCutV1;
 
 /// One generation's retained operation counts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -54,6 +55,15 @@ impl CommunityGenerationCountsV1 {
 pub(super) struct CommunityPassStateV1 {
     /// T's active generation G (R10.5).
     pub(super) generation: [u8; 16],
+    /// `H(CDP1)` of the profile T was initialized under.
+    ///
+    /// Every Reserve on T must name it and the installed profile (R10.7 5j).
+    /// A Timeline initializes once (a second code-0 `initialize` gives
+    /// `StaleGeneration` before staging, and the writer's own check gives
+    /// `Conflict`), so after a reinstallation of another CDP1 every Reserve
+    /// on an initialized T gives 3 and T stays stranded until the original
+    /// CDP1 is installed again. A Timeline's context is bound to its profile.
+    pub(super) profile_digest: Hash,
     /// `H(CSH1)`, T's selected head: the head and frontier a Reserve must
     /// still find (R10.7 step 5j).
     pub(super) head: Hash,
@@ -71,6 +81,21 @@ pub(super) struct CommunityPassStateV1 {
     pub(super) scope_rows: BTreeMap<Hash, Vec<CommunityScopeMemberV1>>,
     /// The retained operation counts per generation.
     pub(super) generations: BTreeMap<[u8; 16], CommunityGenerationCountsV1>,
+    /// Every observation a Reserve minted, kept for reuse after its Commit
+    /// (R9.2).
+    pub(super) retained: BTreeMap<CommunityNativeNodeReferenceV1, CommunityRetainedObservationV1>,
+}
+
+/// What a later Reserve needs to reuse a minted observation (R9.2, R9.7).
+#[derive(Clone)]
+pub(super) struct CommunityRetainedObservationV1 {
+    /// The generation that minted it: a reuse is of the same `(T, G)`
+    /// (R9.2).
+    pub(super) generation: [u8; 16],
+    /// The earliest `evidence_not_after` of its records.
+    pub(super) not_after_micros: u64,
+    /// The cut it observed, which T must still be at.
+    pub(super) cut: CommunityObservationCutV1,
 }
 
 impl CommunityPassStateV1 {
@@ -85,6 +110,7 @@ impl CommunityPassStateV1 {
     /// counter starts at the initialization's own bytes.
     pub(super) fn initialized(
         generation: [u8; 16],
+        profile_digest: Hash,
         history: CommunitySharedCountsV1,
         graph: &CommunityInitializationGraphV1,
     ) -> Self {
@@ -99,6 +125,7 @@ impl CommunityPassStateV1 {
             .fold(0_u64, u64::saturating_add);
         Self {
             generation,
+            profile_digest,
             head: graph.selected_head_digest(),
             counters: CommunitySharedCountsV1 {
                 nodes: history.nodes.saturating_add(nodes),
@@ -111,6 +138,7 @@ impl CommunityPassStateV1 {
             observations: BTreeMap::new(),
             scope_rows: BTreeMap::new(),
             generations: BTreeMap::new(),
+            retained: BTreeMap::new(),
         }
     }
 }

@@ -835,6 +835,7 @@ impl MemoryCommunityDomainV1 {
                 StagedInitializationV1 {
                     pass_state: CommunityPassStateV1::initialized(
                         operation.generation,
+                        operation.context.installation.profile.digest(),
                         history,
                         &graph,
                     ),

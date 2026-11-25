@@ -60,7 +60,7 @@ fn budgeted(actors: &[(EntityId, u64)], rows: &[(TimelineId, u64)]) -> Port {
 
 /// The trace rows of `port`'s pass, or its refusal.
 fn trace(port: &Port) -> Fallible<Result<u64, Error>> {
-    Ok(run(port)?.map(|quoted| quoted.trace_rows()))
+    Ok(run(port)?.map(|quoted| quoted.trace_headroom_rows()))
 }
 
 #[test]
