@@ -1,1 +1,1 @@
-redmine/305-decision-preview-store
+redmine/305-decision-preview-routes
