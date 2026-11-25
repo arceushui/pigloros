@@ -548,23 +548,14 @@ pub(crate) fn ddi_salt(architecture: &str) -> TestResult<[u8; 32]> {
 /// root hash, proof and signer.
 pub(crate) fn admitted_state() -> TestResult<InstalledSelectorState> {
     let (image, partitions) = ddi_fixture("x86-64")?;
-    admitted_state_with_salt(
+    admitted_state_with_arguments(
         &image,
         b"adapter",
         &partitions,
         &ImageSigning::ddi("x86-64")?,
         ddi_salt("x86-64")?,
+        &[],
     )
-}
-
-pub(crate) fn admitted_state_with_salt(
-    root_image: &[u8],
-    executable: &[u8],
-    partitions: &[PartitionDescriptor; 3],
-    signing: &ImageSigning,
-    salt: [u8; 32],
-) -> TestResult<InstalledSelectorState> {
-    admitted_state_with_arguments(root_image, executable, partitions, signing, salt, &[])
 }
 
 pub(crate) fn admitted_state_with_arguments(

@@ -22,7 +22,7 @@ use crate::sandbox_provider_protocol::{
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
-    admitted_state, admitted_state_with_salt, ddi_fixture, materialize_state, ImageSigning,
+    admitted_state, admitted_state_with_arguments, ddi_fixture, materialize_state, ImageSigning,
 };
 use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
 
@@ -36,9 +36,10 @@ const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
 /// the description is the kernel's description of the certificate.
 ///
 /// The staged SIM1 names the executable `/adapter` with the BLAKE3 digest of
-/// exactly the 7 bytes `adapter`, and activation reads it back through the
-/// mounted root. An image that is to be activated must hold `/adapter` as a
-/// regular file with exactly those bytes.
+/// `executable` and the fixed argument vector `arguments`, and activation
+/// reads `/adapter` back through the mounted root. An image that is to be
+/// activated must hold `/adapter` as a regular file with exactly the bytes of
+/// `executable`.
 #[derive(Clone, Copy, Debug)]
 pub struct StagedImage<'a> {
     /// The architecture of the image's root partitions and of every staged record.
@@ -49,6 +50,10 @@ pub struct StagedImage<'a> {
     pub certificate: &'a [u8],
     /// The kernel key description the TRS1 and SIM1 carry for the certificate.
     pub key_description: &'a str,
+    /// The exact bytes of the image's `/adapter`, whose digest the SIM1 binds.
+    pub executable: &'a [u8],
+    /// The SIM1's fixed adapter argument vector.
+    pub arguments: &'a [String],
 }
 
 /// The staged fixed installation, removed again when dropped.
@@ -74,6 +79,11 @@ impl StagedInstallation {
             image: &image,
             certificate: &signing.certificate,
             key_description: &signing.key_description,
+            // The vector image holds no executable: this fixture is never
+            // mounted (activation refuses before any mount), so it names a
+            // placeholder `/adapter` and no arguments.
+            executable: b"adapter",
+            arguments: &[],
         })
     }
 
@@ -85,7 +95,14 @@ impl StagedInstallation {
     /// and base64 `signature`, and any record the staged authority rejects.
     pub fn stage_image(image: &StagedImage<'_>) -> Result<Self, Box<dyn Error>> {
         let (partitions, signing, salt) = described(image)?;
-        let state = admitted_state_with_salt(image.image, b"adapter", &partitions, &signing, salt)?;
+        let state = admitted_state_with_arguments(
+            image.image,
+            image.executable,
+            &partitions,
+            &signing,
+            salt,
+            image.arguments,
+        )?;
         let mut staged = Self::create_parent()?;
         let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
         staged.request = request_for(&admitted)?;
@@ -634,6 +651,8 @@ mod tests {
                 image: &self.bytes,
                 certificate: b"certificate",
                 key_description: "CN: 01",
+                executable: b"adapter",
+                arguments: &[],
             })
             .err()
             .map_or_else(|| "accepted".to_owned(), |error| error.to_string())
@@ -648,6 +667,8 @@ mod tests {
             image: &ddi.bytes,
             certificate: b"certificate",
             key_description: "CN: 01",
+            executable: b"adapter",
+            arguments: &[],
         })?;
         assert_eq!(
             partitions
