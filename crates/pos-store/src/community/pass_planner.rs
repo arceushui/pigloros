@@ -47,7 +47,7 @@ use pos_core::{EntityId, Hash, TimelineId};
 
 use super::erasure_budget::{
     CommunityErasureActorV1, CommunityErasureBudgetPortV1, CommunityErasureBudgetV1,
-    CommunityPendingErasureV1,
+    CommunityPendingErasureV1, CommunityPendingReservationV1,
 };
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
@@ -336,9 +336,37 @@ const fn expiry(
 
 /// `t_r` plus the CDP1 decision deadline (27 s).
 const fn deadline(request: CommunityPassRequestV1) -> u64 {
-    request
-        .reservation_sample_micros
-        .saturating_add(COMMUNITY_DECISION_DEADLINE_MICROS_V1)
+    decision_bound(request.reservation_sample_micros)
+}
+
+/// `t_r` plus the decision deadline, for a reservation sample `t_r`.
+const fn decision_bound(reservation_sample_micros: u64) -> u64 {
+    reservation_sample_micros.saturating_add(COMMUNITY_DECISION_DEADLINE_MICROS_V1)
+}
+
+/// The counts and horizons that steps 5d and 5e, and the Reserve writer's
+/// re-check of them (step 5j), judge.
+#[derive(Clone, Copy)]
+pub(super) struct CommunityPassCapsV1 {
+    pub(super) outcomes: u64,
+    pub(super) operations: u64,
+    pub(super) recording_not_after_micros: u64,
+    pub(super) reservation_sample_micros: u64,
+}
+
+/// Steps 5d and 5e: the retained-outcome cap, the control-operation cap
+/// when minting (14), then the recording horizon (19). The one
+/// implementation the planner and the Reserve writer share.
+pub(super) const fn admit_caps(caps: CommunityPassCapsV1, minting: bool) -> Result<(), Error> {
+    if caps.outcomes >= COMMUNITY_RETAINED_PASS_OUTCOMES_V1
+        || (minting && caps.operations >= COMMUNITY_CONTROL_OPERATIONS_V1)
+    {
+        Err(Error::CapacityExhausted)
+    } else if caps.recording_not_after_micros <= decision_bound(caps.reservation_sample_micros) {
+        Err(Error::RecordingUnavailable)
+    } else {
+        Ok(())
+    }
 }
 
 /// Step 4g (R10.1): the due roster indices, in roster order.
@@ -393,15 +421,15 @@ impl CommunityPassDueV1<'_> {
             .as_input()
             .retention
             .recording_not_after_micros;
-        if outcomes >= COMMUNITY_RETAINED_PASS_OUTCOMES_V1
-            || (minting && operations >= COMMUNITY_CONTROL_OPERATIONS_V1)
-        {
-            Err(Error::CapacityExhausted)
-        } else if recording <= deadline(self.request) {
-            Err(Error::RecordingUnavailable)
-        } else {
-            Ok(())
-        }
+        admit_caps(
+            CommunityPassCapsV1 {
+                outcomes,
+                operations,
+                recording_not_after_micros: recording,
+                reservation_sample_micros: self.request.reservation_sample_micros,
+            },
+            minting,
+        )
     }
 
     /// Step 5g in the R11.5(1) order with the R13.4(1) budget: the R10.3
@@ -579,7 +607,12 @@ pub(super) fn trace_room(
     rows: u64,
     reserve: u64,
 ) -> Option<u64> {
-    let used = actor.targets + pending.targets + actor.quarantine_reserve + reserve + 2 * rows;
+    let held = CommunityPendingReservationV1::for_pass(rows, reserve);
+    let used = actor
+        .targets
+        .saturating_add(pending.targets)
+        .saturating_add(actor.quarantine_reserve)
+        .saturating_add(held.targets);
     COMMUNITY_ERASURE_TARGET_LINE_V1
         .checked_sub(used)
         .and_then(|targets| {
@@ -587,15 +620,16 @@ pub(super) fn trace_room(
                 .rows
                 .iter()
                 .try_fold(targets / 2, |room, (affected, committed)| {
-                    let added = if *affected == timeline {
-                        rows + reserve / 2
-                    } else {
-                        0
-                    };
+                    let added = if *affected == timeline { held.rows } else { 0 };
                     let pending = pending.rows.get(affected).copied().unwrap_or(0);
-                    let held = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
+                    let quarantine = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
                     COMMUNITY_ERASURE_ROW_LIMIT_V1
-                        .checked_sub(committed + pending + added + held)
+                        .checked_sub(
+                            committed
+                                .saturating_add(pending)
+                                .saturating_add(added)
+                                .saturating_add(quarantine),
+                        )
                         .map(|free| {
                             if *affected == timeline {
                                 room.min(free)

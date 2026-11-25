@@ -538,6 +538,16 @@ impl ObservedUnit {
         }
     }
 
+    /// An observation that holds `work` as its `/work` handle.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) const fn with_work_for_test(observation: &KernelObservation, work: File) -> Self {
+        Self {
+            observation: *observation,
+            work: Some(work),
+        }
+    }
+
     /// The observation.
     #[must_use]
     pub const fn observation(&self) -> &KernelObservation {
@@ -548,6 +558,11 @@ impl ObservedUnit {
     #[must_use]
     pub const fn work(&self) -> Option<&File> {
         self.work.as_ref()
+    }
+
+    /// Take the `/work` handle, for the terminal reading that closes it.
+    pub(crate) const fn take_work(&mut self) -> Option<File> {
+        self.work.take()
     }
 }
 
