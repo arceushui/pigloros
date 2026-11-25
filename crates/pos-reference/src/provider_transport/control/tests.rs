@@ -84,6 +84,24 @@ fn spe1(
     request_digest: [u8; 32],
     code: u64,
 ) -> TestResult<Vec<u8>> {
+    spe1_for_attempt(
+        fixture,
+        operation,
+        request_id,
+        request_digest,
+        ATTEMPT,
+        code,
+    )
+}
+
+fn spe1_for_attempt(
+    fixture: &TransportAdmissionFixture,
+    operation: u64,
+    request_id: [u8; 16],
+    request_digest: [u8; 32],
+    attempt_id: [u8; 16],
+    code: u64,
+) -> TestResult<Vec<u8>> {
     fixture.sign_runtime_record(
         "SPE1",
         Value::Array(vec![
@@ -92,7 +110,7 @@ fn spe1(
             uint(operation),
             Value::Bytes(request_id.to_vec()),
             Value::Bytes(request_digest.to_vec()),
-            Value::Bytes(ATTEMPT.to_vec()),
+            Value::Bytes(attempt_id.to_vec()),
             uint(code),
             Value::Null,
             key(fixture),
@@ -155,7 +173,7 @@ fn reconcile_sends_the_exact_srq1_and_recomputes_the_tuple() -> TestResult {
         Some(&accepted()),
         TIMEOUT,
     )?;
-    assert_eq!(verified.check(), TerminalEvidenceCheck::Recomputed);
+    assert_eq!(verified.check(), TerminalEvidenceCheck::Compared);
     assert_eq!(join(server)?, bytes);
     Ok(())
 }
@@ -197,7 +215,7 @@ fn cancel_sends_the_exact_scq1_and_authenticates_the_scy1() -> TestResult {
         server
             .transport
             .cancel(&fixture.provider, &request, &bytes, Some(SPY1), TIMEOUT)?;
-    assert_eq!(verified.check(), TerminalEvidenceCheck::Recomputed);
+    assert_eq!(verified.check(), TerminalEvidenceCheck::Compared);
     assert_eq!(join(server)?, bytes);
     Ok(())
 }
@@ -239,6 +257,14 @@ fn an_spe1_bound_to_another_request_or_operation_is_evidence_failure() -> TestRe
         spe1(&fixture, 3, [99; 16], request.request_digest, 15)?,
         spe1(&fixture, 3, REQUEST_ID, [99; 32], 15)?,
         spe1(&fixture, 2, REQUEST_ID, request.request_digest, 15)?,
+        spe1_for_attempt(
+            &fixture,
+            3,
+            REQUEST_ID,
+            request.request_digest,
+            [98; 16],
+            15,
+        )?,
     ];
     for answer in mismatched {
         let server = provider(Some(answer))?;
@@ -248,7 +274,9 @@ fn an_spe1_bound_to_another_request_or_operation_is_evidence_failure() -> TestRe
         assert_eq!(
             result,
             Err(ProviderControlError::Evidence(
-                SandboxAdmissionError::ConformanceMismatch
+                SandboxAdmissionError::Protocol(
+                    crate::sandbox_provider_protocol::SandboxProviderProtocolError::InconsistentFields
+                )
             ))
         );
         join(server)?;
@@ -303,5 +331,26 @@ fn a_foreign_provider_process_receives_no_request() -> TestResult {
         .join()
         .map_err(|_| "provider panicked")?
         .is_err());
+    Ok(())
+}
+
+#[test]
+fn a_cancel_refusal_is_bound_to_operation_two() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let (request, bytes) = fixture
+        .provider
+        .cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let answer = spe1(&fixture, 2, REQUEST_ID, request.request_digest, 12)?;
+    let server = provider(Some(answer))?;
+    let result = server
+        .transport
+        .cancel(&fixture.provider, &request, &bytes, None, TIMEOUT);
+    assert_eq!(
+        result,
+        Err(ProviderControlError::Refused(
+            ProviderControlRefusal::Busy12
+        ))
+    );
+    join(server)?;
     Ok(())
 }

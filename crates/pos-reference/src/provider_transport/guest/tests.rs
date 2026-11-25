@@ -124,9 +124,26 @@ fn execute_returns_the_authenticated_execution_and_its_verified_output() -> Test
         &fixture.commitment,
     )?;
     assert_eq!(execution.agr1_digest(), grant.grant_digest());
-    let accepted = execution.accepted_evidence([7; 16]).ok_or("no evidence")?;
+    let accepted = execution.accepted_evidence([7; 16]);
     assert_eq!(accepted.agr1_digest, grant.grant_digest());
     assert_eq!(accepted.attempt_id, [7; 16]);
+    assert_eq!(
+        accepted.terminal_spy1_digest,
+        crate::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+            &fixture.spy1
+        )?
+        .result_digest()
+    );
+    let last_sau1 = fixture.sau1.last().ok_or("no SAU1")?;
+    let wrapper: ciborium::value::Value = ciborium::from_reader(last_sau1.as_slice())?;
+    let ciborium::value::Value::Array(wrapper) = wrapper else {
+        return Err("SAU1 wrapper is not an array".into());
+    };
+    let Some(ciborium::value::Value::Bytes(digest)) = wrapper.get(1) else {
+        return Err("SAU1 digest missing".into());
+    };
+    assert_eq!(accepted.final_sau1_digest.as_slice(), digest.as_slice());
+    assert_ne!(accepted.final_sau1_digest, [0; 32]);
     let output = execution
         .with_verified_output(|_, reader| {
             let mut bytes = Vec::new();

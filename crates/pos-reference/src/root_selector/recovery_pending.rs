@@ -218,14 +218,18 @@ impl PendingRecovery {
     /// One diagnostic line with the closed failure kind; it names no
     /// secret. A sink that cannot be written changes nothing.
     fn report(&self, what: &str, error: &impl std::fmt::Display) {
-        writeln!(
-            self.diagnostics
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            "pos-root-selector: {what}: {error}"
-        )
-        .ok();
+        report_diagnostic(&self.diagnostics, what, error);
     }
+}
+
+/// One diagnostic line with the closed failure kind; it names no secret. A
+/// sink that cannot be written changes nothing.
+pub(super) fn report_diagnostic(sink: &DiagnosticSink, what: &str, error: &impl std::fmt::Display) {
+    writeln!(
+        sink.lock().unwrap_or_else(PoisonError::into_inner),
+        "pos-root-selector: {what}: {error}"
+    )
+    .ok();
 }
 
 #[cfg(test)]

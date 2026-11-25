@@ -1,4 +1,4 @@
-use std::io::{Read, Write as _};
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use ciborium::value::Value;
 
 use super::*;
-use crate::provider_transport::ProviderTransport;
+use crate::provider_transport::{ProviderControlRefusal, ProviderTransport};
 use crate::sandbox_provider_protocol::ReconciliationEvidence;
 use crate::selector_transport_test_fixture::{
     authenticated_transport_fixture, TransportAdmissionFixture,
@@ -82,7 +82,7 @@ fn sry1(fixture: &TransportAdmissionFixture, index: u8, digest: [u8; 32]) -> Tes
                 derive(
                     REQUEST_ID_DOMAIN,
                     ATTEMPT,
-                    ControlOperation::Reconcile,
+                    SandboxProviderOperation::Reconcile,
                     index,
                 )
                 .to_vec(),
@@ -101,7 +101,15 @@ fn scy1(fixture: &TransportAdmissionFixture) -> TestResult<Vec<u8>> {
         Value::Array(vec![
             Value::Text("SCY1".to_owned()),
             uint(1),
-            Value::Bytes(derive(REQUEST_ID_DOMAIN, ATTEMPT, ControlOperation::Cancel, 0).to_vec()),
+            Value::Bytes(
+                derive(
+                    REQUEST_ID_DOMAIN,
+                    ATTEMPT,
+                    SandboxProviderOperation::Cancel,
+                    0,
+                )
+                .to_vec(),
+            ),
             Value::Bytes(ATTEMPT.to_vec()),
             uint(0),
             Value::Bytes(SPY1.to_vec()),
@@ -116,10 +124,15 @@ fn spe1(fixture: &TransportAdmissionFixture, index: u8, code: u64) -> TestResult
         derive(
             REQUEST_ID_DOMAIN,
             ATTEMPT,
-            ControlOperation::Reconcile,
+            SandboxProviderOperation::Reconcile,
             index,
         ),
-        derive(NONCE_DOMAIN, ATTEMPT, ControlOperation::Reconcile, index),
+        derive(
+            NONCE_DOMAIN,
+            ATTEMPT,
+            SandboxProviderOperation::Reconcile,
+            index,
+        ),
         ATTEMPT,
         AGR1,
     )?;
@@ -218,8 +231,18 @@ fn a_recomputed_reconcile_sends_the_derived_request_and_reports_nothing() -> Tes
         String::new()
     );
     let (_, expected) = fixture.provider.reconcile_request(
-        derive(REQUEST_ID_DOMAIN, ATTEMPT, ControlOperation::Reconcile, 0),
-        derive(NONCE_DOMAIN, ATTEMPT, ControlOperation::Reconcile, 0),
+        derive(
+            REQUEST_ID_DOMAIN,
+            ATTEMPT,
+            SandboxProviderOperation::Reconcile,
+            0,
+        ),
+        derive(
+            NONCE_DOMAIN,
+            ATTEMPT,
+            SandboxProviderOperation::Reconcile,
+            0,
+        ),
         ATTEMPT,
         AGR1,
     )?;
@@ -327,11 +350,16 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
         active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
-    .cancel(Some(SPY1));
+    .cancel();
     assert_eq!(sink.text(), String::new());
     let (_, expected) = fixture.provider.cancel_request(
-        derive(REQUEST_ID_DOMAIN, ATTEMPT, ControlOperation::Cancel, 0),
-        derive(NONCE_DOMAIN, ATTEMPT, ControlOperation::Cancel, 0),
+        derive(
+            REQUEST_ID_DOMAIN,
+            ATTEMPT,
+            SandboxProviderOperation::Cancel,
+            0,
+        ),
+        derive(NONCE_DOMAIN, ATTEMPT, SandboxProviderOperation::Cancel, 0),
         ATTEMPT,
         AGR1,
     )?;
@@ -347,7 +375,7 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
         active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
-    .cancel(None);
+    .cancel();
     assert!(sink.text().contains("provider cancel failed"));
     requests(silent)?;
     Ok(())
@@ -357,12 +385,12 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
 fn derived_identities_differ_by_domain_operation_and_index_and_are_nonzero() {
     let id = |operation, index| derive(REQUEST_ID_DOMAIN, ATTEMPT, operation, index);
     let all = [
-        id(ControlOperation::Cancel, 0),
-        id(ControlOperation::Cancel, 1),
-        id(ControlOperation::Reconcile, 0),
-        id(ControlOperation::Reconcile, 1),
-        derive(NONCE_DOMAIN, ATTEMPT, ControlOperation::Cancel, 0),
-        derive(NONCE_DOMAIN, [8; 16], ControlOperation::Cancel, 0),
+        id(SandboxProviderOperation::Cancel, 0),
+        id(SandboxProviderOperation::Cancel, 1),
+        id(SandboxProviderOperation::Reconcile, 0),
+        id(SandboxProviderOperation::Reconcile, 1),
+        derive(NONCE_DOMAIN, ATTEMPT, SandboxProviderOperation::Cancel, 0),
+        derive(NONCE_DOMAIN, [8; 16], SandboxProviderOperation::Cancel, 0),
     ];
     for (position, identity) in all.iter().enumerate() {
         assert_ne!(*identity, [0; 16]);
@@ -401,5 +429,109 @@ fn a_cancel_budget_adds_the_time_the_attempt_may_still_run() -> TestResult {
     };
     assert_eq!(control.cancel_budget(), Duration::from_secs(43));
     requests(idle)?;
+    Ok(())
+}
+
+fn count_calls(
+    budget: Duration,
+    failure: impl Fn() -> ProviderControlError,
+) -> (usize, Result<(), ProviderControlError>) {
+    let mut calls = 0;
+    let result = retrying(budget, |_, left| {
+        calls += 1;
+        assert!(left <= budget);
+        Err(failure())
+    });
+    (calls, result)
+}
+
+#[test]
+fn a_retryable_refusal_is_sent_exactly_four_distinct_times() {
+    for refusal in [
+        ProviderControlRefusal::Pending11,
+        ProviderControlRefusal::Busy12,
+        ProviderControlRefusal::CleanupFailed14,
+    ] {
+        let (calls, result) = count_calls(Duration::from_mins(1), || {
+            ProviderControlError::Refused(refusal)
+        });
+        assert_eq!(calls, usize::from(MAX_DISTINCT_REQUESTS));
+        assert_eq!(result, Err(ProviderControlError::Refused(refusal)));
+    }
+}
+
+#[test]
+fn a_permanent_refusal_is_sent_once() {
+    for refusal in [
+        ProviderControlRefusal::UnknownAttempt15,
+        ProviderControlRefusal::RequestIdReuse16,
+        ProviderControlRefusal::Other,
+    ] {
+        let (calls, _) = count_calls(Duration::from_mins(1), || {
+            ProviderControlError::Refused(refusal)
+        });
+        assert_eq!(calls, 1);
+    }
+}
+
+#[test]
+fn only_a_transient_failure_gets_one_exact_repeat() {
+    for (error, expected) in [
+        (SelectorBoundaryError::SelectorUnavailable, 2),
+        (SelectorBoundaryError::Io, 2),
+        (SelectorBoundaryError::ArtifactInvalid, 1),
+    ] {
+        let (calls, result) = count_calls(Duration::from_mins(1), || {
+            ProviderControlError::Boundary(error)
+        });
+        assert_eq!(calls, expected);
+        assert_eq!(result, Err(ProviderControlError::Boundary(error)));
+    }
+}
+
+#[test]
+fn a_spent_budget_sends_nothing() {
+    let (calls, result) = count_calls(Duration::ZERO, || {
+        ProviderControlError::Refused(ProviderControlRefusal::Busy12)
+    });
+    assert_eq!(calls, 0);
+    assert_eq!(
+        result,
+        Err(ProviderControlError::Boundary(
+            SelectorBoundaryError::SelectorUnavailable
+        ))
+    );
+}
+
+#[test]
+fn the_remaining_budget_shrinks_and_ends_at_zero() {
+    let budget = Duration::from_secs(10);
+    assert_eq!(
+        remaining(budget, Duration::from_secs(4)),
+        Some(Duration::from_secs(6))
+    );
+    assert_eq!(remaining(budget, budget), None);
+    assert_eq!(remaining(budget, Duration::from_secs(11)), None);
+    assert_eq!(remaining(budget, Duration::ZERO), Some(budget));
+}
+
+#[test]
+fn a_request_that_cannot_be_built_is_reported_without_contacting_the_provider() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let idle = provider(Vec::new())?;
+    let sink = Sink::default();
+    let diagnostics: DiagnosticSink = Mutex::new(Box::new(sink.clone()));
+    AttemptControl {
+        transport: &idle.transport,
+        admitted: &fixture.provider,
+        attempt_id: [0; 16],
+        agr1_digest: AGR1,
+        timeout: Duration::from_secs(2),
+        active_wait: Duration::ZERO,
+        diagnostics: &diagnostics,
+    }
+    .reconcile(None);
+    assert!(sink.text().contains("provider reconcile failed"));
+    assert!(requests(idle)?.is_empty());
     Ok(())
 }

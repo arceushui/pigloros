@@ -164,7 +164,7 @@ impl GuestExecution {
 
     /// The digests the selector recomputes the reconciliation tuple from.
     #[must_use]
-    pub fn accepted_evidence(&self, attempt_id: [u8; 16]) -> Option<ReconciliationEvidenceFields> {
+    pub const fn accepted_evidence(&self, attempt_id: [u8; 16]) -> ReconciliationEvidenceFields {
         self.0.accepted_evidence(attempt_id)
     }
 

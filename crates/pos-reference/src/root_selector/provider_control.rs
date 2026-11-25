@@ -1,23 +1,26 @@
 //! The selector's SCQ1 and SRQ1 toward one provider attempt (ADR-069 R15
 //! §3.3 and §3.5; owner decisions on #1503).
 //!
-//! SRQ1 follows the terminal the selector wrote to the evaluator, while it
+//! SRQ1 follows every terminal the selector writes to the evaluator, while it
 //! still holds the accepted digests of the N8 recompute. SCQ1 follows an
-//! exhausted recovery. Every request ID and nonce is derived in code from the
-//! attempt, the operation and the retry index, so an exact repeat is
-//! byte-identical (R15 N11). The provider keeps at most 4 SCQ1/SRQ1 entries
-//! per attempt, so one call sends at most 4 distinct requests.
+//! exhausted recovery or an evaluator that hung up while the attempt ran.
+//! Every request ID and nonce is derived in code from the attempt, the
+//! operation and the retry index, so an exact repeat is byte-identical (R15
+//! N11). The provider keeps at most 4 SCQ1/SRQ1 entries per attempt, so one
+//! call sends at most 4 distinct requests, and all of them, with the exact
+//! repeat, share one overall budget: the provider holds a control-pool worker
+//! for each (R15 N13).
 
-use std::io::Write;
-use std::sync::PoisonError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::recovery_pending::report_diagnostic;
 use super::{DiagnosticSink, ProviderExecutor};
 use crate::provider_transport::ProviderControlError;
 use crate::sandbox_provider_protocol::{
-    AdmittedSandboxProvider, ReconciliationEvidenceFields, SandboxProviderProtocolError,
-    TerminalEvidenceCheck,
+    AdmittedSandboxProvider, ReconciliationEvidenceFields, SandboxAdmissionError,
+    SandboxProviderOperation, SandboxProviderProtocolError, TerminalEvidenceCheck,
 };
+use crate::selector::SelectorBoundaryError;
 
 const MAX_DISTINCT_REQUESTS: u8 = 4;
 /// The BHC1 limit ID of the provider's pending-response wait, in
@@ -29,24 +32,23 @@ const CONTROL_MARGIN: Duration = Duration::from_secs(5);
 const REQUEST_ID_DOMAIN: &[u8] = b"PiglorOS.SelectorControlRequestId.v1\0";
 const NONCE_DOMAIN: &[u8] = b"PiglorOS.SelectorControlNonce.v1\0";
 
-/// Which control request a derived identity belongs to.
-#[derive(Clone, Copy)]
-enum ControlOperation {
-    Cancel = 2,
-    Reconcile = 3,
-}
-
-fn derive(domain: &[u8], attempt_id: [u8; 16], operation: ControlOperation, index: u8) -> [u8; 16] {
+fn derive(
+    domain: &[u8],
+    attempt_id: [u8; 16],
+    operation: SandboxProviderOperation,
+    index: u8,
+) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
     hasher.update(&attempt_id);
-    hasher.update(&[operation as u8, index]);
+    hasher.update(&operation.wire_code().to_be_bytes());
+    hasher.update(&[index]);
     let mut identity = [0; 16];
     identity.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
     identity
 }
 
-/// The exchange budget of one control request: the provider waits up to
+/// The exchange budget of one control operation: the provider waits up to
 /// BHC1 limit 16 for a pending response, read here from the same installed
 /// caps, plus a fixed margin.
 pub(super) fn control_budget(admitted: &AdmittedSandboxProvider) -> Duration {
@@ -64,7 +66,7 @@ pub(super) struct AttemptControl<'a, T: ProviderExecutor> {
     pub(super) admitted: &'a AdmittedSandboxProvider,
     pub(super) attempt_id: [u8; 16],
     pub(super) agr1_digest: [u8; 32],
-    /// The exchange budget of one request (see [`control_budget`]).
+    /// The overall budget of SRQ1 (see [`control_budget`]).
     pub(super) timeout: Duration,
     /// How long the attempt itself may still run: SCQ1 waits for it to end
     /// before the provider's own interval starts (R15 §3.6 item 2(a)).
@@ -73,36 +75,25 @@ pub(super) struct AttemptControl<'a, T: ProviderExecutor> {
 }
 
 impl<T: ProviderExecutor> AttemptControl<'_, T> {
+    /// The request ID and nonce of retry `index` of `operation`.
+    fn identities(&self, operation: SandboxProviderOperation, index: u8) -> ([u8; 16], [u8; 16]) {
+        (
+            derive(REQUEST_ID_DOMAIN, self.attempt_id, operation, index),
+            derive(NONCE_DOMAIN, self.attempt_id, operation, index),
+        )
+    }
+
     /// Reconcile the attempt whose terminal the selector accepted, and
     /// report what the evidence check could and could not prove.
     pub(super) fn reconcile(&self, accepted: Option<&ReconciliationEvidenceFields>) {
-        let result = retrying(|index| {
+        let result = retrying(self.timeout, |index, left| {
+            let (request_id, nonce) = self.identities(SandboxProviderOperation::Reconcile, index);
             self.admitted
-                .reconcile_request(
-                    derive(
-                        REQUEST_ID_DOMAIN,
-                        self.attempt_id,
-                        ControlOperation::Reconcile,
-                        index,
-                    ),
-                    derive(
-                        NONCE_DOMAIN,
-                        self.attempt_id,
-                        ControlOperation::Reconcile,
-                        index,
-                    ),
-                    self.attempt_id,
-                    self.agr1_digest,
-                )
+                .reconcile_request(request_id, nonce, self.attempt_id, self.agr1_digest)
                 .map_err(protocol_failure)
                 .and_then(|(request, bytes)| {
-                    self.transport.reconcile(
-                        self.admitted,
-                        &request,
-                        &bytes,
-                        accepted,
-                        self.timeout,
-                    )
+                    self.transport
+                        .reconcile(self.admitted, &request, &bytes, accepted, left)
                 })
         });
         match result {
@@ -121,7 +112,7 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
     /// with no accepted terminal, because the selector wrote a terminal to
     /// the evaluator all the same (owner decisions on #1503).
     pub(super) fn settle_exhausted(&self) {
-        self.cancel(None);
+        self.cancel();
         self.reconcile(None);
     }
 
@@ -131,35 +122,17 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
         self.timeout.saturating_add(self.active_wait)
     }
 
-    /// Cancel the attempt after its recovery was exhausted.
-    fn cancel(&self, accepted_spy1_digest: Option<[u8; 32]>) {
-        let result = retrying(|index| {
+    /// Cancel the attempt: its recovery was exhausted, or the evaluator hung
+    /// up while it ran.
+    pub(super) fn cancel(&self) {
+        let result = retrying(self.cancel_budget(), |index, left| {
+            let (request_id, nonce) = self.identities(SandboxProviderOperation::Cancel, index);
             self.admitted
-                .cancel_request(
-                    derive(
-                        REQUEST_ID_DOMAIN,
-                        self.attempt_id,
-                        ControlOperation::Cancel,
-                        index,
-                    ),
-                    derive(
-                        NONCE_DOMAIN,
-                        self.attempt_id,
-                        ControlOperation::Cancel,
-                        index,
-                    ),
-                    self.attempt_id,
-                    self.agr1_digest,
-                )
+                .cancel_request(request_id, nonce, self.attempt_id, self.agr1_digest)
                 .map_err(protocol_failure)
                 .and_then(|(request, bytes)| {
-                    self.transport.cancel(
-                        self.admitted,
-                        &request,
-                        &bytes,
-                        accepted_spy1_digest,
-                        self.cancel_budget(),
-                    )
+                    self.transport
+                        .cancel(self.admitted, &request, &bytes, None, left)
                 })
         });
         if let Err(error) = result {
@@ -167,33 +140,49 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
         }
     }
 
-    /// One diagnostic line with the closed failure kind; it names no secret.
-    /// A sink that cannot be written changes nothing.
     fn report(&self, what: &str, error: &impl std::fmt::Display) {
-        writeln!(
-            self.diagnostics
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            "pos-root-selector: {what}: {error}"
-        )
-        .ok();
+        report_diagnostic(self.diagnostics, what, error);
     }
 }
 
 fn protocol_failure(error: SandboxProviderProtocolError) -> ProviderControlError {
-    ProviderControlError::from(crate::sandbox_provider_protocol::SandboxAdmissionError::from(error))
+    ProviderControlError::from(SandboxAdmissionError::from(error))
 }
 
-/// Send `attempt(index)`. An unreachable provider gets one exact repeat. A
-/// retryable refusal gets the next distinct request, up to the N11 bound.
+/// What remains of `budget` after `elapsed`, if anything.
+fn remaining(budget: Duration, elapsed: Duration) -> Option<Duration> {
+    budget.checked_sub(elapsed).filter(|left| !left.is_zero())
+}
+
+/// Only a transient failure of the exchange is worth one exact repeat; a
+/// replaced endpoint or a foreign process is not.
+const fn is_transient(error: SelectorBoundaryError) -> bool {
+    matches!(
+        error,
+        SelectorBoundaryError::SelectorUnavailable | SelectorBoundaryError::Io
+    )
+}
+
+/// Send `attempt(index, left)` within one overall `budget`. A transient
+/// failure gets one exact repeat. A retryable refusal gets the next distinct
+/// request, up to the N11 bound.
 fn retrying<R>(
-    mut attempt: impl FnMut(u8) -> Result<R, ProviderControlError>,
+    budget: Duration,
+    mut attempt: impl FnMut(u8, Duration) -> Result<R, ProviderControlError>,
 ) -> Result<R, ProviderControlError> {
+    let started = Instant::now();
     let mut index = 0;
     let mut repeated = false;
     loop {
-        match attempt(index) {
-            Err(ProviderControlError::Boundary(_)) if !repeated => repeated = true,
+        let Some(left) = remaining(budget, started.elapsed()) else {
+            return Err(ProviderControlError::Boundary(
+                SelectorBoundaryError::SelectorUnavailable,
+            ));
+        };
+        match attempt(index, left) {
+            Err(ProviderControlError::Boundary(error)) if !repeated && is_transient(error) => {
+                repeated = true;
+            }
             Err(ProviderControlError::Refused(refusal))
                 if refusal.is_retryable() && index + 1 < MAX_DISTINCT_REQUESTS =>
             {

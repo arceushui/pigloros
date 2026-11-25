@@ -209,9 +209,7 @@ impl AdmittedSandboxProvider {
             && error.request_id == Some(request.request_id)
             && error.request_digest == Some(request_digest)
             && error.attempt_id == Some(attempt_id);
-        bound
-            .then_some(error.code)
-            .ok_or(SandboxAdmissionError::ConformanceMismatch)
+        bound.then_some(error.code).ok_or_else(contradiction)
     }
 
     fn require_runtime_key_id(&self, key_id: &str) -> Result<(), SandboxAdmissionError> {

@@ -315,3 +315,100 @@ fn a_foreign_key_id_is_refused_before_the_signature_is_verified() -> TestResult 
     );
     Ok(())
 }
+
+/// An SPE1 for `operation` answering `request`, with code 15.
+fn spe1(
+    fixture: &TransportAdmissionFixture,
+    operation: u64,
+    request: &SandboxReconcileRequest,
+    attempt_id: [u8; 16],
+    key: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fixture.sign_runtime_record(
+        "SPE1",
+        Value::Array(vec![
+            Value::Text("SPE1".to_owned()),
+            uint(1),
+            uint(operation),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.request_digest.to_vec()),
+            Value::Bytes(attempt_id.to_vec()),
+            uint(15),
+            Value::Null,
+            key,
+        ]),
+    )
+}
+
+#[test]
+fn an_spe1_must_bind_the_operation_the_request_the_digest_and_the_attempt() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let provider = &fixture.provider;
+    let (request, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let check = |bytes: &[u8], operation| {
+        provider.authenticate_control_error(
+            bytes,
+            operation,
+            &request.request,
+            request.request_digest,
+            ATTEMPT,
+        )
+    };
+    let bound = spe1(&fixture, 3, &request, ATTEMPT, key_id(&fixture))?;
+    assert_eq!(
+        check(&bound, SandboxProviderOperation::Reconcile),
+        Ok(SandboxProviderErrorCode::UnknownAttempt)
+    );
+    // The same bytes answer no cancel request.
+    assert_eq!(
+        check(&bound, SandboxProviderOperation::Cancel),
+        Err(contradiction())
+    );
+    let cancel = spe1(&fixture, 2, &request, ATTEMPT, key_id(&fixture))?;
+    assert_eq!(
+        check(&cancel, SandboxProviderOperation::Cancel),
+        Ok(SandboxProviderErrorCode::UnknownAttempt)
+    );
+    let other_attempt = spe1(&fixture, 3, &request, [98; 16], key_id(&fixture))?;
+    assert_eq!(
+        check(&other_attempt, SandboxProviderOperation::Reconcile),
+        Err(contradiction())
+    );
+    Ok(())
+}
+
+#[test]
+fn an_spe1_is_refused_for_a_forged_signature_a_foreign_key_or_garbage() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let provider = &fixture.provider;
+    let (request, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let check = |bytes: &[u8]| {
+        provider.authenticate_control_error(
+            bytes,
+            SandboxProviderOperation::Reconcile,
+            &request.request,
+            request.request_digest,
+            ATTEMPT,
+        )
+    };
+    let bound = spe1(&fixture, 3, &request, ATTEMPT, key_id(&fixture))?;
+    assert_eq!(
+        check(&flip_last_byte(bound)),
+        Err(SandboxAdmissionError::Protocol(
+            SandboxProviderProtocolError::SignatureInvalid
+        ))
+    );
+    let foreign = spe1(
+        &fixture,
+        3,
+        &request,
+        ATTEMPT,
+        Value::Text("foreign".to_owned()),
+    )?;
+    assert_eq!(
+        check(&flip_last_byte(foreign)),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    assert!(check(b"not cbor").is_err());
+    Ok(())
+}

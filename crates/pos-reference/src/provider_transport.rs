@@ -175,8 +175,12 @@ struct ConnectedInstallationUpdate {
 /// Complete provider evidence authenticated against an admitted selector provider.
 #[derive(Debug)]
 pub(crate) struct AuthenticatedProviderExecution {
-    frames: AuthenticatedProviderFrames,
+    frames: Box<AuthenticatedProviderFrames>,
     agr1_digest: [u8; 32],
+    /// The self-digest of the authenticated terminal SPY1.
+    spy1_digest: [u8; 32],
+    /// The self-digest of the last SAU1 of the authenticated chain.
+    final_sau1_digest: [u8; 32],
     output: Option<StagedProviderOutput>,
 }
 
@@ -228,6 +232,9 @@ pub(crate) trait ProviderRequestAdmission {
 
     /// Release the pre-entry fence after request bytes and write EOF are sent.
     fn entered(&mut self);
+
+    /// The transport authenticated the AGR1 of this attempt.
+    fn granted(&mut self, _agr1_digest: [u8; 32]) {}
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -253,13 +260,15 @@ impl AuthenticatedProviderExecution {
         output: Option<(tempfile::NamedTempFile, PayloadDescriptor)>,
     ) -> Self {
         Self {
-            frames: AuthenticatedProviderFrames::new(
+            frames: Box::new(AuthenticatedProviderFrames::new(
                 grant_frame,
                 receipt_frame,
                 result_frame,
                 audit_frames,
-            ),
+            )),
             agr1_digest: [7; 32],
+            spy1_digest: [8; 32],
+            final_sau1_digest: [9; 32],
             output: output.map(|(file, descriptor)| StagedProviderOutput::new(file, descriptor)),
         }
     }
@@ -272,21 +281,18 @@ impl AuthenticatedProviderExecution {
 
     /// The digests the selector recomputes the reconciliation tuple from
     /// (ADR-069 R15 §3.5): this grant, the terminal SPY1 and the last SAU1.
-    ///
-    /// `None` only when a retained frame carries no self-digest, which an
-    /// authenticated frame always does.
+    /// All three were captured when their records were authenticated.
     #[must_use]
-    pub(crate) fn accepted_evidence(
+    pub(crate) const fn accepted_evidence(
         &self,
         attempt_id: [u8; 16],
-    ) -> Option<ReconciliationEvidenceFields> {
-        let final_sau1 = self.frames.sau1().last()?;
-        Some(ReconciliationEvidenceFields {
+    ) -> ReconciliationEvidenceFields {
+        ReconciliationEvidenceFields {
             attempt_id,
             agr1_digest: self.agr1_digest,
-            terminal_spy1_digest: record_self_digest(self.frames.spy1())?,
-            final_sau1_digest: record_self_digest(final_sau1)?,
-        })
+            terminal_spy1_digest: self.spy1_digest,
+            final_sau1_digest: self.final_sau1_digest,
+        }
     }
 
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
@@ -1074,6 +1080,7 @@ impl ProviderTransport {
                             &first,
                         )
                         .and_then(|grant| {
+                            progress.admission.granted(grant.grant_digest());
                             write_input(&mut stream, request, input, deadline)
                                 .and_then(|()| {
                                     stream
@@ -1374,7 +1381,8 @@ fn read_admitted_response(
                 admitted
                     .authenticate_audit_chain(&audit_bytes, &receipt, &result)
                     .map_err(receive_invalid)
-                    .map(|_| {
+                    .map(|records| {
+                        let final_sau1 = records.last().map_or([0; 32], |last| last.record_digest);
                         (
                             grant,
                             audit_bytes,
@@ -1383,21 +1391,33 @@ fn read_admitted_response(
                             chunks,
                             result_bytes,
                             result,
+                            final_sau1,
                         )
                     })
             },
         )
         .and_then(
-            |(grant, audit_bytes, receipt_bytes, file, chunks, result_bytes, result)| {
+            |(
+                grant,
+                audit_bytes,
+                receipt_bytes,
+                file,
+                chunks,
+                result_bytes,
+                result,
+                final_sau1,
+            )| {
                 stage_output(file, chunks, request, &result).map(|output| {
                     AuthenticatedProviderTerminal::Execution(AuthenticatedProviderExecution {
-                        frames: AuthenticatedProviderFrames::new(
+                        frames: Box::new(AuthenticatedProviderFrames::new(
                             grant_bytes,
                             receipt_bytes,
                             result_bytes,
                             audit_bytes,
-                        ),
+                        )),
                         agr1_digest: grant.grant_digest(),
+                        spy1_digest: result.result_digest(),
+                        final_sau1_digest: final_sau1,
                         output,
                     })
                 })
@@ -1652,17 +1672,6 @@ fn record_magic(bytes: &[u8]) -> Result<String, ReceiveFailure> {
         return Err(ReceiveFailure::Invalid);
     };
     Ok(magic.clone())
-}
-
-/// The trailing self-digest of one `[unsigned, digest, ..]` record frame.
-fn record_self_digest(bytes: &[u8]) -> Option<[u8; 32]> {
-    let Ok(Value::Array(wrapper)) = ciborium::from_reader::<Value, _>(bytes) else {
-        return None;
-    };
-    match wrapper.get(1) {
-        Some(Value::Bytes(digest)) => digest.as_slice().try_into().ok(),
-        _ => None,
-    }
 }
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ReceiveFailure> {
@@ -2879,6 +2888,32 @@ mod tests {
             })?
             .ok_or("authenticated output missing")?;
         assert_eq!(output, b"output");
+        // The digests the selector recomputes the reconciliation tuple from
+        // are the authenticated records' own self-digests.
+        let grant = fixture.provider.authenticate_selector_grant(
+            &fixture.agr1,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
+        let accepted = execution.accepted_evidence([5; 16]);
+        assert_eq!(accepted.attempt_id, [5; 16]);
+        assert_eq!(accepted.agr1_digest, grant.grant_digest());
+        assert_eq!(
+            accepted.terminal_spy1_digest,
+            crate::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+                &fixture.spy1
+            )?
+            .result_digest()
+        );
+        let last_sau1 = fixture.sau1.last().ok_or("no SAU1")?;
+        let Value::Array(wrapper) = ciborium::from_reader::<Value, _>(last_sau1.as_slice())? else {
+            return Err("SAU1 wrapper is not an array".into());
+        };
+        let Some(Value::Bytes(digest)) = wrapper.get(1) else {
+            return Err("SAU1 digest missing".into());
+        };
+        assert_eq!(accepted.final_sau1_digest.as_slice(), digest.as_slice());
+        assert_ne!(accepted.final_sau1_digest, [0; 32]);
         provider.join().map_err(|_| "provider thread panicked")??;
         Ok(())
     }
