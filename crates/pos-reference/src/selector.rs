@@ -1223,7 +1223,10 @@ mod tests {
                 )
             });
             let mut attempt = selector_attempt();
-            attempt.watchdog_ms = 10_000;
+            // The test streams 129 MiB twice and asserts the oversize
+            // classification, not expiry, so the watchdog must outlast a
+            // sanitizer-slowed stream.
+            attempt.watchdog_ms = 120_000;
             let mut adapter = SelectorAdapter::new(selector_request()?)?;
             adapter.set_case_ordinal(0);
             assert_eq!(
