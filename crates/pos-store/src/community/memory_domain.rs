@@ -25,6 +25,8 @@ use super::erasure_budget::{CommunityErasureContextV1, CommunityPendingReservati
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 #[cfg(target_os = "linux")]
+use super::pass_abort::CommittedPassAbortV1;
+#[cfg(target_os = "linux")]
 use super::pass_install::CommunityHorizonPolicyV1;
 #[cfg(target_os = "linux")]
 use super::pass_record::CommunityPassRecordV1;
@@ -208,6 +210,10 @@ pub struct MemoryCommunityDomainV1 {
     /// consumes it (R10.7 5h).
     #[cfg(target_os = "linux")]
     pub(super) burned_materialization: Option<u64>,
+    /// Every committed pass Abort by `(T, reservation operation ID)`, its
+    /// retry key (ADR-129 R15.3(2) step 4).
+    #[cfg(target_os = "linux")]
+    pub(super) pass_aborts: BTreeMap<(TimelineId, [u8; 16]), CommittedPassAbortV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -264,6 +270,8 @@ impl MemoryCommunityDomainV1 {
                 pass_horizons: None,
                 #[cfg(target_os = "linux")]
                 burned_materialization: None,
+                #[cfg(target_os = "linux")]
+                pass_aborts: BTreeMap::new(),
             })
         }
     }
