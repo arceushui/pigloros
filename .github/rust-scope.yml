@@ -38,3 +38,27 @@ owner_windows:
   - .github/rust-scope.yml
   - scripts/*owner*
   - scripts/*cargo_crap*
+# The Linux owner U-tier (ADR-110 E20, Redmine #1476) runs on a pull request only
+# when it changes a path the lane builds, runs or exports, or a gate that
+# consumes its evidence. A base revision without this key, or failed change
+# detection, runs the lane.
+owner_uhid:
+  - crates/pos-owner-ctap/**
+  - crates/pos-owner-bridge/**
+  - crates/pos-owner-bridge-codec/**
+  - Cargo.toml
+  - Cargo.lock
+  - rust-toolchain.toml
+  - .cargo/**
+  - .config/**
+  - clippy.toml
+  - .clippy.toml
+  - rustfmt.toml
+  - .rustfmt.toml
+  - covgate.toml
+  - .gitattributes
+  - .github/workflows/owner-ctap-uhid.yml
+  - .github/workflows/ci.yml
+  - .github/rust-scope.yml
+  - scripts/*owner*
+  - scripts/*cargo_crap*
