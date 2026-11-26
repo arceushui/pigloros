@@ -96,11 +96,13 @@ PRINCIPAL_GRANTS = ["session.read", "timeline.create", "timeline.events.read"]
 # The operations the `authorized-consented` fixture Principal is granted (#309), sorted; its one
 # consent governs `timeline.create`.
 CONSENTED_GRANTS = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
-# The operations the `authorized-rooms` fixture Principal is granted (#303), sorted; its one
-# consent, export permitted, governs `timeline.create`, is named as a room's
-# `privacy_export_ref` and may be revoked.
+# The operations the `authorized-rooms` fixture Principal is granted (#303, and the Decision
+# Preview grants of #305), sorted; its one consent, export permitted, governs `timeline.create`,
+# is named as a room's `privacy_export_ref` and may be revoked.
 ROOM_GRANTS = [
     "consent.revoke",
+    "decision-preview.create",
+    "decision-preview.read",
     "scenario-room.create",
     "scenario-room.derive",
     "scenario-room.read",
@@ -128,12 +130,19 @@ ROUTE_CAPABILITY = {
     "rooms": "scenario-room.create",
     "revisions": "scenario-room.derive",
     "revision": "scenario-room.read",
+    "previews": "decision-preview.create",
+    "preview": "decision-preview.read",
 }
 CAPABILITIES = tuple(sorted(ROUTE_CAPABILITY.values()))
 # The Events a `201` response of a route commits (requirements section 5): a room create or
 # derive appends its request claim and the revision.
 COMMITTED_EVENTS = {"signals": 1, "actions": 1, "revoke": 1, "rooms": 2, "revisions": 2}
 MAX_TIMELINES = 64  # README "Timeline bound"
+PREVIEWS_PATH = "/v1/decision-previews"
+# The problem `instance` of the getDecisionPreview route: its route template.
+PREVIEW_INSTANCE = f"{PREVIEWS_PATH}/{{preview_id}}"
+# A Decision Preview ID no fixture Gateway holds.
+UNKNOWN_PREVIEW = "01JC0GATEWAYW90PREV1EW0099"
 EVENT_LIMIT = 100  # README "Polling": limit defaults to and may not exceed 100
 
 
@@ -158,6 +167,10 @@ def route_of(path: str) -> str | None:
         return "revisions"
     if re.fullmatch(r"/v1/scenario-rooms/[^/]+/revisions/[1-9][0-9]*", base):
         return "revision"
+    if base == PREVIEWS_PATH:
+        return "previews"
+    if re.fullmatch(r"/v1/decision-previews/[^/]+", base):
+        return "preview"
     return "rooms" if base == "/v1/scenario-rooms" else None
 
 
@@ -797,6 +810,41 @@ def erasure_exchanges() -> list[Exchange]:
     ]
 
 
+def preview_request(profile_id: str | None = "deterministic-local-v1", version: int = 1) -> dict:
+    """A `createDecisionPreview` body naming input revisions no fixture Gateway holds; without
+    `profile_id` when it is None."""
+    def reference(identifier: str) -> dict:
+        return {"id": identifier, "revision": 1, "digest": "ab" * 32}
+
+    body = {
+        "schema_version": version,
+        "scenario_room": reference("01JC0GATEWAYW9R00M00000001"),
+        "preference": reference("01JC0GATEWAYW9PREF0000001A"),
+        "option_spec": reference("01JC0GATEWAYW9QPT10N00001A"),
+    }
+    if profile_id is not None:
+        body["profile_id"] = profile_id
+    return body
+
+
+def create_preview(expect: dict, actor: bool = True, **request) -> Exchange:
+    """`createDecisionPreview` (#305); every request carries the sub-case ID as its
+    Idempotency-Key."""
+    return Exchange(
+        "loopback",
+        "POST",
+        PREVIEWS_PATH,
+        expect,
+        actor=actor,
+        body=preview_request(**request),
+        has_body=True,
+    )
+
+
+def read_preview(expect: dict) -> Exchange:
+    return Exchange("loopback", "GET", f"{PREVIEWS_PATH}/{UNKNOWN_PREVIEW}", expect, actor=True)
+
+
 # --- Sub-cases, one list per family ---
 
 
@@ -1004,6 +1052,24 @@ def denied_subcases() -> list[SubCase]:
             "authorized-erasure-expired",
             [request_erasure(problem(503, "temporarily-unavailable", ERASURES_PATH))],
         ),
+        SubCase(
+            "den.13",
+            "a Decision Preview without the actor header is unauthenticated",
+            "authorized-rooms",
+            [create_preview(problem(401, "unauthenticated", PREVIEWS_PATH), actor=False)],
+        ),
+        SubCase(
+            "den.14",
+            "without the Decision Preview grant a request is unauthorized",
+            "authorized",
+            [create_preview(problem(403, "unauthorized", PREVIEWS_PATH))],
+        ),
+        SubCase(
+            "den.15",
+            "an unknown Decision Preview is not found",
+            "authorized-rooms",
+            [read_preview(problem(404, "not-found-or-unavailable", PREVIEW_INSTANCE))],
+        ),
     ]
 
 
@@ -1074,6 +1140,15 @@ def malformed_subcases() -> list[SubCase]:
                     problem(400, "invalid-request", ERASURE_INSTANCE),
                     path=f"{ERASURES_PATH}/not-an-erasure",
                 ),
+            ],
+        ),
+        SubCase(
+            "mal.7",
+            "a Decision Preview without a profile or of schema version 2 is refused",
+            "authorized-rooms",
+            [
+                create_preview(problem(400, "invalid-request", PREVIEWS_PATH), profile_id=None),
+                create_preview(problem(400, "unsupported-version", PREVIEWS_PATH), version=2),
             ],
         ),
     ]
@@ -1154,6 +1229,18 @@ def downgrade_subcases() -> list[SubCase]:
                     routed_problem(403, "unauthorized", ACTIONS_PATH), capability="world.action.submit"
                 ),
                 poll(EMPTY_PAGE, actor=True),
+            ],
+        ),
+        SubCase(
+            "dgr.3",
+            "a Decision Preview of a profile with no installed EPF1 is refused with no fallback",
+            "authorized-rooms",
+            [
+                create_preview(problem(409, "incompatible-profile", PREVIEWS_PATH)),
+                create_preview(
+                    problem(409, "incompatible-profile", PREVIEWS_PATH),
+                    profile_id="deterministic-air-gapped-v1",
+                ),
             ],
         ),
     ]
@@ -1660,7 +1747,7 @@ def check_normalization() -> None:
         if normalize(substitute(kept, captured)) != kept:
             raise SystemExit(f"the room normalization changes {kept}")
     check_erasure_normalization(ulid)
-    for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES), UNKNOWN_ERASURE):
+    for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES), UNKNOWN_ERASURE, UNKNOWN_PREVIEW):
         if not re.fullmatch(ULID_PATTERN, constant):
             raise SystemExit(f"{constant} is not a ULID")
     if ulid_text(bytes(15) + bytes([33])) != "0" * 24 + "11":
