@@ -573,21 +573,30 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_rejects_ignored_missing_archive_upload(self) -> None:
         def ignore_missing_archive(workflow: dict) -> None:
-            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload = next(
+                step for step in workflow["jobs"]["asan-build"]["steps"]
+                if step.get("name") == "Upload ASan test archive"
+            )
             upload["with"]["if-no-files-found"] = "ignore"
 
         self.assert_rejected(ignore_missing_archive)
 
     def test_requires_exact_archive_retention(self) -> None:
         def shorten_retention(workflow: dict) -> None:
-            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload = next(
+                step for step in workflow["jobs"]["asan-build"]["steps"]
+                if step.get("name") == "Upload ASan test archive"
+            )
             upload["with"]["retention-days"] = 1
 
         self.assert_rejected(shorten_retention)
 
     def test_requires_archive_overwrite_on_rerun(self) -> None:
         def keep_stale_archive(workflow: dict) -> None:
-            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload = next(
+                step for step in workflow["jobs"]["asan-build"]["steps"]
+                if step.get("name") == "Upload ASan test archive"
+            )
             upload["with"]["overwrite"] = False
 
         self.assert_rejected(keep_stale_archive)
@@ -609,7 +618,7 @@ class AsanCiPolicyTests(unittest.TestCase):
         def rebuild_in_shard(workflow: dict) -> None:
             step = self.asan_step(workflow)
             step["run"] = step["run"].replace(
-                '  --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"\n',
+                '  --archive-file "${archive_file}"\n',
                 "  --workspace --all-features --locked\n",
             )
 
@@ -661,7 +670,6 @@ class AsanCiPolicyTests(unittest.TestCase):
                 "binary_id(pos-conformance::profile_contract_public) | "
                 "binary_id(pos-conformance::provider_contract_public))"
             )
-            # This fixture must also reject the historically accepted workflow.
             step["run"] = step["run"].replace(complete, partial)
             self.assertIn(partial, step["run"])
 
@@ -1086,24 +1094,27 @@ class AsanCiPolicyTests(unittest.TestCase):
             return recorded, completed.stdout
 
     def test_shard_partitions_follow_the_package_scope(self) -> None:
-        conformance_only = ("bundle-coverage", "bundle-public-1", "bundle-public-2", "moat-proof")
+        conformance_only = (
+            "bundle-coverage", "bundle-public-1", "bundle-public-2", "moat-proof",
+            "conformance-remainder",
+        )
         for shard in (*conformance_only, "remainder-1", "remainder-2"):
             with self.subTest(shard=shard, scope="workspace"):
                 calls, _ = self.run_shard(shard, "--workspace")
-                cargo = [call for call in calls if call[0] == "cargo"]
-                self.assertEqual(len(cargo), 2 if shard == "remainder-1" else 1)
+                cargo = [call for call in calls if call[0] == "cargo" and "nextest" in call and "run" in call]
+                self.assertEqual(len(cargo), 1)
                 for call in cargo:
                     self.assertNotIn("--no-tests=pass", call)
                 self.assertEqual(calls[-1][0], "python")
             with self.subTest(shard=shard, scope="with conformance"):
                 calls, _ = self.run_shard(shard, "-p pos-core -p pos-conformance")
-                cargo = [call for call in calls if call[0] == "cargo"]
-                self.assertEqual(len(cargo), 2 if shard == "remainder-1" else 1)
+                cargo = [call for call in calls if call[0] == "cargo" and "nextest" in call and "run" in call]
+                self.assertEqual(len(cargo), 1)
                 for call in cargo:
                     self.assertIn("--no-tests=pass", call)
             with self.subTest(shard=shard, scope="without conformance"):
                 calls, output = self.run_shard(shard, "-p pos-core -p pos-conformance-extra")
-                cargo = [call for call in calls if call[0] == "cargo"]
+                cargo = [call for call in calls if call[0] == "cargo" and "nextest" in call and "run" in call]
                 if shard in conformance_only:
                     self.assertEqual(cargo, [])
                     self.assertIn("pos-conformance is not in the affected packages", output)

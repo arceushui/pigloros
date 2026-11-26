@@ -33,9 +33,13 @@ SCOPED_PACKAGES = (
 )
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
+archive_file="${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
+if [[ "${ASAN_SHARD}" != remainder-1 && "${ASAN_SHARD}" != remainder-2 ]]; then
+  archive_file="${RUNNER_TEMP}/asan-archive/asan-conformance-tests.tar.zst"
+fi
 nextest_args=(
   +nightly-2026-07-01 nextest run
-  --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
+  --archive-file "${archive_file}"
   --extract-to "${GITHUB_WORKSPACE}"
   --extract-overwrite
   --workspace-remap "${GITHUB_WORKSPACE}"
@@ -85,12 +89,14 @@ case "${ASAN_SHARD}" in
   remainder-1)
     run_asan_partition -E 'not package(pos-conformance)' \\
       --partition slice:1/2
-    run_conformance_partition \\
-      -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
     ;;
   remainder-2)
     run_asan_partition -E 'not package(pos-conformance)' \\
       --partition slice:2/2
+    ;;
+  conformance-remainder)
+    run_conformance_partition \\
+      -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
     ;;
   *)
     printf 'unknown ASan shard: %s\\n' "${ASAN_SHARD}" >&2
@@ -100,6 +106,7 @@ esac 2>&1 | tee "${RUNNER_TEMP}/asan.log"
 python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
 """
 ARCHIVE_ARTIFACT = "asan-nextest-archive"
+CONFORMANCE_ARCHIVE_ARTIFACT = "asan-conformance-nextest-archive"
 EXPECTED_BUILD_COMMAND = """set -euo pipefail
 read -ra packages <<<"${CARGO_PACKAGES}"
 RUSTFLAGS="-Z sanitizer=address" \\
@@ -182,6 +189,20 @@ EXPECTED_BUILD_JOB = {
             "run": EXPECTED_BUILD_COMMAND,
         },
         {
+            "name": "cargo nextest archive for conformance shards",
+            "id": "conformance-archive",
+            "if": "${{ needs.ci_change_scope.outputs.conformance == 'true' }}",
+            "env": EXPECTED_BUILD_ENV,
+            "run": """set -euo pipefail
+read -ra packages <<<"${CARGO_PACKAGES}"
+RUSTFLAGS="-Z sanitizer=address" \\
+  cargo +nightly-2026-07-01 nextest archive "${packages[@]}" --all-features \\
+  --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \\
+  -E 'package(pos-conformance)' \\
+  --archive-file "${RUNNER_TEMP}/asan-conformance-tests.tar.zst"
+""",
+        },
+        {
             "name": "Upload ASan test archive",
             "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
             "with": {
@@ -189,6 +210,19 @@ EXPECTED_BUILD_JOB = {
                 "path": "${{ runner.temp }}/asan-tests.tar.zst",
                 "retention-days": 3,
                 "if-no-files-found": "error",
+                "overwrite": True,
+                "compression-level": 0,
+            },
+        },
+        {
+            "name": "Upload conformance ASan test archive",
+            "if": "${{ steps.conformance-archive.outcome == 'success' }}",
+            "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+            "with": {
+                "name": CONFORMANCE_ARCHIVE_ARTIFACT,
+                "path": "${{ runner.temp }}/asan-conformance-tests.tar.zst",
+                "retention-days": 3,
+                "if-no-files-found": "ignore",
                 "overwrite": True,
                 "compression-level": 0,
             },
@@ -228,6 +262,7 @@ EXPECTED_STRATEGY = {
         "shard": [
             "remainder-1",
             "remainder-2",
+            "conformance-remainder",
             "bundle-coverage",
             "bundle-public-1",
             "bundle-public-2",
@@ -291,6 +326,7 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
     {
         "name": "Download ASan test archive",
         "id": "download-asan-archive",
+        "if": "${{ matrix.shard == 'remainder-1' || matrix.shard == 'remainder-2' }}",
         "continue-on-error": True,
         "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
@@ -305,6 +341,25 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
         "if": "steps.download-asan-archive.outcome == 'failure'",
         "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
+    },
+    {
+        "name": "Download conformance ASan test archive",
+        "id": "download-conformance-archive",
+        "if": "${{ matrix.shard != 'remainder-1' && matrix.shard != 'remainder-2' && needs.ci_change_scope.outputs.conformance == 'true' }}",
+        "continue-on-error": True,
+        "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+        "with": {"name": CONFORMANCE_ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
+    },
+    {
+        "name": "Clear the failed conformance archive download",
+        "if": "steps.download-conformance-archive.outcome == 'failure'",
+        "run": 'rm -rf -- "${RUNNER_TEMP}/asan-archive"',
+    },
+    {
+        "name": "Retry conformance ASan test archive download",
+        "if": "steps.download-conformance-archive.outcome == 'failure'",
+        "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+        "with": {"name": CONFORMANCE_ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
     },
 ]
 SETUP_STEP_COUNT = len(EXPECTED_SETUP_STEPS)
