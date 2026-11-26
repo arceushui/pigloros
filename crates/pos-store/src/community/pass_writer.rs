@@ -290,7 +290,7 @@ impl MemoryCommunityDomainV1 {
         let bound = input.minted.as_ref().map_or(0, |minted| minted.rows);
         let key = (input.timeline, input.reservation_operation_id);
         let (cri1, horizons) = self.check_identity(&input, key)?;
-        let state = self.state_for(&input)?;
+        let state = self.state_under_profile(&input)?;
         self.recheck_reserve(&input, state, horizons)?;
         // The Reserve allocates its native producer ordinal and its pass
         // ordinal in its own transaction (annex §4). Nothing is burned here.
@@ -328,10 +328,16 @@ impl MemoryCommunityDomainV1 {
         })
     }
 
-    /// T's pass state (`EvidenceUnavailable` with none), which T must have
-    /// been initialized under the profile the request names
-    /// (`InvalidBinding`).
-    fn state_for(&self, input: &CommunityReserveInputV1) -> Result<&CommunityPassStateV1, Error> {
+    /// T's pass state, checked against the request's profile.
+    ///
+    /// Returns `EvidenceUnavailable` with no pass state and `InvalidBinding`
+    /// when T was initialized under another profile than the request names.
+    /// [`Self::recheck_reserve`] relies on this and does not compare the
+    /// profile again.
+    fn state_under_profile(
+        &self,
+        input: &CommunityReserveInputV1,
+    ) -> Result<&CommunityPassStateV1, Error> {
         let state = self
             .pass_states
             .get(&input.timeline)
@@ -434,6 +440,9 @@ impl MemoryCommunityDomainV1 {
     /// Logical Head and chain (12), the decision bound (13), the
     /// generation (5), the head, counters and reuse horizon (6), the budget
     /// (6), the quarantine (9) and the caps (14, 19).
+    ///
+    /// The state is the one [`Self::state_under_profile`] returned, so T was
+    /// initialized under the profile the request names.
     fn recheck_reserve(
         &self,
         input: &CommunityReserveInputV1,
@@ -802,9 +811,9 @@ impl MemoryCommunityDomainV1 {
 ///
 /// One member digest row per due member, ascending by roster index,
 /// `n_due + 1` trace rows, `F_p` of two targets each, two distinct key IDs,
-/// and no more minted rows than pass rows. An invalid CRI1 (a zero digest or identity, a requested horizon
-/// outside `1..=i64::MAX`) is 3: a `run_pass` refusal never gives 2
-/// (R10.4(2)).
+/// and no more minted rows than pass rows. An invalid CRI1 (a zero digest or
+/// identity, a requested horizon outside `1..=i64::MAX`) is 3: a `run_pass`
+/// refusal never gives 2 (R10.4(2)).
 fn check_binding(input: &CommunityReserveInputV1) -> Result<CommunityReservationRequestV1, Error> {
     let request = input.request;
     let facts = &input.pass;
