@@ -4303,10 +4303,10 @@ impl PluginRegistry {
             .map_err(|reason| {
                 ActionRejectionOriginV1::Registry.action_submission_rejection(reason)
             })?;
-        let approved = approver.approve(proposal).map_err(|reason| {
+        let raw_draft = approver.approve(proposal).map_err(|reason| {
             ActionRejectionOriginV1::Approver.action_submission_rejection(reason)
         })?;
-        let draft = Self::validate_approver_draft(proposal, approved).map_err(|reason| {
+        let draft = Self::validate_approver_draft(proposal, raw_draft).map_err(|reason| {
             ActionRejectionOriginV1::ApprovedOutput.action_submission_rejection(reason)
         })?;
         admission.validate_action(&draft).map_err(|error| {
