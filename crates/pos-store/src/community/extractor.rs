@@ -37,11 +37,11 @@ use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityArtifactHeaderInputV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityClassificationProofV1, CommunityEncryptedEnvelopeV1,
     CommunityGraphRootV1, CommunityInitializationProducerV1, CommunityInputIndexV1,
-    CommunityLifecycleErrorV1 as Error, CommunityLocatorProducerV1, CommunityMetadataSchemaV1,
-    CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1, CommunityNativeNodeV1,
-    CommunityPassFailureV1, CommunityProtectedObjectV1, CommunitySelectedHeadV1,
-    CommunityStateContentV1, CommunityStateProducerV1, CommunityStateRevisionV1,
-    CommunityTypedInputRefV1,
+    CommunityInvocationFailureV1, CommunityLifecycleErrorV1 as Error, CommunityLocatorProducerV1,
+    CommunityMetadataSchemaV1, CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1,
+    CommunityNativeNodeV1, CommunityPassFailureV1, CommunityPassKeyV1, CommunityProtectedObjectV1,
+    CommunitySelectedHeadV1, CommunityStateContentV1, CommunityStateProducerV1,
+    CommunityStateRevisionV1, CommunityTypedInputRefV1,
 };
 use pos_core::{
     ArtifactChildEdgeV1, ArtifactRegistrationV1, AuthorityTrustRootSealV1, Hash, TimelineId,
@@ -119,6 +119,25 @@ pub enum CommunityArtifactBatchFormV1<'a> {
     Closure(CommunityArtifactBatchInputV1<'a>),
     /// A `LifecycleControl` control-record batch.
     Control(CommunityControlBatchInputV1<'a>),
+}
+
+/// One pass control batch (ADR-129 revision 15, R15.1(6)): the CFO1 and the
+/// CFI1s of one failed pass, `LifecycleControl` COW1s of one CPK1 under the
+/// pass's CSB1 cover, with no CGR1.
+#[derive(Clone, Copy)]
+pub struct CommunityPassControlBatchInputV1<'a> {
+    /// The aborted pass; every record's `PassKey` is this CPK1.
+    pub pass_key: CommunityPassKeyV1,
+    /// The COB1 commitment every CAR1 binds.
+    pub owner_binding_digest: Hash,
+    /// The pass CSB1 digest every record's COH1 cover must equal.
+    pub scope_cover_digest: Hash,
+    /// Every COW1 of the batch: the CFO1 and exactly the CFI1s it lists.
+    pub records: &'a [CommunityArtifactRecordInputV1<'a>],
+    /// The CSI1 row's current `selected_head_or_null`.
+    pub current_head: Hash,
+    /// The CPR1 predecessor head.
+    pub expected_head: Hash,
 }
 
 /// An owner-verified complete community closure or control batch, ready
@@ -309,6 +328,188 @@ fn prepare_control(
             records,
             graph_root_digest: None,
         })
+}
+
+/// Verify one pass control batch and prepare it (R15.1(6), R15.4).
+///
+/// Only the trusted composition root, which holds the
+/// [`AuthorityTrustRootSealV1`], prepares a batch:
+///
+/// ```compile_fail,E0061
+/// use pos_store::community::{
+///     prepare_community_pass_control_batch_v1, CommunityArtifactProtectorV1,
+///     CommunityPassControlBatchInputV1,
+/// };
+/// fn forge(input: CommunityPassControlBatchInputV1<'_>, keys: &[&CommunityArtifactProtectorV1]) {
+///     let _ = prepare_community_pass_control_batch_v1(input, keys);
+/// }
+/// ```
+///
+/// # Errors
+/// Returns `StaleFrontier` when the current head is not the CPR1
+/// predecessor head; `EvidenceUnavailable` when no key handle owns a
+/// record's operation; the codec refusal for a malformed record; and
+/// `InvalidBinding` for any header, key, CAR1, ARD1 or owner-binding
+/// mismatch, a record that is not a CFO1 or a CFI1 of this pass under the
+/// pass cover, and a batch that is not exactly one CFO1 and the CFI1s it
+/// lists, with the children R15.4 derives.
+pub fn prepare_community_pass_control_batch_v1(
+    _seal: &'static AuthorityTrustRootSealV1,
+    input: CommunityPassControlBatchInputV1<'_>,
+    keys: &[&CommunityArtifactProtectorV1],
+) -> Result<CommunityArtifactBatchV1, Error> {
+    if input.current_head != input.expected_head {
+        return Err(Error::StaleFrontier);
+    }
+    let binding = BatchBinding {
+        timeline: input.pass_key.timeline(),
+        generation: input.pass_key.generation(),
+        owner_binding_digest: input.owner_binding_digest,
+    };
+    let read = input
+        .records
+        .iter()
+        .map(|record| {
+            authenticate(*record, binding, keys)
+                .and_then(|authenticated| read_pass_failure(authenticated, &input))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    check_pass_failure_set(&read).map(|()| CommunityArtifactBatchV1 {
+        #[cfg(target_os = "linux")]
+        timeline: binding.timeline,
+        #[cfg(target_os = "linux")]
+        generation: binding.generation,
+        records: read.into_iter().map(|record| record.record).collect(),
+        graph_root_digest: None,
+    })
+}
+
+/// One authenticated record of a pass control batch.
+struct PassFailureRecord {
+    /// Whether it is the CFO1.
+    is_outcome: bool,
+    /// Its logical digest.
+    logical: Hash,
+    /// The CFI1 digests a CFO1 lists, in order.
+    listed: Vec<Hash>,
+    record: CommunityProtectedRecordV1,
+}
+
+/// Read one authenticated COW1 as the CFO1 or a CFI1 of the batch's pass.
+fn read_pass_failure(
+    authenticated: Authenticated,
+    input: &CommunityPassControlBatchInputV1<'_>,
+) -> Result<PassFailureRecord, Error> {
+    if authenticated.header.record_kind != CommunityArtifactKindV1::LifecycleControl
+        || authenticated.header.scope_cover_digest != input.scope_cover_digest
+    {
+        return Err(Error::InvalidBinding);
+    }
+    let is_outcome = authenticated.plaintext.get(2..6) == Some(b"CFO1".as_slice());
+    let (logical, listed, pass_key) = if is_outcome {
+        read_outcome(&authenticated.plaintext)?
+    } else {
+        read_invocation(&authenticated.plaintext)?
+    };
+    if pass_key != Some(input.pass_key) {
+        return Err(Error::InvalidBinding);
+    }
+    Ok(PassFailureRecord {
+        is_outcome,
+        logical,
+        listed,
+        record: authenticated.record,
+    })
+}
+
+/// A CFO1's digest, the CFI1 digests it lists and its `PassKey`.
+fn read_outcome(plaintext: &[u8]) -> Result<(Hash, Vec<Hash>, Option<CommunityPassKeyV1>), Error> {
+    CommunityPassFailureV1::from_canonical_cbor(plaintext).map(|outcome| {
+        let fields = outcome.as_input();
+        (
+            outcome.digest(),
+            fields.invocation_evidence_digests.iter().collect(),
+            fields.pass_key,
+        )
+    })
+}
+
+/// A CFI1's digest, no children and its `PassKey`.
+fn read_invocation(
+    plaintext: &[u8],
+) -> Result<(Hash, Vec<Hash>, Option<CommunityPassKeyV1>), Error> {
+    CommunityInvocationFailureV1::from_canonical_cbor(plaintext).map(|invocation| {
+        (
+            invocation.digest(),
+            Vec::new(),
+            invocation.as_input().pass_key,
+        )
+    })
+}
+
+/// The batch is exactly one CFO1 and the CFI1s it lists, and each ARD1
+/// lists the children R15.4 derives: a CFI1 none, the CFO1 its CFI1s.
+fn check_pass_failure_set(read: &[PassFailureRecord]) -> Result<(), Error> {
+    let outcomes: Vec<&PassFailureRecord> =
+        read.iter().filter(|record| record.is_outcome).collect();
+    let invocations: Vec<&PassFailureRecord> =
+        read.iter().filter(|record| !record.is_outcome).collect();
+    let [outcome] = outcomes.as_slice() else {
+        return Err(Error::InvalidBinding);
+    };
+    let listed: BTreeSet<Hash> = outcome.listed.iter().copied().collect();
+    let present: BTreeSet<Hash> = invocations.iter().map(|record| record.logical).collect();
+    let children = invocations.iter().all(|record| {
+        record
+            .record
+            .registration()
+            .fields()
+            .child_artifacts
+            .is_empty()
+    });
+    let edges = listed_edges(outcome, &invocations);
+    if listed != present
+        || outcome.listed.len() != invocations.len()
+        || !children
+        || outcome.record.registration().fields().child_artifacts != edges
+    {
+        return Err(Error::InvalidBinding);
+    }
+    Ok(())
+}
+
+/// The CFO1's expected child edges: one per listed CFI1, in the strict
+/// `(class, digest, address)` order.
+fn listed_edges(
+    outcome: &PassFailureRecord,
+    invocations: &[&PassFailureRecord],
+) -> Vec<ArtifactChildEdgeV1> {
+    let mut edges: Vec<ArtifactChildEdgeV1> = outcome
+        .listed
+        .iter()
+        .filter_map(|digest| {
+            invocations
+                .iter()
+                .find(|record| record.logical == *digest)
+                .map(|record| {
+                    let registration = record.record.registration();
+                    ArtifactChildEdgeV1 {
+                        artifact_class: registration.fields().artifact_class,
+                        artifact_digest: registration.fields().artifact_digest,
+                        registration_address: registration.address(),
+                        required: true,
+                    }
+                })
+        })
+        .collect();
+    edges.sort_by_key(|edge| {
+        (
+            edge.artifact_class,
+            edge.artifact_digest,
+            edge.registration_address,
+        )
+    });
+    edges
 }
 
 /// Decode CGR1 and its CSH1 and check that they name each other and this
