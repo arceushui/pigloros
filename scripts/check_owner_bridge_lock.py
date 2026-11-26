@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Check ADR-110 native Windows family pins and the E16 Linux owner dependency.
+"""Check ADR-110 native Windows family pins and the E16/E20 Linux owner dependencies.
 
 Reads the committed manifests and lockfile without invoking Cargo.
 The older rustix 0.38 transitive dependency is unrelated and remains allowed.
+ADR-110 E20 AM-110g adds the direct aes/hmac pins of pos-owner-ctap (plus the
+owner-approved unicode-normalization pin for PIN NFC normalization) and
+confines its rustix features to the crate-local Linux tables.
 """
 
 from __future__ import annotations
@@ -131,21 +134,96 @@ def check_windows(lock: dict, shim: dict, workspace: dict) -> list[str]:
     return errors
 
 
+CTAP_PINS = {
+    "aes": ("0.9.4", "fc0fc36d7440d015b45468ba08a21e80e056ebbd014c611c6298bb7503e04bd1"),
+    "hmac": ("0.13.0", "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"),
+    # Owner decision 2026-11-24: NFC normalization of the PIN (CTAP 2.1 PS 6.5.1).
+    "unicode-normalization": ("0.1.26", "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"),
+}
+CTAP_WORKSPACE = {
+    "aes": {"version": "=0.9.4", "default-features": False},
+    "hmac": "=0.13.0",
+    "unicode-normalization": {"version": "=0.1.26", "default-features": False},
+}
+# AM-110g: the workspace rustix entry stays fs/std; pos-owner-ctap names its own
+# Linux features, and pty only for its tests.
+CTAP_RUSTIX = {
+    "dependencies": {"workspace": True, "features": ["termios", "event", "process"]},
+    "dev-dependencies": {"workspace": True, "features": ["pty"]},
+}
+RUSTIX_CONSUMERS = ("pos-owner-ctap", "piglor-owner")
+
+
+def check_ctap(lock: dict, ctap: dict, workspace: dict) -> list[str]:
+    """Enforce the ADR-110 E20 AM-110g pins and rustix confinement of pos-owner-ctap."""
+    errors = []
+    packages = lock.get("package", [])
+    shared = workspace.get("workspace", {}).get("dependencies", {})
+    for name, expected in CTAP_WORKSPACE.items():
+        if shared.get(name) != expected:
+            errors.append(f"{name} must keep the accepted AM-110g direct workspace pin")
+    for name, (version, checksum) in CTAP_PINS.items():
+        actual = [p for p in packages if p.get("name") == name]
+        if len(actual) != 1 or any(
+            p.get(key) != value for p in actual
+            for key, value in [("version", version), ("checksum", checksum), ("source", SOURCE)]
+        ):
+            errors.append(f"expected exactly {name} {version} with its AM-110g source/checksum")
+    consumers = [p for p in packages if p.get("name") == "pos-owner-ctap"]
+    if len(consumers) != 1:
+        errors.append("pos-owner-ctap must have exactly one lockfile entry")
+    else:
+        direct = [d.split()[0] for d in consumers[0].get("dependencies", [])]
+        for name in CTAP_PINS:
+            if direct.count(name) != 1:
+                errors.append(f"pos-owner-ctap must resolve the pinned {name} directly")
+    normal = ctap.get("dependencies", {})
+    for name in CTAP_PINS:
+        dependency = normal.get(name)
+        if not isinstance(dependency, dict) or dependency.get("workspace") is not True:
+            errors.append(f"pos-owner-ctap {name} must inherit the workspace pin")
+    for target, table in [(None, ctap), *ctap.get("target", {}).items()]:
+        for kind in ["dependencies", "dev-dependencies", "build-dependencies"]:
+            for name, dependency in table.get(kind, {}).items():
+                is_rustix = name == "rustix" or (
+                    isinstance(dependency, dict) and dependency.get("package") == "rustix"
+                )
+                allowed = target == TARGET and name == "rustix" and CTAP_RUSTIX.get(kind) == dependency
+                if is_rustix and not allowed:
+                    errors.append("pos-owner-ctap rustix is allowed only with its AM-110g Linux features")
+    for consumer in RUSTIX_CONSUMERS:
+        for package in (p for p in packages if p.get("name") == consumer):
+            edges = [d for d in package.get("dependencies", []) if d.split()[0] == "rustix"]
+            if edges not in ([], ["rustix 1.1.6"]):
+                errors.append(f"{consumer} must resolve only the pinned rustix 1.1.6")
+    return errors
+
+
 def main() -> int:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
     try:
         documents = [
             tomllib.loads((root / name).read_text(encoding="utf-8"))
-            for name in ["Cargo.lock", "crates/pos-owner-bridge/Cargo.toml", "Cargo.toml", "crates/pos-owner-bridge-windows/Cargo.toml"]
+            for name in [
+                "Cargo.lock",
+                "crates/pos-owner-bridge/Cargo.toml",
+                "Cargo.toml",
+                "crates/pos-owner-bridge-windows/Cargo.toml",
+                "crates/pos-owner-ctap/Cargo.toml",
+            ]
         ]
-        errors = check(*documents[:3]) + check_windows(documents[0], documents[3], documents[2])
+        errors = (
+            check(*documents[:3])
+            + check_windows(documents[0], documents[3], documents[2])
+            + check_ctap(documents[0], documents[4], documents[2])
+        )
     except (OSError, ValueError, TypeError, AttributeError) as error:
         print(f"owner-bridge lock check failed: {error}", file=sys.stderr)
         return 1
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("owner-bridge native Windows family and E16 Linux dependency pins match ADR-110")
+    print("owner-bridge native Windows family and E16/E20 Linux dependency pins match ADR-110")
     return 0
 
 

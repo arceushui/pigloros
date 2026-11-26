@@ -22,7 +22,8 @@ use crate::sandbox_provider_protocol::{
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
-    admitted_state, admitted_state_with_arguments, ddi_fixture, materialize_state, ImageSigning,
+    admitted_state, admitted_state_with_arguments, admitted_state_with_provider_binary,
+    ddi_fixture, materialize_state, provider_executable_path, ImageSigning, RUNTIME_KEY_SEED,
 };
 use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
 
@@ -56,16 +57,91 @@ pub struct StagedImage<'a> {
     pub arguments: &'a [String],
 }
 
+/// A staged image plus the provider host files around it, for a runtime that
+/// runs as the staged provider (#444 evidence guest).
+///
+/// [`StagedInstallation::stage_provider`] installs `binary` as the SIC1
+/// kind-11 provider executable, so the running process can be exactly the
+/// admitted file (ADR-069 R11 §5.1 step 3). It writes `installation` as the
+/// fixed SPI1 file and the runtime-attestation key file that SPI1 names.
+/// SPI1's codec lives in the provider crate, so the caller encodes it: its
+/// attempt range sets the slot count, and its key file name must be
+/// `key_file_name`. The key file holds the seed of the runtime key the staged
+/// TRS1 binds, the one [`StagedInstallation::sign_grant`] signs with.
+#[derive(Clone, Copy, Debug)]
+pub struct StagedProvider<'a> {
+    /// The image and its signer, staged as by [`StagedInstallation::stage_image`].
+    pub image: StagedImage<'a>,
+    /// The provider executable to install: a file read once, and copied.
+    pub binary: &'a Path,
+    /// The canonical SPI1 bytes, written as `provider-installation.cbor`.
+    pub installation: &'a [u8],
+    /// The name SPI1 gives the runtime-attestation key file in `provider-keys/`.
+    pub key_file_name: &'a str,
+}
+
 /// The staged fixed installation, removed again when dropped.
 #[derive(Debug)]
 pub struct StagedInstallation {
     request: Vec<u8>,
     evaluation: Vec<u8>,
     input: Vec<u8>,
+    provider_executable: std::path::PathBuf,
     parent: (u64, u64),
 }
 
 impl StagedInstallation {
+    /// [`Self::stage_image`], with a caller-supplied provider executable,
+    /// SPI1 file and runtime-attestation key file (see [`StagedProvider`]).
+    ///
+    /// # Errors
+    /// Everything [`Self::stage_image`] refuses, an unreadable `binary`, an
+    /// empty or over-long SPI1 (its file rules allow 1 to 4096 bytes) and a
+    /// key file name that is not one plain file name.
+    pub fn stage_provider(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
+        let name = provider.key_file_name;
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+            return Err("the key file name is not one plain file name".into());
+        }
+        if !(1..=4096).contains(&provider.installation.len()) {
+            return Err("SPI1 must be between 1 and 4096 bytes".into());
+        }
+        let binary = fs::read(provider.binary)?;
+        let (partitions, signing, salt) = described(&provider.image)?;
+        let state = admitted_state_with_provider_binary(
+            provider.image.image,
+            provider.image.executable,
+            &partitions,
+            &signing,
+            salt,
+            provider.image.arguments,
+            &binary,
+        )?;
+        let mut staged = Self::create_parent()?;
+        let root = Path::new(SANDBOX_ARTIFACT_ROOT);
+        let admitted = materialize_state(root, state)?;
+        staged.request = request_for(&admitted)?;
+        staged.provider_executable = provider_executable_path(root, &admitted)?;
+        write_private(
+            &root.join("provider-installation.cbor"),
+            provider.installation,
+            0o400,
+        )?;
+        let keys = root.join("provider-keys");
+        fs::create_dir(&keys)?;
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o700))?;
+        write_private(&keys.join(name), &RUNTIME_KEY_SEED, 0o400)?;
+        Ok(staged)
+    }
+
+    /// The installed provider executable, which a runtime must run as: the
+    /// file the SIC1 provider-executable descriptor names. Empty unless
+    /// staged by [`Self::stage_provider`].
+    #[must_use]
+    pub fn provider_executable(&self) -> &Path {
+        &self.provider_executable
+    }
+
     /// Stage the signed test installation at the fixed root-owned path.
     ///
     /// # Errors
@@ -153,6 +229,7 @@ impl StagedInstallation {
         fs::create_dir(parent)?;
         let metadata = fs::symlink_metadata(parent)?;
         let staged = Self {
+            provider_executable: std::path::PathBuf::new(),
             request: Vec::new(),
             evaluation: Vec::new(),
             input: Vec::new(),
@@ -278,7 +355,7 @@ impl StagedInstallation {
     /// # Errors
     /// None in practice: the signature verifies under its own key.
     pub fn sign_grant(record: SelfDigested<Agr1>) -> std::io::Result<Verified<Agr1>> {
-        Self::sign_grant_with(&[4; 32], record)
+        Self::sign_grant_with(&RUNTIME_KEY_SEED, record)
     }
 
     /// Sign the sealed AGR1 with the Ed25519 seed `seed` and verify it under
@@ -361,6 +438,19 @@ impl Drop for StagedInstallation {
             drop(fs::remove_dir_all(parent));
         }
     }
+}
+
+/// Create `path` exclusively with `mode` from the start, then write `bytes`.
+fn write_private(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Box<dyn Error>> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?
+        .write_all(bytes)?;
+    Ok(())
 }
 
 /// An SPX1 request whose checked authority is exactly the staged provider's.

@@ -850,8 +850,9 @@ fn undecodable_inputs_are_the_internal_arm() -> TestResult {
 }
 
 /// A stored claim naming a revision the store does not hold, or another
-/// digest (of a present or an erased revision), or a payload that does not re-encode, or a commit binding other
-/// than its own: each is the internal-failure arm and appends nothing.
+/// digest (of a present or an erased revision), or a payload that does not
+/// re-encode, or a commit binding other than its own: each is the
+/// internal-failure arm and appends nothing.
 #[test]
 fn every_stored_inconsistency_is_the_internal_arm() -> TestResult {
     let mut host = host()?;
