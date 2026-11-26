@@ -102,7 +102,7 @@ fn every_refusal_answers_its_problem() -> TestResult {
     for (error, status, code, retryable, retry_after) in cases {
         let case = format!("{error:?}");
         let marked = matches!(error, Error::Store(CoreError::ModeBindingStale));
-        let response = refusal(error);
+        let response = preview_problem(error);
         assert_eq!(response.status().as_u16(), status, "{case}");
         let (body, header) = problem_of(&response)?;
         assert_eq!(body["code"], code, "{case}");

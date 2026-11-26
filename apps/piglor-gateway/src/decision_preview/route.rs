@@ -408,7 +408,7 @@ fn store_failure(error: CoreError) -> Response {
 }
 
 /// The problem of one refused Decision Preview operation (ADR-140 section 9).
-fn refusal(error: DecisionPreviewErrorV1) -> Response {
+fn preview_problem(error: DecisionPreviewErrorV1) -> Response {
     use ProblemCodeV1 as Code;
     let (code, status, detail, retryable) = match error {
         DecisionPreviewErrorV1::Gateway(error) => return error.into_response(),
@@ -501,7 +501,7 @@ pub(crate) async fn create(
     match authority.authorize(gateway, None).await {
         Ok(permit) => admit_holding(gateway.clone(), permit, idempotency_key, request)
             .await
-            .map_or_else(refusal, |receipt| {
+            .map_or_else(preview_problem, |receipt| {
                 (StatusCode::ACCEPTED, Json(receipt_json(&receipt))).into_response()
             }),
         Err(error) => error.into_response(),
@@ -523,7 +523,7 @@ pub(crate) async fn read(
         Ok(permit) => gateway
             .read_decision_preview(permit, preview_id)
             .await
-            .map_or_else(refusal, |preview| {
+            .map_or_else(preview_problem, |preview| {
                 (StatusCode::OK, Json(preview_json(&preview))).into_response()
             }),
         Err(error) => error.into_response(),
