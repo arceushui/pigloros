@@ -3264,6 +3264,7 @@ osf_link = \"https://osf.io/example\"\n";
                     authorization: None,
                     authorization_required: false,
                     local_erasure_wake: std::sync::Arc::default(),
+                    decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
                 },
                 ledger_view: LedgerView::default(),
                 ledger_write: LedgerWriteMode::Disabled,

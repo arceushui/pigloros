@@ -5,7 +5,8 @@
 use super::{AdmittedSandboxProvider, SandboxAdmissionError};
 use crate::sandbox_provider_protocol::{
     ReconciliationEvidence, ReconciliationEvidenceFields, RequestAuthority, SandboxCancelRequest,
-    SandboxCancelResponse, SandboxProviderProtocolError, SandboxReconcileRequest,
+    SandboxCancelResponse, SandboxProviderError, SandboxProviderErrorCode,
+    SandboxProviderOperation, SandboxProviderProtocolError, SandboxReconcileRequest,
     SandboxReconcileResponse,
 };
 
@@ -190,6 +191,33 @@ impl AdmittedSandboxProvider {
                     .ok_or_else(contradiction)
             })
             .map(|check| AuthenticatedReconciliation { response, check })
+    }
+
+    /// Authenticate one SPE1 answering a cancel or reconcile request and
+    /// return its closed code.
+    ///
+    /// Every identity the request carries must be bound: the operation, the
+    /// request ID, the request self-digest and the attempt ID (R15 §3.3).
+    ///
+    /// # Errors
+    /// Rejects a malformed, foreign-keyed, forged or unbound SPE1.
+    pub(crate) fn authenticate_control_error(
+        &self,
+        bytes: &[u8],
+        operation: SandboxProviderOperation,
+        request: &RequestAuthority,
+        request_digest: [u8; 32],
+        attempt_id: [u8; 16],
+    ) -> Result<SandboxProviderErrorCode, SandboxAdmissionError> {
+        let error = SandboxProviderError::from_canonical_cbor(bytes)?;
+        self.require_runtime_key_id(&error.runtime_attestation_key_id)?;
+        error.verify_signature(&self.runtime_key)?;
+        let bound = u8::try_from(operation.wire_code())
+            .is_ok_and(|code| error.operation == Some(code))
+            && error.request_id == Some(request.request_id)
+            && error.request_digest == Some(request_digest)
+            && error.attempt_id == Some(attempt_id);
+        bound.then_some(error.code).ok_or_else(contradiction)
     }
 
     fn require_runtime_key_id(&self, key_id: &str) -> Result<(), SandboxAdmissionError> {

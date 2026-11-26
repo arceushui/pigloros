@@ -98,6 +98,7 @@ fn state() -> CommunityPassStateV1 {
         observations: BTreeMap::new(),
         scope_rows: BTreeMap::new(),
         generations: BTreeMap::new(),
+        highest_pass_ordinal: 0,
         retained: BTreeMap::new(),
     }
 }

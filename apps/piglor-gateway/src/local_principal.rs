@@ -3655,23 +3655,32 @@ mod tests {
         Ok(())
     }
 
-    /// ADR-136 §4a: no client seam reaches the Erasure Host Timeline or
-    /// the authority Timeline, exactly as for the consent Timeline; with
-    /// the consent Timeline and the Erasure Host Timeline recorded, a
-    /// client still creates exactly the root-Timeline ceiling of roots.
+    /// ADR-136 §4a: no client seam reaches the Erasure Host Timeline, the
+    /// authority Timeline or the `decision-previews` Timeline (ADR-140 P10),
+    /// exactly as for the consent Timeline; with the consent Timeline, the
+    /// Erasure Host Timeline and the `decision-previews` Timeline recorded,
+    /// a client still creates exactly the root-Timeline ceiling of roots.
     #[tokio::test]
     async fn host_timelines_are_hidden_from_clients_and_outside_the_ceiling() -> TestResult {
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
         bind_local(&path)?;
         let erasure_host = provision_erasure_host_timeline(&path)?;
+        let previews = crate::decision_preview::decision_previews_timeline();
+        crate::startup::open_recovered_erasure_host(
+            pos_store::StoreConfig::Sqlite { path: path.clone() },
+            crate::startup::GatewayHostStoreV1::Standard,
+            &pos_runtime::ErasureCoordinatorCompositionV1::closed(),
+        )?
+        .command_sender()?
+        .open_root_timeline(previews, "decision-previews")?;
         let actor = actor()?;
         let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
         assert_eq!(
             gateway.host_timelines(),
             crate::host_timelines::HostTimelinesV1::new(Some(erasure_host))
         );
-        for hidden in [erasure_host, local_principal_authority_timeline()] {
+        for hidden in [erasure_host, local_principal_authority_timeline(), previews] {
             for (method, uri, body) in [
                 ("GET", format!("/v1/timelines/{hidden}/events"), None),
                 (
@@ -3693,8 +3702,8 @@ mod tests {
                 );
             }
         }
-        // Both host roots are recorded, and neither is counted.
-        for host_root in [local_principal_consent_timeline(), erasure_host] {
+        // The host roots are recorded, and none is counted.
+        for host_root in [local_principal_consent_timeline(), erasure_host, previews] {
             assert!(gateway
                 .store
                 .timeline(host_root)

@@ -107,6 +107,8 @@ TEST_ONLY_EXCLUSIONS = (
     "src/provider_runtime/revocation/tests.rs",
     "src/scenario_room/tests.rs",
     "src/executor/scenario_room/tests.rs",
+    "src/decision_preview/tests.rs",
+    "src/executor/decision_preview/tests.rs",
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",

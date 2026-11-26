@@ -12,6 +12,9 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
+// Public so its crate-only items satisfy `unreachable_pub` and
+// `clippy::redundant_pub_crate`, as `host_timelines` below.
+pub mod decision_preview;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
@@ -1235,6 +1238,9 @@ pub struct Gateway {
     /// The admission hook of the Local erasure driver, set once its task
     /// runs (ADR-136 §6; owner decision D7 of 2026-11-18 on #1413).
     local_erasure_wake: Arc<std::sync::OnceLock<local_erasure_composition::LocalErasureTriggerV1>>,
+    /// The Decision Preview installed-profile port, quota and in-flight
+    /// slots (ADR-140).
+    decision_previews: decision_preview::DecisionPreviewsV1,
 }
 
 /// Whether a composition protects its operations, and with which authorizer.
@@ -2311,6 +2317,7 @@ impl Gateway {
             authorization,
             authorization_required,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2345,6 +2352,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2603,6 +2611,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2655,6 +2664,7 @@ impl Gateway {
             authorization: Some(Arc::new(test_local_authorization(authorization))),
             authorization_required: true,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2692,6 +2702,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2730,6 +2741,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2769,6 +2781,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2802,6 +2815,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -3921,6 +3935,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
     }
 
@@ -3938,6 +3953,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
     }
 
@@ -3964,6 +3980,7 @@ impl Gateway {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
     }
 }
@@ -8029,6 +8046,7 @@ mod tests {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         };
         assert!(matches!(
             fail_create.create_timeline("x", None).await,
@@ -8049,6 +8067,7 @@ mod tests {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         };
         assert!(matches!(
             fail_list.create_timeline("x", None).await,
@@ -8095,6 +8114,7 @@ mod tests {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         };
         assert!(matches!(
             missing
@@ -8139,6 +8159,7 @@ mod tests {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
+            decision_previews: crate::decision_preview::DecisionPreviewsV1::default(),
         }
     }
 
