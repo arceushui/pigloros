@@ -723,7 +723,7 @@ fn strictly_ascending<T: Ord>(items: impl Iterator<Item = T>) -> bool {
 }
 
 /// `^[a-z][a-z0-9_.-]*$`, 1 to 128 bytes.
-fn is_key(text: &str) -> bool {
+pub(crate) fn is_key(text: &str) -> bool {
     text.len() <= MAX_KEY_BYTES
         && text.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
         && text.bytes().all(|byte| {
@@ -804,7 +804,7 @@ fn string(text: &str) -> String {
     format!("\"{text}\"")
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     bytes
         .iter()
@@ -813,7 +813,7 @@ fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
+pub(crate) fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
     let mut out = [0; N];
     let decoded = text.len() == 2 * N
         && text
