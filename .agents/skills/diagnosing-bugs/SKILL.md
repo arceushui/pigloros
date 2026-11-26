@@ -5,6 +5,15 @@ description: Diagnosis loop for hard bugs and performance regressions. Use when 
 
 # Diagnosing Bugs
 
+For PiglorOS Rust fixes, also use [rust-quality-gates](../rust-quality-gates/SKILL.md).
+For hosted failures or workflow changes, read
+[ci-verification](../ci-verification/SKILL.md) before interpreting CI evidence.
+For dependency failures, read [dependency triage](references/dependencies.md).
+For concurrent, cancellation, or native resource fixtures, use
+[async-test-oracles](../async-test-oracles/SKILL.md). For source-backed lifecycle
+and budget hypotheses, read
+[lifecycle safety](../evidence-contracts/references/lifecycle-safety.md).
+
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
 When exploring the codebase, read `CONTEXT.md` (if it exists) to get a clear mental model of the relevant modules, and check ADRs in the area you're touching.
@@ -39,6 +48,12 @@ Treat the loop as a product. Once you have _a_ loop, **tighten** it:
 - Can I make it more deterministic? (Pin time, seed RNG, isolate filesystem, freeze network.)
 - Does the runner preserve process-local fixture caches and setup amortization,
   or does per-test process isolation repeat expensive work?
+
+When local execution is prohibited, build the narrow loop in an authorized
+hosted environment instead of running every hypothesis through the full delivery
+pipeline. Check the transitive work of a filtered entry point before calling it
+focused. Verify tool argument forwarding and consuming parser/runtime versions
+before interpreting a failure as a product defect.
 
 A 30-second flaky loop is barely better than no loop; a 2-second deterministic one is tight — a debugging superpower.
 
@@ -138,6 +153,13 @@ For numeric regression gates, compare underlying values independently of the
 tool's categorical label and define representational equality explicitly (for
 example, an agreed ULP bound). Lock misleading labels and boundary noise with
 deterministic fixtures.
+
+Match path, function, cfg variant, and measured source identity before comparing
+numbers. Separate finite source classification from unresolved runtime
+qualification, and attribute coverage gaps to product behavior, native
+orchestration, or ordinary assertion/setup mechanics before adding cases. Test
+assertion changes must preserve diagnostics, failure cutoff, and owner lifetimes;
+they must not turn product error contracts into assertion panics.
 
 For asynchronous tests, synchronize on the exact semantic prerequisite with a
 bounded deadline and child-exit detection—not sleeps or incidental file counts.
