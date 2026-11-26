@@ -2,6 +2,7 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
+    decision_preview::route,
     operation::{
         AppendSignalOperation, CreateDecisionPreviewOperation, CreateOptionSpecOperation,
         CreatePredictionOperation, CreatePreferenceOperation, CreateScenarioRoomOperation,
@@ -900,7 +901,7 @@ async fn post_decision_preview(
     IdempotencyKey(key): IdempotencyKey,
     ContractJson(body): ContractJson<serde_json::Value>,
 ) -> Response {
-    crate::decision_preview::route::create(&state.gateway, authority, key, &body).await
+    route::create_decision_preview_route(&state.gateway, authority, key, &body).await
 }
 
 /// `GET /v1/decision-previews/{preview_id}` (#305): one of the acting entity's
@@ -911,7 +912,7 @@ async fn get_decision_preview(
     ContractPath(preview_id): ContractPath<String>,
     authority: OperationAuthority<ReadDecisionPreviewOperation>,
 ) -> Response {
-    crate::decision_preview::route::read(&state.gateway, authority, &preview_id).await
+    route::read_decision_preview_route(&state.gateway, authority, &preview_id).await
 }
 
 async fn post_ledger_prediction(

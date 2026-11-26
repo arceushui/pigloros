@@ -120,6 +120,30 @@ fn every_refusal_answers_its_problem() -> TestResult {
     Ok(())
 }
 
+/// The served limits the contract states are the Gateway's own constants:
+/// the store ceiling is half the Event ceiling (two Events per preview), and
+/// the per-minute and in-flight quotas are the ones the Gateway enforces.
+#[test]
+fn the_contract_limits_are_the_gateway_constants() -> TestResult {
+    let path = format!(
+        "{}/../../contracts/gateway/v1/openapi.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let contract: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let limit = |name: &str| contract["x-pigloros-limits"][name]["value"].clone();
+    let per_store = crate::MAX_EVENTS_PER_TIMELINE / 2;
+    assert_eq!(limit("decision_previews_per_store"), per_store);
+    assert_eq!(
+        limit("principal_admissions_per_minute"),
+        MAX_ADMISSIONS_PER_MINUTE
+    );
+    assert_eq!(
+        limit("principal_concurrent_operations"),
+        MAX_IN_FLIGHT_PER_PRINCIPAL
+    );
+    Ok(())
+}
+
 /// A quota window's time left is rounded up to whole seconds, never below 1,
 /// so a retry never comes early.
 #[test]
@@ -131,7 +155,7 @@ fn retry_after_rounds_up_to_whole_seconds_of_at_least_one() {
         (Duration::from_millis(1_001), 2),
         (Duration::from_mins(1), 60),
     ] {
-        assert_eq!(retry_after_seconds(left), seconds, "{left:?}");
+        assert_eq!(quota_retry_after_seconds(left), seconds, "{left:?}");
     }
 }
 
@@ -149,7 +173,7 @@ fn execution_profile_ids_follow_the_contract_pattern() {
         "x-v1-v2",
         longest.as_str(),
     ] {
-        assert!(execution_profile_id(id), "{id}");
+        assert!(is_execution_profile_id(id), "{id}");
     }
     for id in [
         longer.as_str(),
@@ -164,7 +188,7 @@ fn execution_profile_ids_follow_the_contract_pattern() {
         "replay-v0",
         "replay-v1x",
     ] {
-        assert!(!execution_profile_id(id), "{id}");
+        assert!(!is_execution_profile_id(id), "{id}");
     }
 }
 
@@ -226,14 +250,18 @@ fn the_golden_recommendations_are_the_rendered_match_score() -> TestResult {
     Ok(())
 }
 
+/// One `RevisionRef` of a request body, its digest `byte` repeated.
+fn wire_reference(id: &str, revision: u64, byte: &str) -> Value {
+    json!({"id": id, "revision": revision, "digest": byte.repeat(32)})
+}
+
 /// A well-formed `createDecisionPreview` body.
 fn request_body() -> Value {
-    let reference = |id: &str, revision: u64, byte: &str| json!({"id": id, "revision": revision, "digest": byte.repeat(32)});
     json!({
         "schema_version": 1,
-        "scenario_room": reference("01JC0GATEWAYW9R00M00000001", 2, "0a"),
-        "preference": reference("01JC0GATEWAYW9PREF0000002A", 1, "0b"),
-        "option_spec": reference("01JC0GATEWAYW9QPT10N00002A", 1, "0c"),
+        "scenario_room": wire_reference("01JC0GATEWAYW9R00M00000001", 2, "0a"),
+        "preference": wire_reference("01JC0GATEWAYW9PREF0000002A", 1, "0b"),
+        "option_spec": wire_reference("01JC0GATEWAYW9QPT10N00002A", 1, "0c"),
         "profile_id": "deterministic-local-v1",
     })
 }
@@ -257,15 +285,18 @@ fn a_request_body_must_match_its_schema() -> TestResult {
     assert_eq!(request.scenario_room.revision.get(), 2);
     assert_eq!(request.preference.digest, [0x0b; 32]);
     assert_eq!(request.profile_id, "deterministic-local-v1");
-    for version in [0, 2] {
+    // Any number but the integer 1 is another version; a value that is no
+    // number is a malformed body.
+    for version in [json!(0), json!(2), json!(-1), json!(1.0), json!(2.5)] {
         let mut body = request_body();
-        body["schema_version"] = json!(version);
+        body["schema_version"] = version.clone();
         assert_eq!(parse_refusal(&body)?, "unsupported-version", "{version}");
     }
     let lower = "01jc0gatewayw9r00m00000001";
     let unsafe_revision = 9_007_199_254_740_992_u64;
     for (path, value) in [
         (&["schema_version"][..], json!("1")),
+        (&["schema_version"][..], Value::Null),
         (&["profile_id"][..], json!("gateway-mode-local-v1")),
         (&["profile_id"][..], json!(1)),
         (&["scenario_room", "id"][..], json!(lower)),
@@ -544,13 +575,14 @@ async fn a_preview_is_admitted_retried_and_read_over_http() -> TestResult {
         text(&admitted.body, "/idempotency_key_digest")?,
         blake3::hash(b"k-1").to_hex().as_str()
     );
+    let seam_digest = digest_hex(crate::decision_preview::test_seam::SEAM_PROFILE_DIGEST);
     assert_eq!(
         admitted.body["bound_inputs"],
         json!({
-            "scenario_room": hex(request.scenario_room.digest),
-            "preference": hex(request.preference.digest),
-            "option_spec": hex(request.option_spec.digest),
-            "execution_profile": hex(crate::decision_preview::test_seam::SEAM_PROFILE_DIGEST),
+            "scenario_room": digest_hex(request.scenario_room.digest),
+            "preference": digest_hex(request.preference.digest),
+            "option_spec": digest_hex(request.option_spec.digest),
+            "execution_profile": seam_digest,
             "mode_profile": LOCAL_DIGEST,
         })
     );
@@ -559,6 +591,19 @@ async fn a_preview_is_admitted_retried_and_read_over_http() -> TestResult {
         (retried.status, &retried.bytes),
         (StatusCode::ACCEPTED, &admitted.bytes)
     );
+    // P35: with three other requests in flight, an exact retry takes the
+    // fourth slot and is answered.
+    let in_flight = &served.gateway.decision_previews.in_flight;
+    let slots = (1..MAX_IN_FLIGHT_PER_PRINCIPAL)
+        .map(|_| InFlightSlotV1::take(in_flight, PRINCIPAL))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("the Principal has three free slots")?;
+    let crowded = post_preview(&app, "k-1", &body).await?;
+    assert_eq!(
+        (crowded.status, &crowded.bytes),
+        (StatusCode::ACCEPTED, &admitted.bytes)
+    );
+    drop(slots);
     let mut other = body;
     other["profile_id"] = json!("replay-v1");
     let conflict = post_preview(&served.app, "k-1", &other).await?;

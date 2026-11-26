@@ -59,12 +59,17 @@ const MAX_PROFILE_ID_BYTES: usize = 64;
 /// The namespace of the Gateway execution-mode profiles, which no
 /// `ExecutionProfileId` uses.
 const MODE_PROFILE_NAMESPACE: &str = "gateway-mode-";
+/// The detail of a body outside the `CreateDecisionPreviewRequest` schema.
+const MALFORMED_BODY: &str = "the body is not a Decision Preview request";
 
 /// The body of `createDecisionPreview`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateRequestBodyV1 {
-    schema_version: u64,
+    /// Present and an unsigned integer; [`parse_request`] refused every
+    /// other number before, so it is 1.
+    #[serde(rename = "schema_version")]
+    _schema_version: u64,
     scenario_room: WireRevisionRefV1,
     preference: WireRevisionRefV1,
     option_spec: WireRevisionRefV1,
@@ -83,7 +88,7 @@ struct WireRevisionRefV1 {
 impl WireRevisionRefV1 {
     /// The reference, when its ID is a canonical ULID, its revision is 1 to
     /// 2^53 - 1 and its digest is 64 lower-case hex digits.
-    fn admit(self) -> Option<PreviewRevisionRefV1> {
+    fn admit_reference(self) -> Option<PreviewRevisionRefV1> {
         canonical_ulid(&self.id)
             .zip(revision_number(self.revision))
             .zip(digest_bytes(&self.digest))
@@ -97,7 +102,7 @@ impl WireRevisionRefV1 {
 
 impl CreateRequestBodyV1 {
     /// The request, when every reference is well formed.
-    fn admit(self) -> Option<PreviewRequestV1> {
+    fn into_preview_request(self) -> Option<PreviewRequestV1> {
         let Self {
             scenario_room,
             preference,
@@ -106,9 +111,9 @@ impl CreateRequestBodyV1 {
             ..
         } = self;
         scenario_room
-            .admit()
-            .zip(preference.admit())
-            .zip(option_spec.admit())
+            .admit_reference()
+            .zip(preference.admit_reference())
+            .zip(option_spec.admit_reference())
             .map(
                 |((scenario_room, preference), option_spec)| PreviewRequestV1 {
                     scenario_room,
@@ -125,7 +130,7 @@ impl CreateRequestBodyV1 {
 /// That is a versioned lower-case slug of at most 64 bytes,
 /// `^[a-z][a-z0-9]*(-[a-z0-9]+)*-v[1-9][0-9]*$`, outside the `gateway-mode-`
 /// namespace.
-fn execution_profile_id(text: &str) -> bool {
+fn is_execution_profile_id(text: &str) -> bool {
     text.len() <= MAX_PROFILE_ID_BYTES
         && !text.starts_with(MODE_PROFILE_NAMESPACE)
         && text.rsplit_once("-v").is_some_and(|(slug, version)| {
@@ -142,7 +147,7 @@ fn execution_profile_id(text: &str) -> bool {
 }
 
 /// The `400 invalid-request` of a request outside the contract.
-fn invalid(detail: &'static str) -> ProblemV1 {
+fn invalid_preview_request(detail: &'static str) -> ProblemV1 {
     ProblemV1::new(
         ProblemCodeV1::InvalidRequest,
         StatusCode::BAD_REQUEST,
@@ -150,18 +155,22 @@ fn invalid(detail: &'static str) -> ProblemV1 {
     )
 }
 
+/// Whether `version` names a `schema_version` other than 1 (ADR-140 P26):
+/// any JSON number but the integer 1. A value that is no number is a
+/// malformed body instead.
+fn is_unsupported_version(version: &Value) -> bool {
+    version.is_number() && version.as_u64() != Some(PREVIEW_REQUEST_SCHEMA_VERSION_V1)
+}
+
 /// The request of a `createDecisionPreview` body (ADR-140 section 6 step 2).
 ///
 /// # Errors
-/// `400 unsupported-version` for an integer `schema_version` other than 1,
-/// and `400 invalid-request` for any other body outside the
-/// `CreateDecisionPreviewRequest` schema.
+/// `400 unsupported-version` for a `schema_version` that is any number other
+/// than the integer 1, and `400 invalid-request` for any other body outside
+/// the `CreateDecisionPreviewRequest` schema.
 fn parse_request(body: &Value) -> Result<PreviewRequestV1, ProblemV1> {
-    if body
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .is_some_and(|version| version != PREVIEW_REQUEST_SCHEMA_VERSION_V1)
-    {
+    let version = body.get("schema_version");
+    if version.is_some_and(is_unsupported_version) {
         return Err(ProblemV1::new(
             ProblemCodeV1::UnsupportedVersion,
             StatusCode::BAD_REQUEST,
@@ -170,16 +179,13 @@ fn parse_request(body: &Value) -> Result<PreviewRequestV1, ProblemV1> {
     }
     CreateRequestBodyV1::deserialize(body)
         .ok()
-        .filter(|request| {
-            request.schema_version == PREVIEW_REQUEST_SCHEMA_VERSION_V1
-                && execution_profile_id(&request.profile_id)
-        })
-        .and_then(CreateRequestBodyV1::admit)
-        .ok_or_else(|| invalid("the body is not a Decision Preview request"))
+        .filter(|request| is_execution_profile_id(&request.profile_id))
+        .and_then(CreateRequestBodyV1::into_preview_request)
+        .ok_or_else(|| invalid_preview_request(MALFORMED_BODY))
 }
 
 /// `digest` in lower-case hex.
-fn hex(digest: [u8; 32]) -> String {
+fn digest_hex(digest: [u8; 32]) -> String {
     blake3::Hash::from_bytes(digest).to_hex().to_string()
 }
 
@@ -195,13 +201,13 @@ fn receipt_json(receipt: &DecisionPreviewReceiptV1) -> Value {
         "operation_id": id,
         "state": "admitted",
         "operation_url": format!("{PREVIEW_ROUTE_PREFIX}{id}"),
-        "idempotency_key_digest": hex(receipt.idempotency_key_digest),
+        "idempotency_key_digest": digest_hex(receipt.idempotency_key_digest),
         "bound_inputs": {
-            "scenario_room": hex(claim.request.scenario_room.digest),
-            "preference": hex(claim.request.preference.digest),
-            "option_spec": hex(claim.request.option_spec.digest),
-            "execution_profile": hex(claim.profile_digest),
-            "mode_profile": hex(claim.mode_profile_digest),
+            "scenario_room": digest_hex(claim.request.scenario_room.digest),
+            "preference": digest_hex(claim.request.preference.digest),
+            "option_spec": digest_hex(claim.request.option_spec.digest),
+            "execution_profile": digest_hex(claim.profile_digest),
+            "mode_profile": digest_hex(claim.mode_profile_digest),
         },
     })
 }
@@ -211,11 +217,12 @@ fn revision_ref_json(reference: &PreviewRevisionRefV1) -> Value {
     json!({
         "id": reference.id.to_string(),
         "revision": reference.revision.get(),
-        "digest": hex(reference.digest),
+        "digest": digest_hex(reference.digest),
     })
 }
 
-/// The `computed` Recommendation of `computed`.
+/// The `computed` Recommendation member: its scores in authored order, its
+/// margin, its Toss-up flag and its option key, null for a Toss-up.
 fn computed_json(computed: &ComputedRecommendationV1) -> Value {
     let scores = computed
         .scores
@@ -258,12 +265,12 @@ fn result_json(result: DecisionPreviewResultEventV1) -> Value {
 }
 
 /// The GMP1 binding the preview's claim committed under.
-fn mode_profile_json(mode: &DecisionPreviewModeV1) -> Value {
+fn preview_mode_json(mode: &DecisionPreviewModeV1) -> Value {
     json!({
         "profile_kind": "gateway-mode-v1",
         "mode_profile_id": mode.profile.as_str(),
         "mode": mode.profile.mode(),
-        "mode_profile_digest": hex(mode.digest),
+        "mode_profile_digest": digest_hex(mode.digest),
         "binding_epoch": mode.binding_epoch.get(),
     })
 }
@@ -281,7 +288,7 @@ struct StateMembersV1 {
 impl StateMembersV1 {
     /// The members of `state`. Only a `degraded` preview withholds anything:
     /// its Recommendation, erased with an input.
-    fn of(state: &DecisionPreviewStateV1) -> Self {
+    fn for_state(state: &DecisionPreviewStateV1) -> Self {
         let available = || json!({"state": "available", "withheld": []});
         let pending = || json!({"status": "pending"});
         match state {
@@ -326,21 +333,21 @@ impl StateMembersV1 {
 /// The `DecisionPreview` resource of `preview` (ADR-140 section 7).
 fn preview_json(preview: &DecisionPreviewV1) -> Value {
     let claim = &preview.claim;
-    let members = StateMembersV1::of(&preview.state);
+    let members = StateMembersV1::for_state(&preview.state);
     json!({
         "schema_id": DECISION_PREVIEW_SCHEMA_ID,
         "id": preview.preview_id.to_string(),
         "generation": preview.state.generation(),
         "provenance": {
-            "digest": hex(preview.provenance_digest),
+            "digest": digest_hex(preview.provenance_digest),
             "origin": "host-derived",
         },
-        "mode_profile": mode_profile_json(&preview.mode_profile),
+        "mode_profile": preview_mode_json(&preview.mode_profile),
         "execution_profile": {
             "profile_kind": "epf1",
             "state": "installed",
             "profile_id": claim.request.profile_id,
-            "profile_digest": hex(claim.profile_digest),
+            "profile_digest": digest_hex(claim.profile_digest),
         },
         "availability": members.availability,
         "state": members.state,
@@ -361,18 +368,18 @@ fn preview_json(preview: &DecisionPreviewV1) -> Value {
 }
 
 /// The one answer to a preview or input the caller may not use.
-fn not_found() -> Response {
+fn preview_not_found() -> Response {
     GatewayError::ResourceUnavailable.into_response()
 }
 
 /// The internal-failure arm (ADR-140 P29): nothing is described.
-fn internal() -> Response {
+fn preview_internal_failure() -> Response {
     ProblemV1::internal(StatusCode::INTERNAL_SERVER_ERROR).into_response()
 }
 
 /// The `Retry-After` seconds of the time `left` in a quota window: rounded
 /// up to whole seconds and at least 1, so a retry never comes early.
-fn retry_after_seconds(left: Duration) -> u64 {
+fn quota_retry_after_seconds(left: Duration) -> u64 {
     left.as_secs()
         .saturating_add(u64::from(left.subsec_nanos() > 0))
         .max(1)
@@ -388,7 +395,7 @@ fn quota_exceeded(left: Duration) -> Response {
     )
     .retryable()
     .into_response();
-    let value = HeaderValue::from(retry_after_seconds(left));
+    let value = HeaderValue::from(quota_retry_after_seconds(left));
     response.headers_mut().insert(header::RETRY_AFTER, value);
     response
 }
@@ -396,14 +403,14 @@ fn quota_exceeded(left: Duration) -> Response {
 /// A store failure (ADR-140 P34): a host or store that cannot answer now is
 /// the Gateway's retryable `503`, which also marks a stale binding; every
 /// other store failure is the internal-failure arm.
-fn store_failure(error: CoreError) -> Response {
+fn preview_store_failure(error: CoreError) -> Response {
     if matches!(
         error,
         CoreError::ErasureContainmentUnavailable | CoreError::ModeBindingStale
     ) {
         GatewayError::Store(error).into_response()
     } else {
-        internal()
+        preview_internal_failure()
     }
 }
 
@@ -412,7 +419,7 @@ fn preview_problem(error: DecisionPreviewErrorV1) -> Response {
     use ProblemCodeV1 as Code;
     let (code, status, detail, retryable) = match error {
         DecisionPreviewErrorV1::Gateway(error) => return error.into_response(),
-        DecisionPreviewErrorV1::NotFound => return not_found(),
+        DecisionPreviewErrorV1::NotFound => return preview_not_found(),
         DecisionPreviewErrorV1::QuotaExceeded { retry_after } => {
             return quota_exceeded(retry_after)
         }
@@ -420,8 +427,8 @@ fn preview_problem(error: DecisionPreviewErrorV1) -> Response {
         // `ModeBindingStale`, so the conflict and parent-head arms of
         // `revision::store_failure` cannot occur here.
         DecisionPreviewErrorV1::Revisions(error) => return crate::revision::store_failure(error),
-        DecisionPreviewErrorV1::Store(error) => return store_failure(error),
-        DecisionPreviewErrorV1::Internal => return internal(),
+        DecisionPreviewErrorV1::Store(error) => return preview_store_failure(error),
+        DecisionPreviewErrorV1::Internal => return preview_internal_failure(),
         DecisionPreviewErrorV1::InFlightLimit => (
             Code::ResourceLimitExceeded,
             StatusCode::TOO_MANY_REQUESTS,
@@ -488,7 +495,7 @@ async fn admit_holding(
 
 /// `POST /v1/decision-previews`: admit one Decision Preview of the acting
 /// entity under the permit of its `decision-preview.create` decision.
-pub(crate) async fn create(
+pub(crate) async fn create_decision_preview_route(
     gateway: &Gateway,
     authority: OperationAuthority<CreateDecisionPreviewOperation>,
     idempotency_key: String,
@@ -511,13 +518,13 @@ pub(crate) async fn create(
 /// `GET /v1/decision-previews/{preview_id}`: one of the acting entity's own
 /// Decision Previews under the permit of its `decision-preview.read`
 /// decision.
-pub(crate) async fn read(
+pub(crate) async fn read_decision_preview_route(
     gateway: &Gateway,
     authority: OperationAuthority<ReadDecisionPreviewOperation>,
     preview_id: &str,
 ) -> Response {
     let Some(preview_id) = canonical_ulid(preview_id).map(EventId::from_ulid) else {
-        return invalid("the path does not name a canonical preview ID").into_response();
+        return invalid_preview_request("the path names no canonical preview ID").into_response();
     };
     match authority.authorize(gateway, None).await {
         Ok(permit) => gateway
