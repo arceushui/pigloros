@@ -242,11 +242,18 @@ impl Served {
     async fn holds_the_consent_and_erasure_host_timelines(&self) -> TestResult<bool> {
         let consents = crate::local_principal::local_principal_consent_timeline();
         let roots = self.gateway.host_timelines().roots();
-        assert_eq!(roots.len(), 3, "the Erasure Host Timeline is recorded");
+        assert_eq!(roots.len(), 4, "the Erasure Host Timeline is recorded");
         let erasure_host = roots
             .iter()
             .copied()
-            .find(|root| *root != consents && *root != local_principal_authority_timeline())
+            .find(|root| {
+                ![
+                    consents,
+                    local_principal_authority_timeline(),
+                    crate::decision_preview::decision_previews_timeline(),
+                ]
+                .contains(root)
+            })
             .ok_or("no Erasure Host Timeline")?;
         for root in [consents, erasure_host] {
             let held = self
