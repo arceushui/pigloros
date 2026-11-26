@@ -595,6 +595,7 @@ def daemon_files() -> dict[str, bytes | str]:
         f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
         f"{base}/execute-report": EXECUTE_REPORT, f"{base}/execute-stderr": "",
         f"{base}/execute-status": "0\n", f"{base}/attempt-journal": ATTEMPT_JOURNAL,
+        f"{base}/exchange-journal": "", f"{base}/leftover-mounts": "",
     }
 
 

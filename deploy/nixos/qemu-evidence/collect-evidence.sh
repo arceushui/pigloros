@@ -237,6 +237,8 @@ execute_case() { # DIR EXPORT_DIRECTORY
     >"$1/execute-report" 2>"$1/execute-stderr" || status=$?
   printf '%s\n' "${status}" >"$1/execute-status"
   journalctl --sync
+  # Diagnostics for an attempt that did not complete: everything the guest logged lately.
+  journalctl --boot --no-pager --output=short-monotonic --lines=800 >"$1/exchange-journal"
   journalctl --boot --no-pager --output=short-monotonic _PID=1 \
     | { grep -F 'Deactivated successfully' || true; } \
     | { grep -vF "${RUNTIME_UNIT}.service" || true; } >"$1/attempt-journal"
@@ -302,6 +304,11 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   rm -- "${fifo}"
   rm -rf -- "${exports}"
   printf '%s\n' "${status}" >"${dir}/stage-status"
+  # A mount that outlives the runtime (an attempt root that was not detached) is evidence of its
+  # own; it is recorded, then detached so that the removal below, and the later cases, can run.
+  { findmnt --raw --noheadings --output TARGET,FSTYPE | grep "^${RUNTIME_ROOT}/" || true; } \
+    >"${dir}/leftover-mounts"
+  sort -r "${dir}/leftover-mounts" | while read -r target _; do umount --lazy "${target}" || true; done
   rm -rf "${RUNTIME_ROOT}"
 }
 
