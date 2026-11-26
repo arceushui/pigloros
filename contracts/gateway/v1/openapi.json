@@ -2320,18 +2320,26 @@
     "/v1/decision-previews": {
       "post": {
         "operationId": "createDecisionPreview",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#305",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
         "tags": [
           "decision-preview"
         ],
-        "description": "Draft (#305): Admit one inert Decision Preview bound to exact input revisions and a profile. Not served yet; only its golden examples validate. #305 turns it into a served, drift-checked operation.",
+        "description": "Admit one inert Decision Preview (#305, ADR-140) under the `decision-preview.create` grant: the `pigloros.match-score.v1` Recommendation of the acting entity's own Preference and OptionSpec revisions in an exact Scenario Room revision, under one installed EPF1. The order is: a malformed body, a missing or malformed `Idempotency-Key`, a malformed ULID and a `schema_version` that is not the integer 1 (`400`: `unsupported-version` for any other number), an oversized body (`413`) and another content type (`415`) before the authority decision; then the decision; then the Principal's in-flight slot (`429`, four at a time, exact retries included); then the claim lookup: the same key with another request is `409 idempotency-conflict`, and an exact retry re-checks the bound room's consent, finishes an interrupted attempt and answers the original `202` receipt bytes. A fresh request then passes the profile gate (`409 incompatible-profile` for a profile outside the bound mode's servable set or without an installed EPF1; until #1364 and #461 install one, every fresh request stops here), the room (its `provenance.digest` must be `scenario_room.digest`), the bindings (`404`) and the room consent (`403`), and commits one `preview.request.v1` claim and its `preview.result.v1` result on the host-owned `decision-previews` Timeline in one store command, under the per-minute quota and the store ceiling (`429`). The `202` receipt names the preview: `request_id` = `operation_id` = the preview ID, the claim Event's ID. It never claims that anything committed: `getDecisionPreview` reports the state.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it. The Preference and the OptionSpec must be its own and it must be a `persona` participant of the room. Without it the request is `401 unauthenticated`."
           }
         ],
         "requestBody": {
@@ -2346,7 +2354,7 @@
         },
         "responses": {
           "202": {
-            "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "description": "Admitted and computed (or the original admission of an exact retry, the same bytes). The receipt never claims that an Event committed.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2361,7 +2369,7 @@
             }
           },
           "400": {
-            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "description": "`invalid-request` (a malformed body or ULID, a `schema_version` that is not a number, or a missing or malformed `Idempotency-Key`) or `unsupported-version` (a `schema_version` that is any number other than the integer 1), before the authority decision.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2376,7 +2384,7 @@
             }
           },
           "401": {
-            "description": "`unauthenticated`.",
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2391,52 +2399,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` or `consent-invalid`.",
-            "headers": {
-              "Cache-Control": {
-                "$ref": "#/components/headers/CacheControl"
-              }
-            },
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "`idempotency-conflict`, `incompatible-profile` or `artifact-untrusted`.",
-            "headers": {
-              "Cache-Control": {
-                "$ref": "#/components/headers/CacheControl"
-              }
-            },
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
-            "headers": {
-              "Cache-Control": {
-                "$ref": "#/components/headers/CacheControl"
-              }
-            },
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`unauthorized`, `consent-invalid` or `revoked`: the grant, or the bound room's `privacy_export_ref` consent, checked under the operation's permit. The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked`.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2451,7 +2414,7 @@
             }
           },
           "404": {
-            "description": "`not-found-or-unavailable`: an input revision is unknown or protected.",
+            "description": "`not-found-or-unavailable`: a room, Preference or OptionSpec revision that is unknown, foreign (not the acting entity's), digest-mismatched or erased, or an acting entity that is not a `persona` participant of the room. Every case answers alike.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2465,8 +2428,89 @@
               }
             }
           },
-          "422": {
-            "description": "`admission-rejected`.",
+          "409": {
+            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: the request body exceeds the Gateway body bound.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "`invalid-request`: the request body is not `application/json`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`. Retryable without `Retry-After`: the Principal already has four requests in flight (`principal_concurrent_operations`), or the store executor is saturated. Retryable with `Retry-After`: the Principal used its per-minute admissions (`principal_admissions_per_minute`) until the window closes, or the caller or the host reached its denial-record bound. Permanent and not retryable: the store holds `decision_previews_per_store` previews.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal-safe-failure`: the store is inconsistent, in which case nothing is appended or recorded; or the result append failed after the claim committed for a reason other than an unavailable host, in which case the claim stays and an exact retry with the same key finishes the preview.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`. Retryable: the host cannot vouch for its revocation state, record the denial evidence or reach its store, including a result append that failed after the claim committed because the host could not answer (erasure containment unavailable, a stale execution-mode binding); the claim stays and an exact retry with the same key finishes the preview. Not retryable: the first preview of a store with an active erasure request on a Gateway without a Local erasure composition.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2489,18 +2533,26 @@
     "/v1/decision-previews/{preview_id}": {
       "get": {
         "operationId": "getDecisionPreview",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#305",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
         "tags": [
           "decision-preview"
         ],
-        "description": "Draft (#305): Observe one Decision Preview and its lifecycle state. Not served yet; only its golden examples validate. #305 turns it into a served, drift-checked operation.",
+        "description": "Observe one of the acting entity's own Decision Previews (#305, ADR-140) under the `decision-preview.read` grant. An unknown `preview_id` and a preview of another Principal or actor answer the same `404`. The bound room's consent is re-checked on every read. The state is `admitted` (no result yet), `committed`, `failed` (with its typed `failure.code`) or `degraded`: a computed preview whose Preference or OptionSpec revision was erased later withholds `/recommendation` with reason `deleted`. A committed Recommendation is recomputed from the bound revisions under `pigloros.match-score.v1`; `uncertainty` and `calibration` are `unavailable`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/PreviewId"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it. Only its own previews are found. Without it the read is `401 unauthenticated`."
           }
         ],
         "responses": {
@@ -2520,7 +2572,7 @@
             }
           },
           "400": {
-            "description": "`invalid-request` or `unsupported-version`.",
+            "description": "`invalid-request`: `preview_id` is not a canonical ULID.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2535,7 +2587,22 @@
             }
           },
           "401": {
-            "description": "`unauthenticated`.",
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized`, `consent-invalid` or `revoked`: the grant, or the preview's bound room consent.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2550,7 +2617,58 @@
             }
           },
           "404": {
-            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "description": "`not-found-or-unavailable`: identical for a missing preview and another Principal's or actor's; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the store executor is saturated (without `Retry-After`), or the caller or the host reached its denial-record bound (with `Retry-After`).",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal-safe-failure`: the store is inconsistent, for example a stored revision whose digest differs from the claim's.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable` (retryable): the host cannot vouch for its revocation state, record the denial evidence or read its store.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -4906,7 +5024,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile",
         "type": "object",
         "additionalProperties": false,
-        "description": "The ADR-104 EPF1 execution profile a resource was produced under, or its explicit absence. It never carries the serving mode, which is `mode_profile`. Until #461 installs an EPF1 every Gateway resource reports `state: unavailable` with `reason: not-installed`. When `installed`, `profile_id` is the ADR-058 family and `profile_digest` the raw EPF1 digest; `profile_id` is always in the servable set of the resource's mode (a server invariant, README rule 3).",
+        "description": "The ADR-104 EPF1 execution profile a resource was produced under, or its explicit absence. It never carries the serving mode, which is `mode_profile`. Every Gateway resource reports `state: unavailable` with `reason: not-installed`, except a Decision Preview, which reports the EPF1 it was admitted under; in production no preview can be admitted until #1364 or #461 installs an EPF1. When `installed`, `profile_id` is the ADR-058 family and `profile_digest` the raw EPF1 digest; `profile_id` is always in the servable set of the resource's mode (a server invariant, README rule 3).",
         "required": [
           "profile_kind",
           "state"
@@ -5372,7 +5490,6 @@
       },
       "LifecycleState": {
         "$id": "urn:pigloros:gateway:v1:schema:lifecycle-state",
-        "x-pigloros-maturity": "draft",
         "enum": [
           "submitted",
           "rejected",
@@ -5401,10 +5518,9 @@
       },
       "RevisionRef": {
         "$id": "urn:pigloros:gateway:v1:schema:revision-ref",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "One exact immutable input revision and the digest of its canonical bytes.",
+        "description": "One exact immutable input revision and the digest of its canonical bytes. For a Scenario Room revision the digest is its `provenance.digest`; for a Preference or OptionSpec revision it is its `digest`.",
         "required": [
           "id",
           "revision",
@@ -6270,17 +6386,21 @@
       },
       "CreateDecisionPreviewRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:create-decision-preview-request",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "Binds one inert preview to exact input revisions and one execution profile.",
+        "description": "Binds one inert preview to exact input revisions and one execution profile. `scenario_room.digest` is the room revision's `provenance.digest`, not its `descriptor_hash`; `preference` and `option_spec` name the revisions by their `digest`.",
         "required": [
+          "schema_version",
           "scenario_room",
           "preference",
           "option_spec",
           "profile_id"
         ],
         "properties": {
+          "schema_version": {
+            "const": 1,
+            "description": "The schema version of the request; any other number is `400 unsupported-version`, and a value that is not a number is `400 invalid-request`."
+          },
           "scenario_room": {
             "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
           },
@@ -6297,12 +6417,37 @@
       },
       "DecisionPreview": {
         "$id": "urn:pigloros:gateway:v1:schema:decision-preview",
-        "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One Decision Preview. Admission (`admitted`) is never a commit claim; only `committed` names an Event sequence. `committed` is null exactly while the preview is `admitted` or `failed` (pre-commit); every later state, including `degraded`, follows a commit. Every proposal is inert and no route creates a real-world effect.",
+        "description": "One Decision Preview. Admission (`admitted`) is never a commit claim; only `committed` names an Event sequence. `committed` is null exactly while the preview is `admitted` or `failed` (pre-commit); every later state, including `degraded`, follows a commit. `committed` names the preview's `preview.result.v1` Event (#305); #306 simulated actions are referenced by their own member. `failure` is an object exactly when the state is `failed`. Uncertainty and calibration are separate members and never stand in for the Recommendation's evidence. Every proposal is inert and no route creates a real-world effect.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "properties": {
+                "failure": {
+                  "type": "object"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "failure": {
+                  "type": "null"
+                }
+              }
+            }
           }
         ],
         "required": [
@@ -6319,7 +6464,10 @@
           "recommendation",
           "committed",
           "proposals",
-          "actuation"
+          "actuation",
+          "failure",
+          "uncertainty",
+          "calibration"
         ],
         "properties": {
           "schema_id": {
@@ -6426,12 +6574,13 @@
                   },
                   "toss_up": {
                     "type": "boolean",
-                    "description": "True when the margin is below 0.02."
+                    "description": "True when `margin_micro` < 20,000 (0.02 on the signed scale); `option_key` is then null."
                   },
                   "margin_micro": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 2000000
+                    "maximum": 2000000,
+                    "description": "The largest score minus the second-largest (max minus second-max); 0 when the maximum is shared."
                   },
                   "scores": {
                     "type": "array",
@@ -6454,9 +6603,23 @@
                           "maximum": 1000000
                         }
                       }
-                    }
+                    },
+                    "description": "Every option once, in the OptionSpec's authored order, scored by `pigloros.match-score.v1`."
                   }
                 }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "withheld"
+                  }
+                },
+                "description": "A `degraded` preview: a bound input was erased, so no value derived from it is shown."
               }
             ]
           },
@@ -6469,7 +6632,36 @@
                 "type": "null"
               }
             ],
-            "description": "The committed simulated action, once its Event has a sequence."
+            "description": "The preview's `preview.result.v1` Event, once its result committed; null while `admitted` or `failed`. Its `next_cursor` is null: no client reads the `decision-previews` Timeline."
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                    "description": "The typed terminal failure. Open within v1; server invariant: `input-deleted` is the only code #305 emits."
+                  }
+                }
+              }
+            ],
+            "description": "The typed terminal failure of a `failed` preview; null in every other state."
+          },
+          "uncertainty": {
+            "$ref": "urn:pigloros:gateway:v1:schema:uncertainty"
+          },
+          "calibration": {
+            "$ref": "urn:pigloros:gateway:v1:schema:calibration-status"
           },
           "proposals": {
             "const": "inert"
@@ -7168,9 +7360,57 @@
         },
         "unevaluatedProperties": false
       },
+      "Uncertainty": {
+        "$id": "urn:pigloros:gateway:v1:schema:uncertainty",
+        "description": "Uncertainty of a result: explicitly `unavailable` or `insufficient-evidence`, otherwise `reported` with its method, ensemble size and spread. It never stands in for calibration.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "unavailable",
+                  "insufficient-evidence"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "method",
+              "ensemble_size",
+              "spread_micro"
+            ],
+            "properties": {
+              "status": {
+                "const": "reported"
+              },
+              "method": {
+                "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+              },
+              "ensemble_size": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 16
+              },
+              "spread_micro": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000000
+              }
+            }
+          }
+        ]
+      },
       "CalibrationStatus": {
         "$id": "urn:pigloros:gateway:v1:schema:calibration-status",
-        "x-pigloros-maturity": "draft",
         "description": "Calibration Report status: explicitly `unavailable` or `insufficient-evidence`, otherwise a report naming its population, method and limitations. It is named empirical evidence, never general truth.",
         "oneOf": [
           {
@@ -7427,51 +7667,7 @@
             ]
           },
           "uncertainty": {
-            "oneOf": [
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "status"
-                ],
-                "properties": {
-                  "status": {
-                    "enum": [
-                      "unavailable",
-                      "insufficient-evidence"
-                    ]
-                  }
-                }
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "status",
-                  "method",
-                  "ensemble_size",
-                  "spread_micro"
-                ],
-                "properties": {
-                  "status": {
-                    "const": "reported"
-                  },
-                  "method": {
-                    "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
-                  },
-                  "ensemble_size": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 16
-                  },
-                  "spread_micro": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 2000000
-                  }
-                }
-              }
-            ]
+            "$ref": "urn:pigloros:gateway:v1:schema:uncertainty"
           },
           "calibration": {
             "$ref": "urn:pigloros:gateway:v1:schema:calibration-status"
@@ -8305,8 +8501,7 @@
       "enforced_by": {
         "schema": [
           "/components/schemas/CreateEnsembleRequest/properties/forks/maxItems",
-          "/components/schemas/Ensemble/properties/forks/maxItems",
-          "/components/schemas/PreviewEvidence/properties/uncertainty/oneOf/1/properties/ensemble_size/maximum"
+          "/components/schemas/Ensemble/properties/forks/maxItems"
         ]
       }
     },
@@ -8546,7 +8741,7 @@
       "scope": "structural",
       "origin": "new",
       "source": "chosen by #1313",
-      "surface": "draft",
+      "surface": "served",
       "direction": "response",
       "enforced_by": {
         "schema": [
@@ -8687,13 +8882,28 @@
         }
       }
     },
+    "decision_previews_per_store": {
+      "value": 5000,
+      "unit": "previews",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "#305: half of events_per_timeline (two Events per preview)",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
+      }
+    },
     "principal_concurrent_operations": {
       "value": 4,
       "unit": "operations",
       "scope": "per-principal",
       "origin": "new",
-      "source": "chosen by #1313; admitted operations not yet terminal",
-      "surface": "draft",
+      "source": "chosen by #1313; in-flight `createDecisionPreview` requests of the Principal, exact retries included",
+      "surface": "served",
       "direction": "request",
       "enforced_by": {
         "runtime": {
@@ -8708,7 +8918,7 @@
       "scope": "per-principal",
       "origin": "new",
       "source": "chosen by #1313; an operational wall-clock quota that never decides an authoritative result",
-      "surface": "draft",
+      "surface": "served",
       "direction": "request",
       "enforced_by": {
         "runtime": {
