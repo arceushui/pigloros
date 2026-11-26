@@ -472,11 +472,28 @@ impl Gateway {
         permit: &GatewayOperationPermitV1,
         input: &ScenarioRoomInputV1,
     ) -> Result<Option<(Arc<GatewayAuthorization>, PendingAuthorityDenial)>, RoomFailureV1> {
+        self.consent_denial(permit, input.privacy_export_ref)
+            .map_err(RoomFailureV1::Gateway)
+    }
+
+    /// The denial of the consent `consent_ref` names, with its authorizer.
+    ///
+    /// The consent is read as the decision of `permit` pinned it. This is
+    /// the check of [`Self::room_consent_denial`], which a Decision Preview
+    /// also makes on its bound room's consent (ADR-140 D6).
+    ///
+    /// # Errors
+    /// A refusal that yields no recordable denial fails closed with
+    /// [`GatewayError::AuthorizationEvidenceUnavailable`] (`503`).
+    pub(crate) fn consent_denial(
+        &self,
+        permit: &GatewayOperationPermitV1,
+        consent_ref: EntityId,
+    ) -> Result<Option<(Arc<GatewayAuthorization>, PendingAuthorityDenial)>, GatewayError> {
         let Some(authorization) = self.authorization.clone() else {
             return Ok(None);
         };
-        let consent =
-            self.consent_pinned(permit, EventId::from_ulid(input.privacy_export_ref.inner()));
+        let consent = self.consent_pinned(permit, EventId::from_ulid(consent_ref.inner()));
         let refusal = match consent {
             None => Some((
                 AuthorizationOutcomeV1::ConsentMissing,
@@ -496,9 +513,7 @@ impl Gateway {
                         GatewayAuthorization::deny_at_commit_fence(decision, outcome, Some(error))
                     })
                     .map(|pending| (Arc::clone(&authorization), pending))
-                    .ok_or(RoomFailureV1::Gateway(
-                        GatewayError::AuthorizationEvidenceUnavailable,
-                    ))
+                    .ok_or(GatewayError::AuthorizationEvidenceUnavailable)
             })
             .transpose()
     }
