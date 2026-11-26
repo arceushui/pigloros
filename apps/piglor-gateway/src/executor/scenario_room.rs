@@ -194,7 +194,7 @@ impl StoreExecutor {
     }
 }
 
-fn run_room_operation(
+pub(super) fn run_room_operation(
     host: &mut ErasureExecutionHostV1,
     operation: RoomOperationV1,
     admission: &RoomAdmissionV1,
@@ -539,7 +539,7 @@ fn append_revision(
 }
 
 /// The Timeline and revision Events of `room_id`, in revision order.
-fn room_revisions(
+pub(super) fn room_revisions(
     host: &mut ErasureExecutionHostV1,
     room_id: EntityId,
 ) -> RoomResult<(TimelineId, Vec<Event>)> {
@@ -595,14 +595,14 @@ fn read_all(host: &mut ErasureExecutionHostV1, timeline: TimelineId) -> RoomResu
 }
 
 /// The Event of revision `revision`, counting from 1.
-fn revision_at(revisions: &[Event], revision: u64) -> Option<&Event> {
+pub(super) fn revision_at(revisions: &[Event], revision: u64) -> Option<&Event> {
     usize::try_from(revision)
         .ok()
         .and_then(|revision| revision.checked_sub(1))
         .and_then(|index| revisions.get(index))
 }
 
-fn descriptor_of(event: &Event) -> RoomResult<ScenarioRoomDescriptorV1> {
+pub(super) fn descriptor_of(event: &Event) -> RoomResult<ScenarioRoomDescriptorV1> {
     ScenarioRoomDescriptorV1::from_payload(event.payload.as_slice()).map_err(RoomStoreErrorV1::from)
 }
 

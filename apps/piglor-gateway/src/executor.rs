@@ -81,6 +81,7 @@ macro_rules! submit {
     }};
 }
 
+pub mod decision_preview;
 pub mod erasure;
 pub mod scenario_room;
 
