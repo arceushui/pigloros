@@ -303,7 +303,11 @@ mod tests {
         geographic.event_type = crate::Kind::new(crate::GEOGRAPHIC_EVENT_TYPE);
         let mut consent = make_event(entity);
         consent.event_type = crate::Kind::new(crate::EVENT_TYPE_CONSENT_REVOKED_V1);
-        [(make_event(entity), true), (geographic, false), (consent, false)]
+        [
+            (make_event(entity), true),
+            (geographic, false),
+            (consent, false),
+        ]
     }
 
     #[test]

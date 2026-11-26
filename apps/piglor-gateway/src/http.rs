@@ -3812,7 +3812,10 @@ osf_link = \"https://osf.io/example\"\n";
             origin: pos_runtime::ActionRejectionOriginV1::ApprovedOutput,
             reason: ActionRejected::InvalidActorEntityId,
         });
-        assert_eq!(error.to_string(), "action rejected: invalid actor entity ID");
+        assert_eq!(
+            error.to_string(),
+            "action rejected: invalid actor entity ID"
+        );
         assert!(matches!(
             error,
             GatewayError::ActionRejectedBy {
