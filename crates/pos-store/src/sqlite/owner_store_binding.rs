@@ -6,12 +6,25 @@
 //! live here; the filesystem screening, the diagnostic parser and the
 //! process-lifetime context live in [`crate::owner_store_binding`].
 //!
-//! The native connection is owned through `ManuallyDrop` and is never closed
-//! by a destructor (ADR-123 §1, §6): only [`QualifiedSqliteStoreV1::close`]
-//! closes it, under admission, the interlock and a witness recheck. A handle
-//! dropped without it, or a close that cannot be proved safe, retains the
-//! connection and its witnesses until process exit and keeps the context's
-//! native slot occupied.
+//! The native connection is owned through `ManuallyDrop` from the moment it
+//! is opened and is never closed by a destructor, also while a panic unwinds
+//! (ADR-123 §1, §6): only [`QualifiedSqliteStoreV1::close`] closes it, under
+//! admission, the interlock and a witness recheck. A handle dropped without
+//! it, a panic before a proved close, or a close that cannot be proved safe
+//! retains the connection and its witnesses until process exit, keeps the
+//! context's native slot occupied and records the main file's identity so no
+//! later context in the process opens a second connection to it.
+//!
+//! A failed diagnostic query (`sqlite_filestat` missing, over the length
+//! limit or malformed) always retains and quarantines, never a clean
+//! `Unavailable` with disposal: the connection's native owner is uncertain.
+//! This is conservative and reachable only in test-support builds.
+//!
+//! A proven identity that differs from the caller's pre-screen key returns
+//! the fixed `Unavailable` before the schema or mode binding is touched
+//! (ADR-123 §6 selects no new error variant). A lease-holding `serve` caller
+//! maps that result to ADR-137 `LeaseIdentityMismatch` itself, because it
+//! alone knows it supplied the key.
 
 use std::fmt;
 use std::mem::ManuallyDrop;
@@ -20,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{GatewayModeBindingErrorV1, GatewayModeBindingPortV1, GatewayModeBindingRecordV1};
+use pos_crypto::subject_field_read::SubjectFieldOwnerReadErrorV1;
 use pos_crypto::subject_nonce_ledger::SubjectStoreFileIdV1;
 use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags};
@@ -28,7 +42,8 @@ use rustix::fd::OwnedFd;
 use super::SqliteStore;
 use crate::owner_store_admission::OwnerStoreOperationV1;
 use crate::owner_store_binding::{
-    OwnerStoreBindingErrorV1, OwnerStoreContextV1, OwnerStoreWitnessesV1,
+    is_retained, record_retained, OwnerStoreBindingErrorV1, OwnerStoreContextV1,
+    OwnerStoreWitnessesV1,
 };
 use crate::owner_store_interlock::OwnerStoreFileInterlockV1;
 
@@ -44,6 +59,10 @@ thread_local! {
     static FAIL_MANAGED_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only seam: the guarded `COMMIT` or `ROLLBACK` fails.
     static FAIL_TRANSACTION_FINISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only seam: setup panics after the connection opened.
+    static PANIC_SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only seam: managed disposal panics before the connection closes.
+    static PANIC_DISPOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The qualified owner store: one managed native connection to an installed
@@ -57,13 +76,65 @@ pub struct QualifiedSqliteStoreV1 {
     main_basename: String,
     file_id: SubjectStoreFileIdV1,
     native: ManuallyDrop<NativeOwnerV1>,
+    retention: RetentionGuardV1,
 }
 
-/// Everything retained with the native connection.
+/// Everything retained with the native connection. The store is never
+/// dropped: only managed disposal takes the connection out.
 struct NativeOwnerV1 {
-    store: SqliteStore,
+    store: ManuallyDrop<SqliteStore>,
     witnesses: OwnerStoreWitnessesV1,
     native_witnesses: [OwnedFd; 3],
+}
+
+/// Records the main file's identity as retained when dropped armed, whether
+/// the handle was dropped, a step retained the connection or a panic unwound.
+/// Only a proved close or disposal disarms it.
+struct RetentionGuardV1 {
+    file_id: SubjectStoreFileIdV1,
+    armed: bool,
+}
+
+impl RetentionGuardV1 {
+    const fn new(file_id: SubjectStoreFileIdV1) -> Self {
+        Self {
+            file_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RetentionGuardV1 {
+    fn drop(&mut self) {
+        if self.armed {
+            record_retained(self.file_id);
+        }
+    }
+}
+
+/// A native setup that opened: the retained owner and its retention guard.
+type BoundV1 = (NativeOwnerV1, RetentionGuardV1);
+
+/// Why [`QualifiedSqliteStoreV1::close`] did not close the connection.
+#[derive(Debug)]
+pub enum OwnerStoreCloseErrorV1 {
+    /// Shared admission refused before any lower lock. The connection was not
+    /// touched and nothing was quarantined by this call: the handle is
+    /// returned so disposal can be retried.
+    Refused {
+        /// The admission refusal.
+        error: SubjectFieldOwnerReadErrorV1,
+        /// The untouched handle.
+        store: Box<QualifiedSqliteStoreV1>,
+    },
+    /// A busy interlock, a changed witness or a failed close. The connection
+    /// and witnesses stay retained until process exit and the context is
+    /// quarantined (ADR-123 §6).
+    Quarantined,
 }
 
 /// The borrowed binding that exists only inside a guarded operation.
@@ -83,6 +154,12 @@ impl StepV1 {
     fn release_refused_slot(&self, context: &OwnerStoreContextV1) {
         if let Self::Refuse(_) = self {
             context.release_native_slot();
+        }
+    }
+
+    fn record_retained(&self, file_id: SubjectStoreFileIdV1) {
+        if matches!(self, Self::Retain) {
+            record_retained(file_id);
         }
     }
 }
@@ -131,7 +208,8 @@ impl QualifiedSqliteStoreV1 {
     /// then one setup `BEGIN IMMEDIATE` holding the native proof, schema
     /// validation (the store is never initialized) and the LC3 mode attach:
     /// `load_mode_binding`, then `attach_mode_binding` to that record's
-    /// profile. The proven identity must equal `pre_screen_key`.
+    /// profile. The proven identity must equal `pre_screen_key`; that is
+    /// checked right after the proof, before the schema or the mode binding.
     ///
     /// # Errors
     /// Returns `Admission` before any lower lock. A full native slot, an
@@ -141,7 +219,9 @@ impl QualifiedSqliteStoreV1 {
     /// mismatched mode binding returns `ModeBinding`. In those cases the
     /// connection, if opened, was closed under the interlock after a witness
     /// recheck. A failed native proof, a failed length-limit restore or an
-    /// unproved close returns `Quarantined`.
+    /// unproved close returns `Quarantined`. A main file whose connection a
+    /// quarantined or dropped handle retained is `Unavailable` to every
+    /// context in this process.
     pub fn open(
         context: Arc<OwnerStoreContextV1>,
         test_database_directory: &Path,
@@ -164,12 +244,13 @@ impl QualifiedSqliteStoreV1 {
         } else {
             Err(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
         };
-        conclude(admitted, outcome).map(|native| Self {
+        conclude(admitted, outcome).map(|(native, retention)| Self {
             file_id: native.witnesses.store_file_id(),
             context,
             directory: test_database_directory.to_path_buf(),
             main_basename: main_basename.to_owned(),
             native: ManuallyDrop::new(native),
+            retention,
         })
     }
 
@@ -202,10 +283,19 @@ impl QualifiedSqliteStoreV1 {
             .map_err(OwnerStoreBindingErrorV1::Admission)?;
         let file_id = self.file_id;
         let native = &mut *self.native;
+        let directory = &self.directory;
         let outcome =
-            OwnerStoreFileInterlockV1::try_acquire(&admitted, &self.directory, &self.main_basename)
+            OwnerStoreFileInterlockV1::try_acquire(&admitted, directory, &self.main_basename)
                 .map_err(|_| StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
-                .and_then(|_interlock| run_guarded(native, file_id, operation));
+                .and_then(|_interlock| {
+                    native
+                        .witnesses
+                        .names_directory(directory)
+                        .then_some(())
+                        .ok_or(StepV1::Retain)
+                        .and_then(|()| run_guarded(native, file_id, operation))
+                })
+                .inspect_err(|step| step.record_retained(file_id));
         conclude(admitted, outcome)
     }
 
@@ -213,34 +303,54 @@ impl QualifiedSqliteStoreV1 {
     /// a recheck of every retained witness, then release the native slot.
     ///
     /// # Errors
-    /// Returns `Admission` without touching the connection, which stays
-    /// retained. A busy interlock, a changed witness or a failed close
-    /// returns `Quarantined` and retains the connection until process exit.
-    pub fn close(self) -> Result<(), OwnerStoreBindingErrorV1> {
+    /// Returns `Refused` with the untouched handle when shared admission
+    /// refuses before any lower lock. A busy interlock, a directory that no
+    /// longer names the retained one, a changed witness or a failed close
+    /// returns `Quarantined` and retains the connection until process exit
+    /// (ADR-123 §6). A panic before the close completes retains it too.
+    pub fn close(self) -> Result<(), OwnerStoreCloseErrorV1> {
+        let context = Arc::clone(&self.context);
+        let admitted = match context.admission().try_enter() {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return Err(OwnerStoreCloseErrorV1::Refused {
+                    error,
+                    store: Box::new(self),
+                })
+            }
+        };
         let Self {
-            context,
             directory,
             main_basename,
             native,
+            retention,
             ..
         } = self;
-        let admitted = context
-            .admission()
-            .try_enter()
-            .map_err(OwnerStoreBindingErrorV1::Admission)?;
         let outcome = OwnerStoreFileInterlockV1::try_acquire(&admitted, &directory, &main_basename)
             .map_err(|_| StepV1::Retain)
             .and_then(|_interlock| {
-                let NativeOwnerV1 {
-                    store,
-                    witnesses,
-                    native_witnesses,
-                } = ManuallyDrop::into_inner(native);
-                dispose(store, witnesses, native_witnesses)
-                    .then(|| context.release_native_slot())
+                close_native(native, &directory)
+                    .then(|| {
+                        context.release_native_slot();
+                        retention.disarm();
+                    })
                     .ok_or(StepV1::Retain)
             });
-        conclude(admitted, outcome)
+        conclude(admitted, outcome).map_err(|_| OwnerStoreCloseErrorV1::Quarantined)
+    }
+}
+
+/// Dispose of the retained owner under the held interlock, once the
+/// interlock's directory is the retained one. The store stays inside
+/// `ManuallyDrop` until `managed_close` owns the bare connection.
+fn close_native(native: ManuallyDrop<NativeOwnerV1>, directory: &Path) -> bool {
+    native.witnesses.names_directory(directory) && {
+        let NativeOwnerV1 {
+            store,
+            witnesses,
+            native_witnesses,
+        } = ManuallyDrop::into_inner(native);
+        dispose(store, witnesses, native_witnesses)
     }
 }
 
@@ -271,8 +381,9 @@ fn setup(
     directory: &Path,
     main_basename: &str,
     pre_screen_key: SubjectStoreFileIdV1,
-) -> Result<NativeOwnerV1, StepV1> {
+) -> Result<BoundV1, StepV1> {
     OwnerStoreWitnessesV1::screen(directory, main_basename)
+        .filter(|witnesses| !is_retained(witnesses.store_file_id()))
         .and_then(|witnesses| {
             witnesses
                 .sqlite_path(directory, main_basename)
@@ -284,8 +395,9 @@ fn setup(
 }
 
 /// Open the screened main file: read-write, no create, no URI, no symlink,
-/// the standard `unix` VFS and no reservation connection.
-fn open_native(path: &Path) -> Option<SqliteStore> {
+/// the standard `unix` VFS and no reservation connection. The store leaves
+/// here already inside `ManuallyDrop`, so no unwind can run its destructor.
+fn open_native(path: &Path) -> Option<ManuallyDrop<SqliteStore>> {
     Connection::open_with_flags_and_vfs(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -294,44 +406,54 @@ fn open_native(path: &Path) -> Option<SqliteStore> {
     .ok()
     .map(|conn| {
         conn.set_prepared_statement_cache_capacity(super::SQLITE_STATEMENT_CACHE_CAPACITY);
-        SqliteStore::with_connection(conn, None, Box::new(pos_crypto::chain::Blake3Hasher), 0)
+        ManuallyDrop::new(SqliteStore::with_connection(
+            conn,
+            None,
+            Box::new(pos_crypto::chain::Blake3Hasher),
+            0,
+        ))
     })
 }
 
 /// Configure, prove and attach inside the setup transaction; dispose of the
-/// connection on any refusal.
+/// connection on any refusal. The identity check follows the proof at once.
 fn bind_native(
-    mut store: SqliteStore,
+    mut store: ManuallyDrop<SqliteStore>,
     witnesses: OwnerStoreWitnessesV1,
     pre_screen_key: SubjectStoreFileIdV1,
-) -> Result<NativeOwnerV1, StepV1> {
+) -> Result<BoundV1, StepV1> {
     let file_id = witnesses.store_file_id();
+    let retention = RetentionGuardV1::new(file_id);
     let bound = configure(&store.conn)
         .then_some(())
         .ok_or(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
         .and_then(|()| begin(&store.conn))
         .and_then(|()| prove_in_transaction(&store.conn, &witnesses))
         .and_then(|native_witnesses| {
-            let attached = validate_and_attach(&mut ProtectedStoreFileBindingV1 {
-                store: &mut store,
-                file_id,
-            });
+            let attached = (file_id == pre_screen_key)
+                .then_some(())
+                .ok_or(OwnerStoreBindingErrorV1::Unavailable)
+                .and_then(|()| {
+                    validate_and_attach(&mut ProtectedStoreFileBindingV1 {
+                        store: &mut store,
+                        file_id,
+                    })
+                });
             finish(&store.conn, attached.is_ok())
                 .and_then(|()| attached.map_err(StepV1::Refuse))
                 .map(|()| native_witnesses)
-        })
-        .and_then(|native_witnesses| {
-            (file_id == pre_screen_key)
-                .then_some(native_witnesses)
-                .ok_or(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
         });
     match bound {
-        Ok(native_witnesses) => Ok(NativeOwnerV1 {
-            store,
-            witnesses,
-            native_witnesses,
-        }),
+        Ok(native_witnesses) => Ok((
+            NativeOwnerV1 {
+                store,
+                witnesses,
+                native_witnesses,
+            },
+            retention,
+        )),
         Err(StepV1::Refuse(error)) => Err(if dispose(store, witnesses, ()) {
+            retention.disarm();
             StepV1::Refuse(error)
         } else {
             StepV1::Retain
@@ -400,6 +522,8 @@ fn restore_limit(conn: &Connection, saved: i32) -> rusqlite::Result<()> {
 fn validate_and_attach(
     binding: &mut ProtectedStoreFileBindingV1<'_>,
 ) -> Result<(), OwnerStoreBindingErrorV1> {
+    #[cfg(test)]
+    assert!(!PANIC_SETUP.with(std::cell::Cell::get), "setup panic seam");
     binding
         .store()
         .finish_open(false, true)
@@ -458,9 +582,20 @@ fn finish_sql(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
 /// Managed close (ADR-123 §6): close only after the retained witnesses
 /// recheck; otherwise, or when the close fails, retain the connection, the
 /// witnesses and `retained` until process exit. Returns whether it closed.
-fn dispose<R>(store: SqliteStore, witnesses: OwnerStoreWitnessesV1, retained: R) -> bool {
+/// The store leaves `ManuallyDrop` only here, after the last step that could
+/// unwind, so a panic never runs the connection's destructor.
+fn dispose<R>(
+    store: ManuallyDrop<SqliteStore>,
+    witnesses: OwnerStoreWitnessesV1,
+    retained: R,
+) -> bool {
     let safe = witnesses.recheck();
-    let SqliteStore { conn, .. } = store;
+    #[cfg(test)]
+    assert!(
+        !PANIC_DISPOSE.with(std::cell::Cell::get),
+        "dispose panic seam"
+    );
+    let SqliteStore { conn, .. } = ManuallyDrop::into_inner(store);
     managed_close(conn, safe)
         .map_err(|failed| retain((failed, witnesses, retained)))
         .is_ok()
@@ -495,8 +630,6 @@ mod tests {
     use std::thread::LocalKey;
 
     use pos_core::{GatewayModeBindingHostV1, GatewayModeProfileRefV1};
-    use pos_crypto::subject_field_read::SubjectFieldOwnerReadErrorV1;
-    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::owner_store_admission::OwnerStoreAdmissionV1;
@@ -534,6 +667,16 @@ mod tests {
             )
         }
 
+        /// Open through a brand-new context for the same file.
+        fn open_fresh_context(&self) -> Result<QualifiedSqliteStoreV1, OwnerStoreBindingErrorV1> {
+            QualifiedSqliteStoreV1::open(
+                Arc::new(OwnerStoreContextV1::default()),
+                self.directory.path(),
+                MAIN,
+                self.key,
+            )
+        }
+
         fn path(&self, suffix: &str) -> PathBuf {
             self.directory.path().join(format!("{MAIN}{suffix}"))
         }
@@ -560,10 +703,9 @@ mod tests {
     }
 
     fn profile() -> TestResult<GatewayModeProfileRefV1> {
-        let digest = Sha256::digest(b"pigloros owner-store binding test profile");
         Ok(GatewayModeProfileRefV1::try_new(
             "owner-store-binding-test",
-            std::array::from_fn(|index| digest[index]),
+            [7; 32],
         )?)
     }
 
@@ -608,6 +750,29 @@ mod tests {
         install(directory)
     }
 
+    /// A complete bound store whose journal mode is `DELETE`, not WAL.
+    fn installed_delete_journal() -> TestResult<Fixture> {
+        let directory = private_directory()?;
+        {
+            let path = directory.path().join(MAIN);
+            let mut store = SqliteStore::open(path.to_str().ok_or("path")?)?;
+            store.bind_empty_store_mode(
+                GatewayModeBindingHostV1::new().authorize_bind(profile()?),
+            )?;
+        }
+        Connection::open(directory.path().join(MAIN))?.query_row(
+            "PRAGMA journal_mode = DELETE",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        install(directory)
+    }
+
+    fn journal_mode(fixture: &Fixture) -> TestResult<String> {
+        Ok(Connection::open(fixture.path(""))?
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))?)
+    }
+
     /// A WAL database that is not a store: it has no store schema.
     fn installed_foreign() -> TestResult<Fixture> {
         let directory = private_directory()?;
@@ -634,6 +799,20 @@ mod tests {
             )?;
         }
         install(directory)
+    }
+
+    fn closed(store: QualifiedSqliteStoreV1) -> TestResult {
+        store.close().map_err(|error| format!("{error:?}").into())
+    }
+
+    /// Run `action` with `seam` set, catching an unwind it causes.
+    fn with_panicking_seam<T>(
+        seam: &'static LocalKey<Cell<bool>>,
+        action: impl FnOnce() -> T,
+    ) -> std::thread::Result<T> {
+        with_seam(seam, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+        })
     }
 
     fn with_seam<T>(seam: &'static LocalKey<Cell<bool>>, action: impl FnOnce() -> T) -> T {
@@ -700,10 +879,11 @@ mod tests {
         let tables = store.guarded(|binding| table_names(&binding.store().conn))??;
         assert!(tables.iter().any(|name| name == "committed_probe"));
         assert!(!tables.iter().any(|name| name == "rolled_back_probe"));
-        store.close()?;
+        closed(store)?;
         let reopened = fixture.open()?;
         assert_eq!(reopened.store_file_id(), fixture.key);
-        reopened.close()?;
+        closed(reopened)?;
+        assert!(!fixture.path("-wal").exists());
         Ok(())
     }
 
@@ -722,13 +902,19 @@ mod tests {
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(fixture.open().err(), Some(ACTIVE));
         assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(ACTIVE));
-        assert_eq!(store.close().err(), Some(ACTIVE));
+        let Some(OwnerStoreCloseErrorV1::Refused { error, store }) = store.close().err() else {
+            return Err("an active admission must refuse the close".into());
+        };
+        assert_eq!(OwnerStoreBindingErrorV1::Admission(error), ACTIVE);
         active.complete_cleanly();
-        // The refused close retained the connection, so the slot stays full.
+        // The refused close returned the untouched handle, so the slot stays
+        // full until it is closed; a transient refusal does not leak it.
         assert_eq!(
             fixture.open().err(),
             Some(OwnerStoreBindingErrorV1::Unavailable)
         );
+        closed(*store)?;
+        closed(fixture.open()?)?;
         Ok(())
     }
 
@@ -748,7 +934,82 @@ mod tests {
             fixture.open_with(fixture.other_key).err(),
             Some(OwnerStoreBindingErrorV1::Unavailable)
         );
-        fixture.open()?.close()?;
+        closed(fixture.open()?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_key_mismatch_is_checked_before_the_mode_binding() -> TestResult {
+        let fixture = installed(false)?;
+        assert_eq!(
+            fixture.open_with(fixture.other_key).err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        assert_eq!(
+            fixture.open().err(),
+            Some(OwnerStoreBindingErrorV1::ModeBinding(
+                GatewayModeBindingErrorV1::Unbound
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_non_wal_main_file_is_refused_and_its_journal_mode_is_unchanged() -> TestResult {
+        let fixture = installed_delete_journal()?;
+        assert_eq!(journal_mode(&fixture)?, "delete");
+        assert_eq!(
+            fixture.open().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        assert_eq!(journal_mode(&fixture)?, "delete");
+        assert_eq!(
+            fixture.open().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_panic_during_setup_retains_the_open_connection() -> TestResult {
+        let fixture = installed(true)?;
+        assert!(with_panicking_seam(&PANIC_SETUP, || fixture.open()).is_err());
+        // An unwinding setup must not run SQLite's destructor, which would
+        // checkpoint and delete the WAL: the connection stays open.
+        assert!(fixture.path("-wal").exists());
+        assert!(!fixture.context.claim_native_slot());
+        assert_eq!(fixture.open().err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_panic_during_managed_close_retains_the_open_connection() -> TestResult {
+        let fixture = installed(true)?;
+        let store = fixture.open()?;
+        assert!(with_panicking_seam(&PANIC_DISPOSE, || store.close()).is_err());
+        assert!(fixture.path("-wal").exists());
+        assert!(!fixture.context.claim_native_slot());
+        assert_eq!(fixture.open().err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_dropped_handle_keeps_its_file_unavailable_to_a_new_context() -> TestResult {
+        let fixture = installed(true)?;
+        drop(fixture.open()?);
+        assert!(fixture.path("-wal").exists());
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
         Ok(())
     }
 
@@ -772,7 +1033,7 @@ mod tests {
         let fixture = installed(true)?;
         let busy = with_seam(&super::super::FAIL_BEGIN_IMMEDIATE, || fixture.open());
         assert_eq!(busy.err(), Some(OwnerStoreBindingErrorV1::Unavailable));
-        fixture.open()?.close()?;
+        closed(fixture.open()?)?;
         Ok(())
     }
 
@@ -785,6 +1046,10 @@ mod tests {
             Some(OwnerStoreBindingErrorV1::Quarantined)
         );
         assert_eq!(fixture.open().err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
         Ok(())
     }
 
@@ -838,10 +1103,10 @@ mod tests {
         assert_eq!(store.guarded(|_| Ok::<(), ()>(()))?, Ok(()));
         let interlock =
             OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.directory.path(), MAIN)?;
-        assert_eq!(
+        assert!(matches!(
             store.close().err(),
-            Some(OwnerStoreBindingErrorV1::Quarantined)
-        );
+            Some(OwnerStoreCloseErrorV1::Quarantined)
+        ));
         drop(interlock);
         operation.complete_cleanly();
         assert_eq!(fixture.open().err(), Some(QUARANTINED));
@@ -858,7 +1123,13 @@ mod tests {
             Some(OwnerStoreBindingErrorV1::Quarantined)
         );
         assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(QUARANTINED));
-        assert_eq!(store.close().err(), Some(QUARANTINED));
+        assert!(matches!(
+            store.close().err(),
+            Some(OwnerStoreCloseErrorV1::Refused {
+                error: SubjectFieldOwnerReadErrorV1::ContextQuarantined,
+                ..
+            })
+        ));
         Ok(())
     }
 
@@ -867,11 +1138,15 @@ mod tests {
         let fixture = installed(true)?;
         let store = fixture.open()?;
         fixture.replace_wal()?;
-        assert_eq!(
+        assert!(matches!(
             store.close().err(),
-            Some(OwnerStoreBindingErrorV1::Quarantined)
-        );
+            Some(OwnerStoreCloseErrorV1::Quarantined)
+        ));
         assert_eq!(fixture.open().err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
         Ok(())
     }
 
@@ -904,8 +1179,11 @@ mod tests {
     fn a_failed_managed_close_retains_and_quarantines() -> TestResult {
         let fixture = installed(true)?;
         let store = fixture.open()?;
-        let closed = with_seam(&FAIL_MANAGED_CLOSE, || store.close());
-        assert_eq!(closed.err(), Some(OwnerStoreBindingErrorV1::Quarantined));
+        let result = with_seam(&FAIL_MANAGED_CLOSE, || store.close());
+        assert!(matches!(
+            result.err(),
+            Some(OwnerStoreCloseErrorV1::Quarantined)
+        ));
         assert_eq!(fixture.open().err(), Some(QUARANTINED));
         Ok(())
     }

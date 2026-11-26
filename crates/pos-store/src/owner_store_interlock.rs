@@ -120,7 +120,7 @@ pub(crate) struct CheckedNamespace {
     pub(crate) directory: OwnedFd,
     main_basename: String,
     pub(crate) main: FileWitness,
-    companions: [Option<FileWitness>; 2],
+    pub(crate) companions: [Option<FileWitness>; 2],
 }
 
 impl CheckedNamespace {

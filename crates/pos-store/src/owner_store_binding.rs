@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use pos_core::GatewayModeBindingErrorV1;
 use pos_crypto::subject_field_read::SubjectFieldOwnerReadErrorV1;
@@ -31,10 +32,34 @@ use crate::owner_store_interlock::{
     check_regular, optional_file, same_file, CheckedNamespace, OBSERVE, RESOLVE,
 };
 
-pub use crate::sqlite::owner_store_binding::{ProtectedStoreFileBindingV1, QualifiedSqliteStoreV1};
+pub use crate::sqlite::owner_store_binding::{
+    OwnerStoreCloseErrorV1, ProtectedStoreFileBindingV1, QualifiedSqliteStoreV1,
+};
 
 /// The two companions, in diagnostic order: the WAL, then the SHM file.
 const COMPANIONS: [&str; 2] = ["-wal", "-shm"];
+
+/// Main-file identities whose native connection was retained or whose handle
+/// was dropped without a proved close. The retained connection keeps its
+/// inode allocated, so an entry never names a different file later.
+static RETAINED: Mutex<Vec<SubjectStoreFileIdV1>> = Mutex::new(Vec::new());
+
+/// Record `file_id` as retained for the rest of the process (ADR-123 §1: a
+/// fresh context, wrapper or alias cannot escape quarantine).
+pub(crate) fn record_retained(file_id: SubjectStoreFileIdV1) {
+    RETAINED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(file_id);
+}
+
+/// Whether a native connection to `file_id` is retained in this process.
+pub(crate) fn is_retained(file_id: SubjectStoreFileIdV1) -> bool {
+    RETAINED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&file_id)
+}
 
 /// Closed refusals of the qualified owner-store constructor and its guarded
 /// operations.
@@ -53,8 +78,9 @@ pub enum OwnerStoreBindingErrorV1 {
     #[error("protected owner store mode binding refused")]
     ModeBinding(GatewayModeBindingErrorV1),
     /// Closure was unproved or the native identity changed. The native
-    /// connection and witnesses stay retained until process exit and the
-    /// context is permanently quarantined.
+    /// connection and witnesses stay retained until process exit, the context
+    /// is permanently quarantined and the main file's identity is refused by
+    /// every later context in this process.
     #[error("protected owner store quarantined")]
     Quarantined,
 }
@@ -116,12 +142,14 @@ impl OwnerStoreWitnessesV1 {
                     .filter(|namespace| corresponds(&existing, namespace))
             })
             .and_then(|namespace| {
-                companion(&namespace.directory, main_basename, COMPANIONS[0]).and_then(|wal| {
-                    companion(&namespace.directory, main_basename, COMPANIONS[1]).map(|shm| Self {
+                let [wal, shm] = &namespace.companions;
+                wal.as_ref()
+                    .zip(shm.as_ref())
+                    .map(|(wal, shm)| [wal.stat, shm.stat])
+                    .map(|companions| Self {
                         namespace,
-                        companions: [wal, shm],
+                        companions,
                     })
-                })
             })
     }
 
@@ -142,20 +170,24 @@ impl OwnerStoreWitnessesV1 {
     /// The canonical absolute main path, checked against the retained
     /// directory descriptor. It is transport for `SQLite`, not identity.
     pub(crate) fn sqlite_path(&self, directory: &Path, main_basename: &str) -> Option<PathBuf> {
-        std::fs::canonicalize(directory).ok().and_then(|canonical| {
-            fs::openat(
-                CWD,
-                &canonical,
-                OBSERVE
-                    .union(OFlags::DIRECTORY)
-                    .difference(OFlags::NOFOLLOW),
-                Mode::empty(),
-            )
+        std::fs::canonicalize(directory)
             .ok()
-            .and_then(|resolved| same_object(&resolved, &self.namespace.directory))
-            .filter(|same| *same)
-            .map(|_| canonical.join(main_basename))
-        })
+            .filter(|canonical| self.names_directory(canonical))
+            .map(|canonical| canonical.join(main_basename))
+    }
+
+    /// Whether `directory` currently names the retained directory object.
+    pub(crate) fn names_directory(&self, directory: &Path) -> bool {
+        fs::openat(
+            CWD,
+            directory,
+            OBSERVE
+                .union(OFlags::DIRECTORY)
+                .difference(OFlags::NOFOLLOW),
+            Mode::empty(),
+        )
+        .ok()
+        .is_some_and(|resolved| same_object(&resolved, &self.namespace.directory) == Some(true))
     }
 
     /// Prove that the diagnostic's main, WAL and SHM descriptors are the
@@ -199,18 +231,22 @@ fn create_empty(directory: &OwnedFd, name: &str) -> Option<()> {
     .map(|_| ())
 }
 
-fn companion(directory: &OwnedFd, main_basename: &str, suffix: &str) -> Option<Stat> {
-    optional_file(directory, &format!("{main_basename}{suffix}"))
-        .ok()
-        .flatten()
-        .map(|witness| witness.stat)
-}
-
-/// Whether a re-screened namespace still names the original directory and
-/// main-file candidate.
+/// Whether a re-screened namespace still names the original directory, main
+/// file and every companion that already existed at the first screen.
 fn corresponds(original: &CheckedNamespace, current: &CheckedNamespace) -> bool {
     same_file(&original.main.stat, &current.main.stat)
         && same_object(&original.directory, &current.directory) == Some(true)
+        && original
+            .companions
+            .iter()
+            .zip(&current.companions)
+            .all(|(before, after)| {
+                before.as_ref().is_none_or(|before| {
+                    after
+                        .as_ref()
+                        .is_some_and(|after| same_file(&before.stat, &after.stat))
+                })
+            })
 }
 
 fn same_object(first: &OwnedFd, second: &OwnedFd) -> Option<bool> {
@@ -284,7 +320,8 @@ impl<'text> FilestatValueV1<'text> {
 }
 
 /// A strict reader of the fixed JSON that `sqlite_filestat` writes: no
-/// whitespace, escapes, floats, arrays or duplicate keys.
+/// whitespace, escapes, floats, arrays, duplicate keys or non-canonical
+/// integers (a leading zero, `+` or `-0`; `SQLite` never emits them).
 struct FilestatCursorV1<'text> {
     rest: &'text str,
 }
@@ -312,9 +349,13 @@ impl<'text> FilestatCursorV1<'text> {
         let end = rest
             .find(|character: char| character != '-' && !character.is_ascii_digit())
             .unwrap_or(rest.len());
-        rest[..end].parse().ok().inspect(|_| {
-            self.rest = &rest[end..];
-        })
+        rest[..end]
+            .parse::<i64>()
+            .ok()
+            .filter(|value| value.to_string() == rest[..end])
+            .inspect(|_| {
+                self.rest = &rest[end..];
+            })
     }
 
     fn value(&mut self, depth: u8) -> Option<FilestatValueV1<'text>> {
@@ -567,6 +608,8 @@ mod tests {
             valid.replacen("\"db\":", "\"db\"", 1),
             valid.replacen("\"h\":3", "\"h\":3.5", 1),
             valid.replacen("\"h\":3", "\"h\":+3", 1),
+            valid.replacen("\"h\":3", "\"h\":03", 1),
+            valid.replacen("\"nRef\":1,\"nShared\"", "\"nRef\":01,\"nShared\"", 1),
             valid.replacen("\"h\":3", "\"h\":3-", 1),
             valid.replacen("\"h\":3,", "\"h\":3 ,", 1),
             valid.replacen("\"unix\"", "\"un\\\"ix\"", 1),
@@ -659,7 +702,6 @@ mod tests {
         std::fs::write(directory.path().join("occupied"), b"kept")?;
         assert_eq!(create_empty(&opened, "occupied"), None);
         assert_eq!(std::fs::read(directory.path().join("occupied"))?, b"kept");
-        assert!(companion(&opened, "absent", "-wal").is_none());
         Ok(())
     }
 
@@ -688,6 +730,131 @@ mod tests {
             &CheckedNamespace::open(directory.path(), "main")?
         ));
         Ok(())
+    }
+
+    #[test]
+    fn a_rescreen_must_name_every_companion_that_already_existed() -> TestResult {
+        let directory = private_directory()?;
+        create(directory.path(), "main", 0o600)?;
+        create(directory.path(), "main-wal", 0o600)?;
+        let original = CheckedNamespace::open(directory.path(), "main")?;
+        assert!(corresponds(
+            &original,
+            &CheckedNamespace::open(directory.path(), "main")?
+        ));
+        std::fs::rename(
+            directory.path().join("main-wal"),
+            directory.path().join("old-wal"),
+        )?;
+        create(directory.path(), "main-wal", 0o600)?;
+        assert!(!corresponds(
+            &original,
+            &CheckedNamespace::open(directory.path(), "main")?
+        ));
+        std::fs::remove_file(directory.path().join("main-wal"))?;
+        assert!(!corresponds(
+            &original,
+            &CheckedNamespace::open(directory.path(), "main")?
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn screening_retains_the_second_screen_companion_witnesses() -> TestResult {
+        let directory = private_directory()?;
+        create(directory.path(), "main", 0o600)?;
+        create(directory.path(), "main-shm", 0o600)?;
+        let witnesses =
+            OwnerStoreWitnessesV1::screen(directory.path(), "main").ok_or("screening refused")?;
+        for (stat, suffix) in witnesses.companions.iter().zip(COMPANIONS) {
+            let metadata = std::fs::metadata(directory.path().join(format!("main{suffix}")))?;
+            assert_eq!([stat.st_dev, stat.st_ino], [metadata.dev(), metadata.ino()]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_path_names_the_retained_directory_only_while_it_resolves_to_it() -> TestResult {
+        let directory = private_directory()?;
+        create(directory.path(), "main", 0o600)?;
+        let witnesses =
+            OwnerStoreWitnessesV1::screen(directory.path(), "main").ok_or("screening refused")?;
+        assert!(witnesses.names_directory(directory.path()));
+        let other = private_directory()?;
+        assert!(!witnesses.names_directory(other.path()));
+        assert!(!witnesses.names_directory(&directory.path().join("missing")));
+        Ok(())
+    }
+
+    #[test]
+    fn a_same_inode_native_witness_whose_metadata_drifted_is_refused() -> TestResult {
+        let directory = private_directory()?;
+        create(directory.path(), "main", 0o600)?;
+        let witnesses =
+            OwnerStoreWitnessesV1::screen(directory.path(), "main").ok_or("screening refused")?;
+        let files = ["main", "main-wal", "main-shm"]
+            .map(|name| std::fs::File::open(directory.path().join(name)));
+        let [main_file, wal_file, shm_file] = files;
+        let [main_file, wal_file, shm_file] = [main_file?, wal_file?, shm_file?];
+        let [main, wal, shm] = [&main_file, &wal_file, &shm_file].map(AsRawFd::as_raw_fd);
+        let text = filestat(main, wal, shm);
+        assert!(witnesses.prove(&text).is_some());
+        std::fs::set_permissions(
+            directory.path().join("main"),
+            std::fs::Permissions::from_mode(0o640),
+        )?;
+        assert!(witnesses.prove(&text).is_none());
+        std::fs::set_permissions(
+            directory.path().join("main"),
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+        assert!(witnesses.prove(&text).is_some());
+        std::fs::hard_link(
+            directory.path().join("main-wal"),
+            directory.path().join("alias"),
+        )?;
+        assert!(witnesses.prove(&text).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn every_refusal_has_a_fixed_display_text() {
+        for (error, text) in [
+            (
+                OwnerStoreBindingErrorV1::Admission(SubjectFieldOwnerReadErrorV1::OperationActive),
+                "owner store admission refused",
+            ),
+            (
+                OwnerStoreBindingErrorV1::Unavailable,
+                "protected owner store unavailable",
+            ),
+            (
+                OwnerStoreBindingErrorV1::ModeBinding(GatewayModeBindingErrorV1::Unbound),
+                "protected owner store mode binding refused",
+            ),
+            (
+                OwnerStoreBindingErrorV1::Quarantined,
+                "protected owner store quarantined",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn a_retained_identity_is_refused_by_every_later_lookup() {
+        let retained = SubjectStoreFileIdV1::Linux {
+            device: u64::MAX,
+            inode: 1,
+        };
+        let other = SubjectStoreFileIdV1::Linux {
+            device: u64::MAX,
+            inode: 2,
+        };
+        assert!(!is_retained(retained));
+        record_retained(retained);
+        assert!(is_retained(retained));
+        assert!(!is_retained(other));
     }
 
     #[test]
