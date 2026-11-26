@@ -710,14 +710,14 @@ mod coverage_tests {
         assert!(matches!(
             submit(EntityId::new(), 1),
             Err(pos_runtime::ActionSubmissionError::Rejected {
-                origin: ActionRejectionOriginV1::Approver,
+                origin: pos_runtime::ActionRejectionOriginV1::Approver,
                 reason: pos_core::ActionRejected::DomainValidationFailed(_),
             })
         ));
         assert!(matches!(
             submit(body, 2),
             Err(pos_runtime::ActionSubmissionError::Rejected {
-                origin: ActionRejectionOriginV1::Approver,
+                origin: pos_runtime::ActionRejectionOriginV1::Approver,
                 reason: pos_core::ActionRejected::DomainValidationFailed(_),
             })
         ));

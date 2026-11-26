@@ -187,7 +187,8 @@ fn a_missing_approver_is_attributed_to_the_registry() {
 #[test]
 fn a_missing_output_policy_is_attributed_to_the_registry() {
     let mut registry = origin_registry();
-    let approver = Box::new(RefusingApprover(ActionRejected::InvalidActorEntityId));
+    let approver: Box<dyn ActionApprover> =
+        Box::new(RefusingApprover(ActionRejected::InvalidActorEntityId));
     insert_unbound_entry(&mut registry, "origin.unbound", Some(approver));
     assert_eq!(
         submission_error(&registry, "origin.unbound"),
