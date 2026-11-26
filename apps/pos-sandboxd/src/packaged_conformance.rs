@@ -1,7 +1,10 @@
 //! #444 packaged-closure conformance driver (feature `test-support`).
 //!
 //! Only the disposable QEMU TCG evidence guest runs it, through the
-//! `pos-sandboxd-conformance` binary. One run is one case:
+//! `pos-sandboxd-conformance` binary. [`run_mode`] runs the stager (`stage`)
+//! when `stage` is the first argument: it stages the installation for the
+//! composed provider runtime, holds it until its control input closes and
+//! removes it. Otherwise one run is one case ([`run`]):
 //!
 //! 1. `ConformanceCase::stage` stages the signed test installation around
 //!    one caller-built SIM1 DDI, its signer certificate and the exact bytes
@@ -20,6 +23,8 @@
 //! kernel state and passes everything to the host checker, which owns every
 //! judgement. Nothing here creates a unit, a process or launch authority.
 
+mod stage;
+
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
@@ -37,6 +42,9 @@ use crate::{
     activate_admitted_root, ImageActivationError, PlannedAttemptIntent, PreparedAttemptDirectory,
     SystemdAttemptRegistry, SystemdAttemptRegistryError, VerifiedRootMount,
 };
+
+/// The first argument that selects the stager mode (see `stage`).
+const STAGE_MODE: &str = "stage";
 
 /// The fixed nonzero `AttemptId` of every evidence case.
 const ATTEMPT_ID: [u8; 16] = *b"pigloros-444-evd";
@@ -63,6 +71,14 @@ pub enum ConformanceError {
          [ADAPTER_ARGUMENT...]"
     )]
     Usage,
+    /// The stager's arguments are not `stage IMAGE CERTIFICATE_DER
+    /// KEY_DESCRIPTION ADAPTER SPI1 KEY_FILE_NAME PROVIDER_BINARY
+    /// [ADAPTER_ARGUMENT...]`.
+    #[error(
+        "usage: pos-sandboxd-conformance stage IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER \
+         SPI1 KEY_FILE_NAME PROVIDER_BINARY [ADAPTER_ARGUMENT...]"
+    )]
+    StageUsage,
     /// An input file, the control input or the report failed.
     #[error("conformance I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -264,6 +280,35 @@ where
     let ActivatedCase { directory, outcome } = activate(&staged).await?;
     exercise(outcome, describe, release, &directory, control, report).await?;
     report_line(report, &removal_line(&directory.remove_unmounted()))
+}
+
+/// Run the stager when `arguments` start with `stage`, and one case (see
+/// [`run`]) otherwise.
+///
+/// The stager (the `stage` module) stages the installation for a composed
+/// provider runtime and holds it until `control` ends.
+///
+/// # Errors
+/// As [`run`], or the stager's.
+pub async fn run_mode<Describe, Detach>(
+    arguments: Vec<OsString>,
+    control: impl Read + Send,
+    report: &mut (impl Write + Send),
+    describe: Describe,
+    release: Detach,
+) -> Result<(), ConformanceError>
+where
+    Describe: FnOnce(&VerifiedRootMount) -> String + Send,
+    Detach: for<'directory> FnOnce(
+            VerifiedRootMount,
+            &'directory PreparedAttemptDirectory,
+        ) -> Release<'directory>
+        + Send,
+{
+    if arguments.first().is_some_and(|mode| mode == STAGE_MODE) {
+        return stage::run_stage(&arguments[1..], control, report);
+    }
+    run(arguments, control, report, describe, release).await
 }
 
 /// Report one activation outcome, hold a mounted root until `control`

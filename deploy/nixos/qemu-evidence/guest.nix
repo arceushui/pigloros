@@ -68,8 +68,7 @@ let
   # should reach neither build scripts nor proc macros; as an environment
   # variable it replaces, not merges with, any rustflags in a cargo config.
   # build-images.sh refuses an adapter that is not a loadable static ELF file
-  # of the architecture. The static pos-sandboxd launcher is built by the
-  # piece that uses it.
+  # of the architecture.
   adapter = rustPlatform.buildRustPackage {
     pname = "pos-sandbox-evidence-adapter";
     version = "0";
@@ -89,6 +88,41 @@ let
     doCheck = false;
     meta.mainProgram = "pos-sandbox-evidence-adapter";
   };
+
+  # The provider executable: the real pos-sandboxd binary, which the staged
+  # SIC1 installs as its kind-11 object and which the composed runtime runs
+  # as (`provider-runtime`). The provider also binds it into each attempt unit
+  # as /.pigloros/release-launcher (`launch-barrier`), where no loader exists,
+  # so it is linked statically like the adapter. Unverified until the first
+  # QEMU run: the collector records its digest and program headers, and the
+  # checker refuses a binary with a PT_INTERP or without a LOAD segment.
+  launcher = rustPlatform.buildRustPackage {
+    pname = "pos-sandboxd";
+    version = "0";
+    src = source;
+    cargoLock.lockFile = repository + "/Cargo.lock";
+    cargoBuildFlags = [
+      "--package"
+      "pos-sandboxd"
+      "--bin"
+      "pos-sandboxd"
+    ];
+    # As for the adapter: not buildInputs, because the wrapper would then put
+    # the static libc.a ahead of libc.so for the dynamically linked build
+    # scripts (proc-macro2, quote), which crash. Only the final link gets the path.
+    env.RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=-L${pkgs.glibc.static}/lib";
+    auditable = false;
+    doCheck = false;
+    meta.mainProgram = "pos-sandboxd";
+  };
+
+  # The canonical SPI1 file of the staged provider installation: R11 §11
+  # SPI1-A (256 attempt slots, the key file runtime-attestation.ed25519), as
+  # the provider's own tests read it.
+  spi1 = pkgs.runCommand "piglor-qemu-evidence-spi1" { nativeBuildInputs = [ pkgs.xxd ]; } ''
+    printf '%s' 828764535049310184440a5800001650fd7069676c6f72000000000000000000187782440a59fffc199c401a40000000851901f41903e81905dc190bb8191388781b72756e74696d652d6174746573746174696f6e2e6564323535313958209d057c99cd949ef52cdcbeb13d26fd43f747d80ab26d539a11a31dd72e972003 \
+      | xxd -r -p >"$out"
+  '';
 
   # The part (b) SIM1 DDIs for this architecture, built offline from the
   # committed public dev/test key pairs.
@@ -120,6 +154,7 @@ let
       config.systemd.package
       conformance
       pkgs.coreutils
+      pkgs.binutils
       pkgs.findutils
       pkgs.gawk
       pkgs.gzip
@@ -129,6 +164,8 @@ let
       pkgs.util-linux
     ];
     runtimeEnv.PIGLOR_EVIDENCE_IMAGES = images;
+    runtimeEnv.PIGLOR_EVIDENCE_SPI1 = spi1;
+    runtimeEnv.PIGLOR_EVIDENCE_LAUNCHER = "${launcher}/bin/pos-sandboxd";
     text = builtins.readFile ./collect-evidence.sh;
   };
 
@@ -184,6 +221,12 @@ in
     "ip6_tunnel"
     "ip_gre"
   ];
+  # The provider's host requirement (ADR-069 R14 N12): the production drop-in, byte for byte,
+  # so that systemd-sysctl applies it before the composed runtime starts. The runtime refuses
+  # step 7 (HostUnavailable) while net.core.fb_tunnels_only_for_init_net is below 1. The
+  # R14 network cases below set the sysctl to 0, 1 and 2 on their own and restore it.
+  environment.etc."sysctl.d/60-piglor-sandbox.conf".source = ../../sysctl.d/60-piglor-sandbox.conf;
+
   networking.hostName = "piglor-qemu-evidence";
   networking.useDHCP = false;
   documentation.enable = false;
