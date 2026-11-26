@@ -17,9 +17,14 @@ use super::*;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-const ENDPOINT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
+pub(super) const ENDPOINT: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
 
-fn attempt(seed: u8, slot: u16, endpoints: Vec<SocketAddr>) -> TestResult<AttemptEgress> {
+pub(super) fn attempt(
+    seed: u8,
+    slot: u16,
+    endpoints: Vec<SocketAddr>,
+) -> TestResult<AttemptEgress> {
     Ok(AttemptEgress {
         namespace: NamespaceName::for_attempt([seed; 16]),
         host_link: LinkName::new(&format!("piglor-h{slot}"))?,
@@ -65,7 +70,7 @@ fn dumped_rule(message: &NetfilterMessage, handle: u64) -> Option<NetfilterMessa
 }
 
 /// The batches' tables, chains and rules as the kernel's dumps report them.
-fn as_dumped(
+pub(super) fn as_dumped(
     batches: &[Vec<Request<NetfilterMessage>>],
 ) -> (
     Vec<NetfilterMessage>,
@@ -185,7 +190,7 @@ fn the_table_and_an_attempt_are_installed_in_one_batch_each() -> TestResult {
 }
 
 /// Two attempts installed in turn, as the dumps report them.
-fn two_attempts() -> TestResult<(ReadTable, BTreeMap<String, AttemptEgress>)> {
+pub(super) fn two_attempts() -> TestResult<(ReadTable, BTreeMap<String, AttemptEgress>)> {
     let first = attempt(1, 3, vec![ENDPOINT])?;
     let second = attempt(
         2,

@@ -768,7 +768,10 @@ impl MemoryCommunityDomainV1 {
 }
 
 /// T's `(active generation, selected head)` in the CSI1 `selection`.
-fn current_floor(selection: &[u8], timeline: TimelineId) -> Result<([u8; 16], Hash), Error> {
+pub(super) fn current_floor(
+    selection: &[u8],
+    timeline: TimelineId,
+) -> Result<([u8; 16], Hash), Error> {
     CommunitySelectionV1::from_canonical_cbor(selection)
         .ok()
         .and_then(|current| {
