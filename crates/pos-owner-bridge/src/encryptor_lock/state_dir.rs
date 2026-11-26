@@ -1,8 +1,11 @@
-//! Pure resolver for the owner state directory (ADR-110 E20 LC1 step 3).
+//! Pure resolver for the owner state directory.
 //!
-//! The resolver maps two environment values to a path. It reads no environment,
-//! touches no filesystem and constructs nothing, so it is not an activation
-//! surface (ADR-110 E15).
+//! Implements the ADR-110 E16 base directory (used by E20 LC1 step 3) and the
+//! XDG Base Directory Specification `XDG_STATE_HOME` default. The resolver maps
+//! two environment values to a path. It reads no environment, touches no
+//! filesystem and constructs nothing, so it is not an activation surface
+//! (ADR-110 E15). The result is only a path: the `.local` and `state`
+//! components are opened separately later (E16).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -24,27 +27,28 @@ pub enum StateDirError {
     /// Neither `XDG_STATE_HOME` nor `HOME` is set.
     #[error("neither XDG_STATE_HOME nor HOME is set")]
     Unset,
-    /// The selected variable is empty or not an absolute path.
-    #[error("{0:?} is empty or not an absolute path")]
+    /// The selected variable is not an absolute path (an empty `HOME` counts).
+    #[error("{0:?} is not an absolute path")]
     NotAbsolute(StateDirVariable),
 }
 
 /// Resolve the owner state directory from the two environment values.
 ///
 /// `XDG_STATE_HOME` selects `<value>/pigloros`; otherwise `HOME` selects
-/// `<value>/.local/state/pigloros`. The first variable that is set is the only
-/// one consulted: a set but empty or relative value fails closed instead of
-/// falling back to the other. The value is joined unchanged, with no
+/// `<value>/.local/state/pigloros`. A set but empty `XDG_STATE_HOME` counts as
+/// unset. A relative one fails closed without falling back (ADR-110 E16,
+/// stricter than the XDG rule). The value is joined unchanged, with no
 /// canonicalisation.
 ///
 /// # Errors
-/// `Unset` when both values are `None`; `NotAbsolute` when the selected value
-/// is empty or relative.
+/// `Unset` when neither a non-empty `XDG_STATE_HOME` nor `HOME` is given;
+/// `NotAbsolute` when the selected value is relative or `HOME` is empty.
 pub fn owner_state_dir(
     xdg_state_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Result<PathBuf, StateDirError> {
-    match (xdg_state_home, home) {
+    let xdg = xdg_state_home.filter(|value| !value.is_empty());
+    match (xdg, home) {
         (Some(xdg), _) => {
             let base = absolute(xdg, StateDirVariable::XdgStateHome);
             base.map(|path| path.join("pigloros"))
@@ -119,14 +123,32 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_relative_xdg_state_home_fails_closed_even_with_a_valid_home() {
+    fn empty_xdg_state_home_counts_as_unset() {
+        assert_eq!(
+            owner_state_dir(Some(os("")), Some(os("/home/u"))),
+            Ok(PathBuf::from("/home/u/.local/state/pigloros"))
+        );
+        assert_eq!(
+            owner_state_dir(Some(os("")), Some(os("home/u"))),
+            Err(StateDirError::NotAbsolute(StateDirVariable::Home))
+        );
+        assert_eq!(
+            owner_state_dir(Some(os("")), None),
+            Err(StateDirError::Unset)
+        );
+    }
+
+    #[test]
+    fn relative_xdg_state_home_fails_closed_even_with_a_valid_home() {
         let expected = Err(StateDirError::NotAbsolute(StateDirVariable::XdgStateHome));
-        assert_eq!(owner_state_dir(Some(os("")), Some(os("/home/u"))), expected);
         assert_eq!(
             owner_state_dir(Some(os("state")), Some(os("/home/u"))),
             expected
         );
-        assert_eq!(owner_state_dir(Some(os("./state")), None), expected);
+        assert_eq!(
+            owner_state_dir(Some(os("./state")), Some(os("/home/u"))),
+            expected
+        );
     }
 
     #[test]
@@ -162,7 +184,7 @@ mod tests {
         );
         assert_eq!(
             StateDirError::NotAbsolute(StateDirVariable::Home).to_string(),
-            "Home is empty or not an absolute path"
+            "Home is not an absolute path"
         );
     }
 }

@@ -3,8 +3,10 @@
 //! The pure platform policy is available in normal builds. Linux filesystem
 //! primitives require test-support; lock admission takes an explicit test directory (E15).
 //! The Windows profile accepted by ADR-132 lives in `pos-owner-bridge-windows`
-//! under the same test-support gate. Fixed per-user paths and owner activation
-//! remain unavailable on every platform.
+//! under the same test-support gate. The pure owner state path resolver
+//! (`state_dir`) is available in normal builds. It reads no environment and
+//! touches no filesystem. Opening or creating that directory, and owner
+//! activation, remain unavailable on every platform.
 
 use crate::{BridgeError, UnavailableCode};
 
