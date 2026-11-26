@@ -2697,7 +2697,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertFalse([pattern for pattern in scope_filter if pattern.startswith("!")])
         for required in ("crates/pos-owner-ctap/**", "crates/pos-owner-bridge/**", "Cargo.lock",
                          ".github/workflows/owner-ctap-uhid.yml", ".github/workflows/ci.yml",
-                         ".github/rust-scope.yml", "scripts/*owner_uhid*"):
+                         ".github/rust-scope.yml", "scripts/*owner*", "scripts/*cargo_crap*", "covgate.toml"):
             self.assertIn(required, scope_filter)
 
     def test_asan_runs_beside_mutation_and_ci_gate_still_requires_both(self) -> None:
