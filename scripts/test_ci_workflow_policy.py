@@ -2614,8 +2614,13 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["ci-gate"]["steps"][0]
         env = dict(os.environ, **{name: "success" for name in gate["env"]})
         env.update(EVENT_NAME="pull_request", RUST_SCOPE_RESULT="true",
-                   OWNER_WINDOWS_SCOPE="true")
+                   OWNER_WINDOWS_SCOPE="true", OWNER_UHID_SCOPE="true")
         env.update(overrides)
+        if "OWNER_UHID_RESULT" not in overrides:
+            # The U-tier lane runs exactly when the Windows lane does for these cases.
+            env["OWNER_UHID_RESULT"] = (
+                "success" if env["EVENT_NAME"] != "pull_request" or env["RUST_SCOPE_RESULT"] == "true"
+                else "skipped")
         return subprocess.run(["bash", "-c", gate["run"]], env=env,
                               capture_output=True, check=False).returncode == 0
 
@@ -2643,6 +2648,57 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                                          OWNER_WINDOWS_RESULT=result),
                         result == expected,
                     )
+
+    def test_ci_gate_requires_the_owner_uhid_result_exactly_when_in_scope(self) -> None:
+        cases = (
+            # event, rust scope, owner U-tier scope, required U-tier result
+            ("pull_request", "true", "true", "success"),
+            ("pull_request", "true", "", "success"),
+            ("pull_request", "true", "unknown", "success"),
+            ("pull_request", "true", "false", "skipped"),
+            ("pull_request", "false", "true", "skipped"),
+            ("pull_request", "false", "false", "skipped"),
+            ("push", "true", "true", "success"),
+            ("push", "true", "false", "success"),
+            ("workflow_dispatch", "true", "false", "success"),
+        )
+        for event, rust, owner, expected in cases:
+            mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
+            windows = "success" if event != "pull_request" or rust == "true" else "skipped"
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(event=event, rust=rust, owner=owner, result=result):
+                    self.assertEqual(
+                        self.run_ci_gate(EVENT_NAME=event, RUST_SCOPE_RESULT=rust,
+                                         OWNER_UHID_SCOPE=owner, MUTATION_RESULT=mutation,
+                                         CARGO_CRAP_RESULT="skipped" if rust == "false" else "success",
+                                         OWNER_WINDOWS_RESULT=windows, OWNER_UHID_RESULT=result),
+                        result == expected,
+                    )
+
+    def test_owner_uhid_lane_runs_beside_core_and_blocks_only_its_consumers(self) -> None:
+        jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
+        self.assertEqual(jobs["owner-ctap-uhid"], {
+            "name": "owner-ctap-uhid",
+            "needs": ["ci_change_scope"],
+            "if": "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+                  "needs.ci_change_scope.outputs.owner_uhid == 'true' }}",
+            "uses": "./.github/workflows/owner-ctap-uhid.yml",
+            "permissions": {"contents": "read"},
+        })
+        scope = jobs["ci_change_scope"]
+        self.assertEqual(scope["outputs"]["owner_uhid"], "${{ steps.owner_uhid.outputs.owner_uhid }}")
+        self.assertEqual(len([step for step in scope["steps"] if step.get("id") == "owner_uhid"]), 1)
+        consumers = sorted(name for name, job in jobs.items() if "owner-ctap-uhid" in job_needs(job))
+        self.assertEqual(consumers, ["cargo-crap", "ci-gate"])
+        self.assertEqual(sorted(name for name in jobs if "owner-ctap-uhid" in transitive_needs(jobs, name)),
+                         OWNER_WINDOWS_DOWNSTREAM)
+        self.assertNotIn("owner-ctap-uhid", str(jobs["preflight-gate"]))
+        scope_filter = yaml.safe_load((ROOT / ".github/rust-scope.yml").read_text(encoding="utf-8"))["owner_uhid"]
+        self.assertFalse([pattern for pattern in scope_filter if pattern.startswith("!")])
+        for required in ("crates/pos-owner-ctap/**", "crates/pos-owner-bridge/**", "Cargo.lock",
+                         ".github/workflows/owner-ctap-uhid.yml", ".github/workflows/ci.yml",
+                         ".github/rust-scope.yml", "scripts/*owner*", "scripts/*cargo_crap*", "covgate.toml"):
+            self.assertIn(required, scope_filter)
 
     def test_asan_runs_beside_mutation_and_ci_gate_still_requires_both(self) -> None:
         jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
@@ -3679,6 +3735,7 @@ STATIC_LAUNCHER_JOB_SET = ['asan',
  'mutation-required',
  'owner-bridge-policies',
  'owner-bridge-windows',
+ 'owner-ctap-uhid',
  'pinned-dependencies',
  'plugin-component-fixtures',
  'preflight-gate',

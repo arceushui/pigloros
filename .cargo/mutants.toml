@@ -10,6 +10,9 @@ exclude_globs = [
   # in-memory CTAPHID device, which exist only behind `test-support`.
   "crates/pos-owner-ctap/src/soft.rs",
   "crates/pos-owner-ctap/src/memory.rs",
+  # ADR-110 E20 S2 (Redmine #1476): the U-tier virtual FIDO device, an example that
+  # exists only behind `test-support` and runs only in the owner U-tier job.
+  "crates/pos-owner-ctap/examples/**",
   # Owner decision 2026-11-14, the first production exception: the WebView2 shim
   # is `cfg(windows)` only, so this Linux gate can neither build nor test it
   # and would report every mutant as missed. ADR-110 qualifies the shim by the
