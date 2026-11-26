@@ -18,6 +18,7 @@ members = [
   "crates/pos-plugin-host",
   "crates/pos-plugin-supervisor",
   "crates/pos-owner-bridge-windows",
+  "crates/pos-owner-ctap",
   "crates/pos-owner-adapter",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
@@ -103,6 +104,14 @@ aes-gcm-siv = { version = "=0.12.1", default-features = false, features = [
   "zeroize",
 ] }
 hkdf = "=0.13.0"
+# ADR-110 E20 AM-110g: direct pins for the in-repo AES-256-CBC and the HMAC of
+# PIN/UV auth protocol 2 in pos-owner-ctap. Both versions were already locked
+# through aes-gcm and hkdf.
+aes = { version = "=0.9.4", default-features = false }
+hmac = "=0.13.0"
+# ADR-110 E20 S1: NFC normalization of the owner PIN before it is hashed
+# (CTAP 2.1 PS 6.5.1), owner decision 2026-11-24. No std feature is needed.
+unicode-normalization = { version = "=0.1.26", default-features = false }
 
 # Error handling
 thiserror = "2"

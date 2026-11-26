@@ -40,3 +40,8 @@ required-features = ["test-support"]
 name = "enrollment_store_public"
 path = "tests/enrollment_store_public.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "unlock_public"
+path = "tests/unlock_public.rs"
+required-features = ["test-support"]
