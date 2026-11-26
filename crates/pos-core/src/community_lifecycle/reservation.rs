@@ -1,9 +1,9 @@
 //! Original pre-Reserve identity and its retained reservation, never a permit.
 
 use super::{
-    canonical_end, encode_coordinates, fixed_bytes, read_coordinates, read_hash, read_hashes,
-    read_head, read_pass_key, record_cursor, record_prefix, validate_coordinates, validate_horizon,
-    CommunityLifecycleErrorV1, CommunityPassKeyV1, Result,
+    canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates, read_hash,
+    read_hashes, read_head, read_pass_key, record_cursor, record_prefix, validate_coordinates,
+    validate_horizon, CommunityLifecycleErrorV1, CommunityPassKeyV1, Result,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -65,6 +65,12 @@ impl CommunityReservationRequestV1 {
     #[must_use]
     pub const fn as_input(&self) -> &CommunityReservationRequestInputV1 {
         &self.0
+    }
+
+    /// `H("PiglorOS.Community.CRI1.v1\0", CRI1)`, the CPR1 `request_digest`.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        digest(b"PiglorOS.Community.CRI1.v1\0", &self.to_canonical_cbor())
     }
 
     /// Encode the exact twelve-field CRI1 without a future pass coordinate.

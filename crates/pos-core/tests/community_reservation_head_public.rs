@@ -2,9 +2,10 @@
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
-    CommunityLifecycleErrorV1 as Error, CommunityMemberHeadV1 as Member,
-    CommunityMemberHeadsV1 as Members, CommunityPassFrontierV1 as Frontier,
-    CommunityPassKeyV1 as Pass, CommunityReservationInputV1 as ReservationInput,
+    community_prepared_input_set_digest_v1, CommunityLifecycleErrorV1 as Error,
+    CommunityMemberHeadV1 as Member, CommunityMemberHeadsV1 as Members,
+    CommunityPassFrontierV1 as Frontier, CommunityPassKeyV1 as Pass,
+    CommunityReservationInputV1 as ReservationInput,
     CommunityReservationRequestInputV1 as RequestInput, CommunityReservationRequestV1 as Request,
     CommunityReservationV1 as Reservation, CommunitySelectedHeadInputV1 as HeadInput,
     CommunitySelectedHeadV1 as Head, MAX_COMMUNITY_MEMBERS_V1,
@@ -553,5 +554,68 @@ fn head_roster_decode_borrows_exact_original_wire_rows() -> TestResult {
         .iter()
         .eq(rows.iter().copied()));
     assert!(original.as_input() == restored.as_input());
+    Ok(())
+}
+
+#[test]
+fn the_cri1_digest_is_domain_separated_and_covers_every_field() -> TestResult {
+    let request = Request::new(request_input())?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.Community.CRI1.v1\0");
+    hasher.update(&request.to_canonical_cbor());
+    assert_eq!(
+        request.digest(),
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    );
+    let other = Request::new(RequestInput {
+        reservation_operation_id: [10; 16],
+        ..request_input()
+    })?;
+    assert_ne!(request.digest(), other.digest());
+    assert_eq!(request.digest(), Request::new(request_input())?.digest());
+    Ok(())
+}
+
+#[test]
+fn the_prepared_input_set_digest_is_the_domain_separated_pair_array() -> TestResult {
+    let pairs = [(hash(1), hash(2)), (hash(3), hash(4))];
+    let mut expected = vec![0x82];
+    for (member, invocation) in pairs {
+        expected.push(0x82);
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend_from_slice(member.as_bytes());
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend_from_slice(invocation.as_bytes());
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.Community.PreparedInputSet.v1\0");
+    hasher.update(&expected);
+    assert_eq!(
+        community_prepared_input_set_digest_v1(&pairs)?,
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    );
+    // Not strictly ascending by member digest, and more than 64 pairs.
+    assert_eq!(
+        community_prepared_input_set_digest_v1(&[(hash(3), hash(4)), (hash(1), hash(2))]),
+        Err(Error::InvalidBinding)
+    );
+    assert_eq!(
+        community_prepared_input_set_digest_v1(&[(hash(1), hash(2)), (hash(1), hash(5))]),
+        Err(Error::InvalidBinding)
+    );
+    let many: Vec<(Hash, Hash)> = (0..65_u8).map(|byte| (hash(byte + 1), hash(0))).collect();
+    assert_eq!(
+        community_prepared_input_set_digest_v1(&many),
+        Err(Error::BoundsExceeded)
+    );
+    // Exactly 64 pairs are a set, and the empty set is the empty array.
+    assert!(community_prepared_input_set_digest_v1(&many[..64]).is_ok());
+    let mut empty = blake3::Hasher::new();
+    empty.update(b"PiglorOS.Community.PreparedInputSet.v1\0");
+    empty.update(&[0x80]);
+    assert_eq!(
+        community_prepared_input_set_digest_v1(&[])?,
+        Hash::from_bytes(*empty.finalize().as_bytes())
+    );
     Ok(())
 }
