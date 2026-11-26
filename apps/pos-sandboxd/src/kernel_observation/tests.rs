@@ -669,3 +669,5 @@ fn the_adapter_of_an_exited_process_is_not_observed() -> TestResult {
     child.wait()?;
     Ok(())
 }
+
+mod network;

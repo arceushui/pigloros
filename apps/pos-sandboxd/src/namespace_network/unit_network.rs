@@ -27,8 +27,6 @@ use std::fs;
 use std::os::fd::BorrowedFd;
 use std::path::Path;
 
-use rustix::io::Errno;
-
 use super::netlink::{
     consistent, in_namespace, links, NetlinkError, NetlinkSession, NetlinkSocket, NetlinkTransport,
     ROUTE,
@@ -123,14 +121,13 @@ fn classified(
         })
 }
 
-/// R14's error classes: transit failures are transport, everything else,
-/// including a missing object, is a change.
+/// R14's error classes ([`NetlinkError::is_transport`]): transit failures are
+/// transport, everything else, including a missing object, is a change.
 fn classify(error: &NetlinkError) -> UnitNetworkError {
-    match error {
-        NetlinkError::Io(errno) if *errno != Errno::NOENT => UnitNetworkError::Transport,
-        // `consistent` returns it only after three torn reads.
-        NetlinkError::Interrupted => UnitNetworkError::Transport,
-        _ => UnitNetworkError::Changed,
+    if error.is_transport() {
+        UnitNetworkError::Transport
+    } else {
+        UnitNetworkError::Changed
     }
 }
 
