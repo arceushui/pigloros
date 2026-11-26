@@ -443,3 +443,11 @@ fn the_fail_closed_setup_error_is_a_creation_failure_that_removed_nothing() {
         "the fail-closed Local network cannot fail"
     );
 }
+
+#[test]
+fn the_fail_closed_connector_reads_back_as_other_state() {
+    assert_eq!(
+        RefusingConnector.readback(std::time::Instant::now()),
+        Err(crate::ReadbackError::Changed)
+    );
+}

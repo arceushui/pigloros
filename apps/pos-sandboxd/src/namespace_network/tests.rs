@@ -169,6 +169,7 @@ fn observed() -> ObservedNamespace {
         host_addresses: vec![on(HOST, prefix(v6(0), 127)), on(HOST, prefix(v4(1), 30))],
         namespace_netnsid: NAMESPACE_ID,
         host_netnsid: HOST_ID,
+        firewall_generation: 7,
     }
 }
 
