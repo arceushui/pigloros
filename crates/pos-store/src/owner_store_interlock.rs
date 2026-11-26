@@ -102,6 +102,12 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
             .map_err(|_| CoreError::Storage("protected store interlock unavailable".to_owned()))
     }
 
+    /// The device and inode of the main file this interlock is keyed on, as
+    /// read when it was taken.
+    pub(crate) const fn main_key(&self) -> [u64; 2] {
+        file_id(&self.namespace.main.stat)
+    }
+
     /// A path naming the directory object this interlock holds through its own
     /// descriptor, valid while the interlock lives. It is transport for an
     /// identity proof, not identity.

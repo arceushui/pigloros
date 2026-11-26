@@ -88,10 +88,10 @@ thread_local! {
     /// Test-only seam: managed disposal panics before the connection closes.
     static PANIC_DISPOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only seam: runs once after the interlock, before the screening.
-    static AFTER_INTERLOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    static AFTER_INTERLOCK: HookSlot =
         const { std::cell::RefCell::new(None) };
     /// Test-only seam: runs once after the screening, before the identity proof.
-    static AFTER_SCREEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    static AFTER_SCREEN: HookSlot =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -209,7 +209,8 @@ impl QualifiedSqliteStoreV1 {
     /// `pre_screen_key` is the main-file candidate the caller pre-screened
     /// and keyed its in-child Gateway mode lock on. The order is: shared
     /// admission, the context's native slot, the filesystem interlock,
-    /// screening and empty-companion provisioning, a read-write no-follow
+    /// the proof that the interlock's directory and main file are the screened
+    /// ones, screening and empty-companion provisioning, a read-write no-follow
     /// open on the `unix` VFS with `busy_timeout` 0, a WAL and UTF-8 check,
     /// then one setup `BEGIN IMMEDIATE` holding the native proof, schema
     /// validation (the store is never initialized) and the LC3 mode attach:
@@ -394,9 +395,11 @@ fn conclude<T>(
 }
 
 /// Take one interlock on the caller's path, screen and provision under it,
-/// then prove the interlock's directory object is the screened one: a path
-/// swapped between the two lookups would otherwise provision companions in
-/// another directory under this lock. The same interlock stays held through
+/// then prove the interlock's directory object and main file are the screened
+/// ones: a path swapped between the two lookups would otherwise provision
+/// companions in another directory, or bind a file other than the one the
+/// lock is keyed on, under this lock. Both proofs refuse before any claim or
+/// native open. The same interlock stays held through
 /// the setup (ADR-123 §4).
 fn bind(
     admitted: &OwnerStoreOperationV1<'_>,
@@ -413,7 +416,10 @@ fn bind(
             #[cfg(test)]
             run_hook(&AFTER_SCREEN);
             witnesses
-                .filter(|witnesses| witnesses.names_directory(&interlock.directory_path()))
+                .filter(|witnesses| {
+                    witnesses.names_directory(&interlock.directory_path())
+                        && witnesses.registry_key() == interlock.main_key()
+                })
                 .map(|witnesses| (interlock, witnesses))
         })
         .ok_or(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
@@ -422,9 +428,8 @@ fn bind(
         })
 }
 
-/// Open and bind under the held interlock. The recheck
-/// proves the entries are still the screened ones now that the lock is held.
-/// `is_claimed` and the claim in `bind_native` are one atomic step only
+/// Open and bind under the held interlock. The recheck proves the entries are
+/// still the screened ones now that the lock is held. `is_claimed` and the claim in `bind_native` are one atomic step only
 /// because that interlock is held across both.
 fn setup(
     witnesses: OwnerStoreWitnessesV1,
@@ -1411,8 +1416,12 @@ mod tests {
         Ok(())
     }
 
+    /// The identity proof still passes here (both descriptors name the real
+    /// directory); the refusal comes from the canonical path check before the
+    /// native open.
     #[test]
-    fn a_path_swap_between_screening_and_the_proof_is_refused_without_a_claim() -> TestResult {
+    fn a_path_swap_between_screening_and_the_native_open_is_refused_without_a_claim() -> TestResult
+    {
         let fixture = installed(true)?;
         let original = fixture.directory.path().to_path_buf();
         let swapped = swap_at(&AFTER_SCREEN, &original, swap_in_decoy);
@@ -1424,6 +1433,7 @@ mod tests {
         Ok(())
     }
 
+    /// The swapped directory is screenable, so only the identity proof refuses it.
     #[test]
     fn a_path_swap_between_the_interlock_and_the_screening_is_refused_without_a_claim() -> TestResult
     {
@@ -1434,6 +1444,44 @@ mod tests {
         let moved = swapped.borrow_mut().take().ok_or("hook did not run")?;
         restore(&original, &moved)?;
         assert_eq!(refused.err(), Some(OwnerStoreBindingErrorV1::Unavailable));
+        closed(fixture.open()?)?;
+        Ok(())
+    }
+
+    fn entry_names(directory: &Path) -> TestResult<Vec<String>> {
+        let mut names = std::fs::read_dir(directory)?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        Ok(names)
+    }
+
+    #[test]
+    fn a_main_file_replaced_in_place_after_the_interlock_is_refused_before_any_claim() -> TestResult
+    {
+        let fixture = installed(true)?;
+        let original = fixture.directory.path().to_path_buf();
+        let before = entry_names(&original)?;
+        let kept = original.join(format!("{MAIN}.kept"));
+        let hook_kept = kept.clone();
+        let hook_main = original.join(MAIN);
+        AFTER_INTERLOCK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&hook_main, &hook_kept).ok();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&hook_main)
+                    .ok();
+            }));
+        });
+        let refused = fixture.open();
+        assert_eq!(refused.err(), Some(OwnerStoreBindingErrorV1::Unavailable));
+        assert!(kept.exists());
+        std::fs::remove_file(original.join(MAIN))?;
+        std::fs::rename(&kept, original.join(MAIN))?;
+        assert_eq!(entry_names(&original)?, before);
         closed(fixture.open()?)?;
         Ok(())
     }
