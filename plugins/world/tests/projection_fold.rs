@@ -1,7 +1,9 @@
 //! ADR-141 §9 (D3, D16): the on-demand Projection fold through a fresh
 //! `WorldReducer` projects World body observations and never World actions.
 
-use pos_core::{CanonicalBytes, EntityId, Event, EventId, Hash, Kind, SchemaVersion, Seq, WallTime};
+use pos_core::{
+    CanonicalBytes, EntityId, Event, EventId, Hash, Kind, SchemaVersion, Seq, WallTime,
+};
 use pos_plugin_world::{
     WorldObservationV1, WorldReducer, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
 };
