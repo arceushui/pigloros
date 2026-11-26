@@ -320,6 +320,7 @@ impl MemoryCommunityDomainV1 {
                 prior_shared_counts: input.prior_shared_counts,
                 materialization: input.minted.as_ref().map(|minted| minted.additions),
                 status: CommunityPassStatusV1::Reserved,
+                sealed_result_digest: None,
                 live: true,
             },
             minted: input.minted,
