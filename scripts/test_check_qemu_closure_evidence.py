@@ -1595,6 +1595,13 @@ class EvidenceTests(unittest.TestCase):
         execution = self.verdict()["provider_runtime"]["start"]["execution"]
         self.assertEqual(execution, {"outcome": "Completed", "events": "1,2,3"})
 
+    def test_the_attempt_unit_line_may_follow_other_lines_of_the_journal(self):
+        noise = f"[ 109.0] {HOST} systemd[1]: Started something.service.\n"
+        journal = noise + ATTEMPT_JOURNAL + noise
+        self.assertEqual(
+            self.verdict(change=lambda f: f.update({"guest/daemon/start/attempt-journal": journal}))
+            ["provider_runtime"]["start"]["execution"]["outcome"], "Completed")
+
     def test_execute_fabrication_fails_closed(self):
         base = "guest/daemon/start"
         report, journal = f"{base}/execute-report", f"{base}/attempt-journal"
@@ -1626,12 +1633,24 @@ class EvidenceTests(unittest.TestCase):
             # An `agr1` line is not satisfied by `raw agr1` alone, nor the other way round.
             (edit(f"agr1\t{D1}\nraw", "raw"), "no nonzero digest for agr1"),
             (lambda f: f.update({report: EXECUTE_REPORT + "outcome\tCompleted\n"}), "malformed or repeated"),
+            (lambda f: f.update({report: EXECUTE_REPORT + "execute\texecuted\n"}), "malformed or repeated"),
+            # A digest line holds exactly one digest, matched whole.
+            (edit(f"rqe1\t{D1}", f"rqe1\t{D1}\t{D1}"), "no nonzero digest for rqe1"),
+            (edit(f"koe1\t{D2}", f"koe1\tx{D2}"), "no nonzero digest for koe1"),
+            (edit(f"koe1\t{D2}", f"koe1\t{D2}0"), "no nonzero digest for koe1"),
+            (edit(f"koe1\t{D2}", f"koe1\t{D2}\n"), "malformed or repeated"),
             (lambda f: f.update({report: EXECUTE_REPORT + "stray\n"}), "malformed or repeated"),
             (lambda f: f.update({journal: ""}), "no Deactivated successfully"),
             (lambda f: f.update({journal: DEACTIVATED}), "no Deactivated successfully"),
             (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("successfully", "with result")}),
              "no Deactivated successfully"),
             (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("systemd[1]", "other[7]")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("systemd[1]", "systemd[2]")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("successfully.", "successfully.x")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("successfully.", "successfully")}),
              "no Deactivated successfully"),
         ]
         for change, message in changes:

@@ -1421,7 +1421,7 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
 def execute_observations(report: list[str]) -> dict[tuple[str, ...], list[str]]:
     """The report's lines by exact key: `raw` lines are keyed by their record too, `sau1` by index."""
     seen: dict[tuple[str, ...], list[str]] = {}
-    for line in report[1:]:
+    for line in report:
         fields = line.split("\t")
         width = 3 if fields[0] == "raw" and fields[1:2] == ["sau1"] else 2 if fields[0] == "raw" else 1
         key = tuple(fields[:width])
