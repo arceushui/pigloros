@@ -382,6 +382,71 @@ class ProducerShellTests(unittest.TestCase):
         body = COLLECTOR.read_text().split("for value in 0 1 2; do", 1)[1]
         self.assertRegex(body, r"done\nrestore_fb_tunnels\n\nprintf 'complete")
 
+    def test_a_missing_sysctl_file_stops_the_daemon_case_and_the_boot_record(self):
+        missing = self.base / "no-such-sysctl"
+        present = self.base / "present-sysctl"
+        present.write_text("2\n")
+        out = self.base / "out"
+        out.mkdir()
+        images = self.base / "images"
+        images.mkdir()
+        (images / "adapter").write_text("adapter")
+        launcher, spi1, installed = self.base / "launcher", self.base / "spi1", self.base / "installed"
+        for path in (launcher, spi1, installed):
+            path.write_text("x")
+        # Every other command succeeds, so only the missing sysctl file can fail the run.
+        self.shell.stub("pos-sandboxd-conformance",
+                        f'printf "staged\\t{installed}\\n"\ncat >/dev/null\nprintf "unstaged\\n"')
+        self.shell.stub("sha256sum", 'printf "%s  %s\\n" "$(printf %064d 7)" "$1"')
+        self.shell.stub("busctl", 'echo "{\\"type\\":\\"x\\",\\"data\\":[]}"')
+        self.shell.stub("systemctl", 'if [[ $1 == show && $* == *--value* ]]; then echo 1; fi')
+        for name in ("readelf", "systemd-run", "journalctl", "ip"):
+            self.shell.stub(name, "true")
+        self.shell.stub("readlink", 'echo "net:[1]"')
+
+        def daemon(sysctl: pathlib.Path) -> subprocess.CompletedProcess:
+            return self.shell.run("\n".join([
+                f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
+                f'FB_TUNNELS_SYSCTL="{sysctl}"',
+                f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
+                f'cd "{out}"; rm -rf daemon; mkdir daemon',
+                'daemon_case start image.raw signer.der "CN: 01"',
+                'echo reached-the-end',
+            ]), COLLECTOR)
+
+        # With the file the same script runs to its end, so the missing file is the only difference.
+        ok = daemon(present)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("reached-the-end", ok.stdout)
+        failed = daemon(missing)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertNotIn("reached-the-end", failed.stdout)
+
+        def boot(sysctl: pathlib.Path) -> subprocess.CompletedProcess:
+            return self.shell.run(f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{out}"\nrm -rf network\n'
+                                  'record_boot_network\necho reached-the-end', COLLECTOR)
+
+        ok = boot(present)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("reached-the-end", ok.stdout)
+        failed = boot(missing)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertNotIn("reached-the-end", failed.stdout)
+
+    def test_the_boot_network_is_recorded_from_the_sysctl_file_and_the_guest(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("2\n")
+        out = self.base / "out"
+        out.mkdir()
+        self.shell.stub("readlink", 'echo "net:[4026531840]"')
+        self.shell.stub("ip", 'printf "ip %s\\n" "$*"')
+        self.shell.out(f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{out}"\nrecord_boot_network', COLLECTOR)
+        network = out / "network"
+        self.assertEqual((network / "boot-sysctl").read_text(), "2\n")
+        self.assertEqual((network / "init-netns").read_text(), "net:[4026531840]\n")
+        self.assertEqual((network / "init-links").read_text(), "ip -o link show\n")
+        self.assertEqual((network / "modules").read_text(), pathlib.Path("/proc/modules").read_text())
+
     def test_the_runtime_unit_is_started_with_the_r11_properties(self):
         log = self.base / "argv"
         self.shell.stub("systemd-run", f'printf "%s\\n" "$@" >"{log}"')
@@ -399,7 +464,7 @@ class ProducerShellTests(unittest.TestCase):
     def test_daemon_case_records_what_the_checker_judges_in_order(self):
         import check_qemu_closure_evidence as checker
         calls = self.base / "calls"
-        (self.base / "fb_tunnels").write_text("1\n")
+        (self.base / "fb_tunnels").write_text("2\n")
         out = self.base / "out"
         out.mkdir()
         images = self.base / "images"
@@ -438,8 +503,8 @@ class ProducerShellTests(unittest.TestCase):
         # Every file the checker's inventory expects after a successful stage is written.
         self.assertEqual(recorded, checker.DAEMON_STAGE_FILES | checker.DAEMON_RUNTIME_FILES)
         self.assertEqual((case / "start-stderr").read_text(), "start-stderr line\n")
-        # The sysctl the runtime starts under is recorded before the stager runs.
-        self.assertEqual((case / "fb-tunnels-sysctl").read_text(), "1\n")
+        # The sysctl the runtime starts under is read from the override file, not a constant.
+        self.assertEqual((case / "fb-tunnels-sysctl").read_text(), "2\n")
         self.assertEqual((case / "stage-report").read_text(), f"staged\t{installed}\nunstaged\n")
         self.assertEqual((case / "stage-status").read_text(), "0\n")
         self.assertEqual((case / "start-status").read_text(), "0\n")
@@ -479,7 +544,7 @@ class ProducerShellTests(unittest.TestCase):
     def test_a_failing_busctl_leaves_a_partial_line_and_the_collector_finishes(self):
         import check_qemu_closure_evidence as checker
         calls = self.base / "calls"
-        (self.base / "fb_tunnels").write_text("1\n")
+        (self.base / "fb_tunnels").write_text("2\n")
         out = self.base / "out"
         out.mkdir()
         images = self.base / "images"

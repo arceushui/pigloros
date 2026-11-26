@@ -27,6 +27,7 @@ provenance_files=(
   deploy/nixos/dev-trust/root-hash-dev-test.key
   deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt
   deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key
+  deploy/sysctl.d/60-piglor-sandbox.conf
 )
 
 usage() {

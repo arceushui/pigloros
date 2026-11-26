@@ -956,6 +956,22 @@ class EvidenceTests(unittest.TestCase):
                 checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
                           untrusted_certificate=UNTRUSTED)
 
+    def test_a_changed_sysctl_drop_in_is_refused(self):
+        dropin = "deploy/sysctl.d/60-piglor-sandbox.conf"
+        self.assertIn(dropin, checker.PROVENANCE_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = pathlib.Path(directory)
+            for other in checker.PROVENANCE_FILES:
+                (repository / other).parent.mkdir(parents=True, exist_ok=True)
+                (repository / other).write_bytes((ROOT / other).read_bytes())
+            evidence = self.evidence()
+            checker.check(evidence, "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
+                          untrusted_certificate=UNTRUSTED)
+            (repository / dropin).write_bytes(b"net.core.fb_tunnels_only_for_init_net = 0\n")
+            with self.assertRaisesRegex(checker.EvidenceError, "60-piglor-sandbox.conf differs"):
+                checker.check(evidence, "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
+                              untrusted_certificate=UNTRUSTED)
+
     def test_the_compiled_in_list_must_be_exactly_the_certificate(self):
         der = checker.pem_certificate(CERTIFICATE)
         self.assertEqual(self.verdict()["compiled_in_certificate_list"],
@@ -1587,7 +1603,7 @@ class EvidenceTests(unittest.TestCase):
             # The runtime refuses step 7 below 1 (R14 N12): only a start at 1 or more counts.
             *[(lambda f, value=value: f.update({f"{base}/fb-tunnels-sysctl": value}),
                "below the 1 that the provider requires")
-              for value in ("0\n", "x\n", "\n", "-1\n", "\u0661\n")],
+              for value in ("0\n", "x\n", "\n", "-1\n", "\u0661\n", "1" * 5000 + "\n", "1" * 10 + "\n")],
             (lambda f: f.update({f"{base}/launcher-sha256": "nothing\n"}), "launcher digest line is malformed"),
             # One case per sub-check of the digest line (the rest of the line stays valid).
             *[(lambda f, line=line: f.update({f"{base}/launcher-sha256": line + "\n"}),

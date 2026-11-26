@@ -103,6 +103,7 @@ PROVENANCE_FILES = (
     "deploy/nixos/dev-trust/root-hash-dev-test.key",
     "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt",
     "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key",
+    "deploy/sysctl.d/60-piglor-sandbox.conf",
 )
 COLLECTOR_PROGRAM = "bin/piglor-qemu-evidence"
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -1427,7 +1428,7 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     # The runtime refuses step 7 below 1 (ADR-069 R14 N12), so a start that proves anything ran at
     # at least 1; the guest gets it from the production sysctl.d drop-in.
     sysctl = evidence.line(f"{base}/fb-tunnels-sysctl")
-    if not (sysctl.isascii() and sysctl.isdigit() and int(sysctl) >= 1):
+    if not (re.fullmatch(r"[0-9]{1,9}", sysctl) and int(sysctl) >= 1):
         raise EvidenceError(f"the {name} runtime started with net.core.fb_tunnels_only_for_init_net="
                             f"{sysctl!r}, below the 1 that the provider requires")
     unit = properties(evidence, f"{base}/runtime-properties")

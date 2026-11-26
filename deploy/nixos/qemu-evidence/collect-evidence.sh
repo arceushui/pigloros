@@ -346,6 +346,17 @@ network_case() { # NAME VALUE
   printf '%s\n' "${status}" >"${dir}/status"
 }
 
+# The network the guest booted with: the fallback-tunnel sysctl, the init network
+# namespace and its links (the fallback tunnel devices the loaded modules create), and
+# the loaded modules. A missing sysctl file stops the collector.
+record_boot_network() {
+  mkdir network
+  cat "${FB_TUNNELS_SYSCTL}" >network/boot-sysctl
+  readlink /proc/1/ns/net >network/init-netns
+  ip -o link show >network/init-links
+  cat /proc/modules >network/modules
+}
+
 # Put the sysctl back to the value recorded at boot in network/boot-sysctl,
 # so later cases run as the package ships.
 restore_fb_tunnels() {
@@ -485,11 +496,7 @@ daemon_case start "${images}/positive.raw" "${images}/positive.der" "$(cat "${im
 # ADR-069 R14: the init namespace and its fallback tunnel devices, then the
 # unit namespace under each value of the fallback-tunnel sysctl. The modules
 # guest.nix loads are the ones that create fallback devices.
-mkdir network
-cat "${FB_TUNNELS_SYSCTL}" >network/boot-sysctl
-readlink /proc/1/ns/net >network/init-netns
-ip -o link show >network/init-links
-cat /proc/modules >network/modules
+record_boot_network
 for value in 0 1 2; do
   network_case "fb-${value}" "${value}"
 done

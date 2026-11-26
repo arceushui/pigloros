@@ -26,6 +26,12 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
         policy.check(self.workflow, self.producers)
         policy.check_repository()
 
+    def test_every_input_the_evidence_binds_is_a_pinned_producer(self):
+        import check_qemu_closure_evidence as checker
+        for name in checker.PROVENANCE_FILES:
+            with self.subTest(name=name):
+                self.assertIn(name, policy.PRODUCER_SHA256)
+
     def test_privilege_trigger_runner_and_job_changes_fail_closed(self):
         evidence = lambda w: w["jobs"]["evidence"]
         kernel = lambda w: w["jobs"]["kernel-cache"]
@@ -40,6 +46,8 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
             lambda w: w[True].update(pull_request_target={}),
             lambda w: w[True].update(push={"branches": ["main"]}),
             lambda w: w[True]["pull_request"].update(paths=["README.md"]),
+            # The lane consumes the sysctl drop-in, so a change to it alone must run the lane.
+            lambda w: w[True]["pull_request"]["paths"].remove("deploy/sysctl.d/**"),
             lambda w: w[True].update(workflow_dispatch={"inputs": {"skip": {"default": "true"}}}),
             lambda w: w["concurrency"].update(group="shared"),
             lambda w: w["jobs"].update(fabricate={"runs-on": "ubuntu-24.04", "steps": [{"run": "true"}]}),
