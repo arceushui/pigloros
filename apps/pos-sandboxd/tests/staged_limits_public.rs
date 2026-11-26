@@ -2,6 +2,11 @@
 //! seams (#216): the limits a conformance case probes are the attempt's
 //! effective limits, and the default staging is unchanged.
 //!
+//! The root test runs only through `scripts/run-isolated-test.sh`, which
+//! needs Docker: it counts toward coverage only in the CI lanes that have it,
+//! as for its sibling `staged_provider_public.rs`. Without Docker it fails
+//! and never skips.
+//!
 //! As root in the isolated container, the staged execution is admitted and its
 //! input verified by the production execute path, whose policy carries the
 //! seventeen ELM1 limits (each the least of the broker cap, the launch policy

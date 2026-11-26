@@ -127,21 +127,21 @@ impl StagedLimits {
     /// The default limits with the five probed limits set to their ceilings.
     ///
     /// Each is set in the broker caps, the launch policy and the case, so
-    /// that it is the attempt's effective limit. `watchdog_ms` is the
-    /// effective attempt watchdog (limit 4); the case's own watchdog, the
+    /// that it is the attempt's effective limit. `attempt_watchdog_ms` is the
+    /// effective attempt watchdog (limit 4); the case's own `watchdog_ms`, the
     /// client's exchange deadline, is [`Self::EXCHANGE_MS`].
     #[must_use]
     pub const fn probing(
         memory_bytes: u64,
         tasks: u64,
-        watchdog_ms: u64,
+        attempt_watchdog_ms: u64,
         output_bytes: u64,
         work_bytes: u64,
     ) -> Self {
         let mut limits = DEFAULT_LIMITS;
         limits[0] = memory_bytes;
         limits[2] = tasks;
-        limits[4] = watchdog_ms;
+        limits[4] = attempt_watchdog_ms;
         limits[8] = output_bytes;
         limits[9] = work_bytes;
         let mut budget = Self::DEFAULT.budget;
