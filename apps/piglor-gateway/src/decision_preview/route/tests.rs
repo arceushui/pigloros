@@ -547,6 +547,28 @@ async fn the_release_composition_refuses_every_fresh_request() -> TestResult {
     Ok(())
 }
 
+/// ADR-140 P35: with three other requests in flight, an exact retry takes
+/// the fourth slot and is answered with its original bytes.
+async fn an_exact_retry_is_answered_while_crowded(
+    served: &Served,
+    app: &Router,
+    body: &Value,
+    admitted: &Answer,
+) -> TestResult {
+    let in_flight = &served.gateway.decision_previews.in_flight;
+    let slots = (1..MAX_IN_FLIGHT_PER_PRINCIPAL)
+        .map(|_| InFlightSlotV1::take(in_flight, PRINCIPAL))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("the Principal has three free slots")?;
+    let crowded = post_preview(app, "k-1", body).await?;
+    assert_eq!(
+        (crowded.status, &crowded.bytes),
+        (StatusCode::ACCEPTED, &admitted.bytes)
+    );
+    drop(slots);
+    Ok(())
+}
+
 /// ADR-140 sections 6, 7 and D5 through the seam: the `202` receipt names
 /// the preview and its bound inputs, an exact retry answers its bytes, the
 /// same key with another request conflicts before the release port's gate,
@@ -591,19 +613,7 @@ async fn a_preview_is_admitted_retried_and_read_over_http() -> TestResult {
         (retried.status, &retried.bytes),
         (StatusCode::ACCEPTED, &admitted.bytes)
     );
-    // P35: with three other requests in flight, an exact retry takes the
-    // fourth slot and is answered.
-    let in_flight = &served.gateway.decision_previews.in_flight;
-    let slots = (1..MAX_IN_FLIGHT_PER_PRINCIPAL)
-        .map(|_| InFlightSlotV1::take(in_flight, PRINCIPAL))
-        .collect::<Option<Vec<_>>>()
-        .ok_or("the Principal has three free slots")?;
-    let crowded = post_preview(&app, "k-1", &body).await?;
-    assert_eq!(
-        (crowded.status, &crowded.bytes),
-        (StatusCode::ACCEPTED, &admitted.bytes)
-    );
-    drop(slots);
+    an_exact_retry_is_answered_while_crowded(&served, &app, &body, &admitted).await?;
     let mut other = body;
     other["profile_id"] = json!("replay-v1");
     let conflict = post_preview(&served.app, "k-1", &other).await?;
