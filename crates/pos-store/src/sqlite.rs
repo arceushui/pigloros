@@ -2343,13 +2343,12 @@ impl SqliteStore {
                         .and_then(|()| self.validate_pipeline_admission_schema())
                         .and_then(|()| self.validate_present_counterfactual_schema())
                 } else {
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_erasure_fence_rows_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
-                        .and_then(|()| self.prepare_counterfactual_schema())?;
-                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
-                    self.prepare_erasure_fence_rows_schema()?;
-                    Ok(())
+                        .and_then(|()| self.prepare_counterfactual_schema())
                 }
             })
     }

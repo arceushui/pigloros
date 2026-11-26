@@ -2,7 +2,7 @@
 //! owner's exact-Timeline check inside the caller's transaction.
 
 use pos_core::ids::TimelineId;
-use rusqlite::{params, types::Value, Connection};
+use rusqlite::{params, types::Value, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use super::{require_no_erasure_fence_rows, ErasureFenceRefusalV1};
@@ -96,9 +96,31 @@ fn a_read_only_open_creates_nothing_and_a_missing_table_is_unreadable() -> TestR
     store.conn.execute_batch("BEGIN")?;
     assert_eq!(
         require_no_erasure_fence_rows(&store.conn, TimelineId::new()),
-        Err(ErasureFenceRefusalV1::Unreadable)
+        Err(ErasureFenceRefusalV1::NotWriteTransaction),
+        "a read-only connection never holds a write transaction"
     );
     store.conn.execute_batch("ROLLBACK")?;
+
+    let writer = Connection::open(path)?;
+    assert_eq!(
+        check(&writer, TimelineId::new())?,
+        Err(ErasureFenceRefusalV1::Unreadable),
+        "a store without the table fails closed"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_writable_open_adds_the_table_to_a_store_without_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fence.sqlite3");
+    let path = path.to_str().ok_or("non-UTF-8 path")?;
+    drop(SqliteStore::open(path)?);
+    Connection::open(path)?.execute_batch("DROP TABLE erasure_fence_rows")?;
+
+    let store = SqliteStore::open(path)?;
+    assert!(table_exists(&store.conn)?);
+    assert_eq!(check(&store.conn, TimelineId::new())?, Ok(()));
     Ok(())
 }
 
@@ -236,8 +258,99 @@ fn the_check_refuses_outside_a_transaction() -> TestResult {
     let store = SqliteStore::open_in_memory()?;
     assert_eq!(
         require_no_erasure_fence_rows(&store.conn, TimelineId::new()),
-        Err(ErasureFenceRefusalV1::OutsideTransaction)
+        Err(ErasureFenceRefusalV1::NotWriteTransaction)
     );
+    Ok(())
+}
+
+#[test]
+fn the_check_refuses_a_deferred_transaction_before_it_writes() -> TestResult {
+    let store = SqliteStore::open_in_memory()?;
+    let timeline = TimelineId::new();
+    store.conn.execute_batch("BEGIN")?;
+    assert_eq!(
+        require_no_erasure_fence_rows(&store.conn, timeline),
+        Err(ErasureFenceRefusalV1::NotWriteTransaction),
+        "a deferred BEGIN holds no snapshot yet"
+    );
+    let rows: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM erasure_fence_rows", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!(rows, 0);
+    assert_eq!(
+        require_no_erasure_fence_rows(&store.conn, timeline),
+        Err(ErasureFenceRefusalV1::NotWriteTransaction),
+        "an earlier read pins a snapshot that may predate the fence row"
+    );
+    row(&store.conn, timeline, "upgraded", 2)?;
+    assert_eq!(
+        require_no_erasure_fence_rows(&store.conn, timeline),
+        Err(ErasureFenceRefusalV1::Fenced),
+        "a deferred transaction that has written holds the write lock"
+    );
+    store.conn.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn the_check_refuses_a_deferred_rusqlite_transaction() -> TestResult {
+    let mut store = SqliteStore::open_in_memory()?;
+    let transaction = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)?;
+    assert_eq!(
+        require_no_erasure_fence_rows(&transaction, TimelineId::new()),
+        Err(ErasureFenceRefusalV1::NotWriteTransaction)
+    );
+    transaction.rollback()?;
+    Ok(())
+}
+
+#[test]
+fn the_check_accepts_an_immediate_rusqlite_transaction_and_savepoint() -> TestResult {
+    let mut store = SqliteStore::open_in_memory()?;
+    let timeline = TimelineId::new();
+    let mut transaction = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    assert_eq!(
+        require_no_erasure_fence_rows(&transaction, timeline),
+        Ok(())
+    );
+    {
+        let mut savepoint = transaction.savepoint()?;
+        assert_eq!(require_no_erasure_fence_rows(&savepoint, timeline), Ok(()));
+        row(&savepoint, timeline, "savepoint", 2)?;
+        assert_eq!(
+            require_no_erasure_fence_rows(&savepoint, timeline),
+            Err(ErasureFenceRefusalV1::Fenced)
+        );
+        savepoint.rollback()?;
+    }
+    assert_eq!(
+        require_no_erasure_fence_rows(&transaction, timeline),
+        Ok(()),
+        "the savepoint's row rolled back"
+    );
+    transaction.rollback()?;
+    Ok(())
+}
+
+#[test]
+fn the_check_accepts_a_savepoint_inside_begin_immediate() -> TestResult {
+    let store = SqliteStore::open_in_memory()?;
+    store
+        .conn
+        .execute_batch("BEGIN IMMEDIATE; SAVEPOINT nested")?;
+    assert_eq!(
+        require_no_erasure_fence_rows(&store.conn, TimelineId::new()),
+        Ok(())
+    );
+    store
+        .conn
+        .execute_batch("RELEASE SAVEPOINT nested; ROLLBACK")?;
     Ok(())
 }
 

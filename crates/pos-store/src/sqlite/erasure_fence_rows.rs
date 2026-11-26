@@ -12,9 +12,22 @@
 //! This module owns the table and that read only. The Gateway writers and the
 //! readiness reconciliation are a separate slice. Everything here stays
 //! test-support gated until owner activation (#1438).
+//!
+//! Only a writable open creates and validates the table. A read-only open
+//! neither creates nor validates it, so a store without the table answers
+//! every check with [`ErasureFenceRefusalV1::Unreadable`]: it fails closed,
+//! never open. Two obligations follow:
+//!
+//! - The qualified owner constructor (#1547 P-a1, ADR-123 §4 validate-only)
+//!   must validate this table's exact shape itself, because it opens without
+//!   creating anything.
+//! - Ungating in #1438 must remove both `cfg` gates together, this module's
+//!   and the writable-open call in `sqlite.rs`, and every deployed database
+//!   must be opened writable by the ungated build before the ADR-121 §3a
+//!   install. A store that never gains the table fails closed forever.
 
 use pos_core::{error::CoreError, ids::TimelineId};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionState, MAIN_DB};
 
 use super::{sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 
@@ -76,9 +89,12 @@ const EXACT_TIMELINE_ROW_SQL: &str = "SELECT typeof(erasure_request_id) = 'blob'
 /// Why the exact-Timeline check refused. Every variant fails closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureFenceRefusalV1 {
-    /// The connection had no open transaction, so the result could not cover
-    /// the caller's later effect.
-    OutsideTransaction,
+    /// The connection held no write transaction on `main`.
+    ///
+    /// Autocommit has no transaction to cover the caller's later effect, and
+    /// a deferred transaction that has not written may still read a snapshot
+    /// older than the Gateway's committed fence row.
+    NotWriteTransaction,
     /// A well-formed fence row exists for the Timeline.
     Fenced,
     /// The fence rows could not be read.
@@ -95,18 +111,36 @@ pub enum ErasureFenceRefusalV1 {
 /// reads only; it neither begins nor finishes the transaction. Only the exact
 /// Timeline is read: no Fork ancestor or descendant is consulted.
 ///
+/// The connection must hold a write transaction on `main`
+/// (`sqlite3_txn_state` reports `SQLITE_TXN_WRITE`). `BEGIN IMMEDIATE`, and a
+/// savepoint inside it, hold one from the start. A deferred `BEGIN` is
+/// refused until it has written: before that it may read a stale WAL
+/// snapshot, and once it holds the write lock its snapshot is current,
+/// because a stale snapshot cannot take the WAL write lock.
+///
+/// The lookup matches the canonical upper-case 26-character ULID text
+/// exactly, so the primary key's index serves it. A stored `timeline_id`
+/// that is not canonical (lower case, a blob, or the wrong length) never
+/// matches and is ignored. The table's `CHECK` constraints refuse such a row
+/// from every normal writer; only `PRAGMA ignore_check_constraints` or file
+/// corruption can store one. Normalizing the column in the lookup would
+/// defeat the index, so the check relies on those constraints instead.
+///
 /// # Errors
-/// Returns [`ErasureFenceRefusalV1::OutsideTransaction`] when the connection
-/// is in autocommit mode, [`ErasureFenceRefusalV1::Unreadable`] when the read
-/// fails (for example, the table is missing), and
-/// [`ErasureFenceRefusalV1::Fenced`] or [`ErasureFenceRefusalV1::Malformed`]
-/// when a row exists for the Timeline.
+/// Returns [`ErasureFenceRefusalV1::NotWriteTransaction`] when the connection
+/// holds no write transaction on `main`,
+/// [`ErasureFenceRefusalV1::Unreadable`] when the read fails (for example,
+/// the table is missing), and [`ErasureFenceRefusalV1::Fenced`] or
+/// [`ErasureFenceRefusalV1::Malformed`] when a row exists for the Timeline.
 pub fn require_no_erasure_fence_rows(
     conn: &Connection,
     timeline: TimelineId,
 ) -> Result<(), ErasureFenceRefusalV1> {
-    if conn.is_autocommit() {
-        return Err(ErasureFenceRefusalV1::OutsideTransaction);
+    if !matches!(
+        conn.transaction_state(Some(MAIN_DB)),
+        Ok(TransactionState::Write)
+    ) {
+        return Err(ErasureFenceRefusalV1::NotWriteTransaction);
     }
     conn.query_row(
         EXACT_TIMELINE_ROW_SQL,
