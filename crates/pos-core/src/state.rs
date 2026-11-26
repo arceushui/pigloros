@@ -329,17 +329,16 @@ mod tests {
     }
 
     #[test]
-    fn apply_projected_leaves_the_state_apply_leaves() {
+    fn apply_projected_folds_only_the_events_that_reach_the_reducer() {
         let entity = EntityId::new();
-        let mut applied = StateRegistry::new();
         let mut projected = StateRegistry::new();
         for (event, _) in projection_cases(entity) {
-            applied.apply(&CountReducer, &event);
-            projected.apply_projected(&CountReducer, &event);
-            applied.apply(&RejectAllReducer, &event);
             projected.apply_projected(&RejectAllReducer, &event);
         }
-        assert_eq!(applied, projected);
+        assert!(projected.is_empty());
+        for (event, _) in projection_cases(entity) {
+            projected.apply_projected(&CountReducer, &event);
+        }
         assert_eq!(
             projected
                 .get(&entity)

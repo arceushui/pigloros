@@ -125,7 +125,7 @@ impl ProjectionPageLimitV1 {
 /// Why a Projection fold refused a chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionFoldErrorV1 {
-    /// An Event's `seq` does not follow the previous Event's `seq`.
+    /// An Event's `seq` does not exceed the previous Event's `seq`; gaps are accepted.
     OutOfTimelineOrder,
 }
 

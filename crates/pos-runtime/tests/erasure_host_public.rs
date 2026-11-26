@@ -140,6 +140,19 @@ fn an_owned_root_records_its_owner_at_creation() -> Result<(), Box<dyn Error + S
     Ok(())
 }
 
+/// The inventory generation the host has published, read through a
+/// generation-bound read of `timeline`.
+fn published_generation(
+    host: &mut ErasureExecutionHostV1,
+    timeline: pos_core::TimelineId,
+) -> Result<pos_core::ErasureReferenceV1, Box<dyn Error + Send + Sync>> {
+    let mut reads = host.read_sender()?;
+    let bounds = EventReadBounds::new(8, 32, 4, 4);
+    let (_, generation) =
+        reads.read_bounded_at_generation(timeline, SeqRange::all(), bounds, None)?;
+    Ok(generation)
+}
+
 /// ADR-141 P6: a root created under a given identity records that identity,
 /// its name and its owner. A second creation of the identity, or of a host
 /// root's, is refused and publishes no generation, so the sender stays
@@ -157,10 +170,13 @@ fn an_owned_root_is_created_once_under_its_identity() -> Result<(), Box<dyn Erro
         let mut commands = host.command_sender()?;
         commands.open_root_timeline(host_root, "host-owned")?;
         let created = commands.create_owned_root_with_id(id, "factual", owner)?;
+        drop(commands);
         assert_eq!((created.id(), created.meta.owner), (id, Some(owner)));
         assert_eq!(created.meta.name.as_deref(), Some("factual"));
         assert_eq!(created.meta.mode, pos_core::TimelineMode::Live);
         assert!(created.meta.fork_point.is_none());
+        let before = published_generation(&mut host, id)?;
+        let mut commands = host.command_sender()?;
         for recorded in [id, host_root] {
             assert_eq!(
                 commands
@@ -169,9 +185,9 @@ fn an_owned_root_is_created_once_under_its_identity() -> Result<(), Box<dyn Erro
                 Err(ErasureHostErrorV1::Conflict)
             );
         }
-        commands.create_timeline("after-refusals")?;
         assert_eq!(commands.timeline(id)?, Some(created));
         drop(commands);
+        assert_eq!(published_generation(&mut host, id)?, before);
         assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
     }
     Ok(())

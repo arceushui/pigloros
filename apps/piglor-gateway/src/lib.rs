@@ -1782,12 +1782,13 @@ pub enum GatewayError {
     /// The existing `OwnTracks` owner-key file failed the activation policy.
     #[error("OwnTracks owner-key file is unavailable")]
     OwnTracksOwnerKeyUnavailable,
-    /// The Gateway refused a proposed action before the action registry ran (ADR-057).
+    /// Rejections that carry no registry origin: the Gateway's own route and
+    /// payload checks, and the not-admitted and contract families (ADR-057).
     #[error(transparent)]
     ActionRejected(#[from] ActionRejected),
     /// The action registry, the owning approver or the approved-output check
     /// refused a proposed action (ADR-141 §2).
-    #[error("action rejected: {reason}")]
+    #[error("{reason}")]
     ActionRejectedBy {
         /// Who refused the action.
         origin: ActionRejectionOriginV1,

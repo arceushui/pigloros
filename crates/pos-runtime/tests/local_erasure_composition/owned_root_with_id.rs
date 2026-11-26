@@ -1,7 +1,7 @@
 //! ADR-141 P6 and P7 at the public host seam: an actor-owned root created
 //! under its identity joins a later erasure of its owner and stays outside
 //! an earlier one, and a closed composition never recovers a store that
-//! holds active requests.
+//! holds an active request, scoped or not.
 
 use super::*;
 
@@ -72,37 +72,75 @@ fn a_root_created_with_its_identity_under_an_active_request_stays_outside_it() -
     Ok(())
 }
 
-/// ADR-141 P7 (`SQLite`, which closes and reopens): a closed composition
-/// refuses to recover a store that holds a scoped request, frozen, and an
-/// unscoped one, only submitted.
-#[test]
-fn a_closed_composition_refuses_a_store_with_active_requests() -> TestResult {
-    let mut fixture = Fixture::plain(Adapter::Sqlite)?;
-    freeze_actor_request(&mut fixture.host)?;
-    let unscoped = fixture
-        .host
-        .command_sender()?
-        .submit_local_erasure(&LocalErasureSubmissionV1 {
-            actor: other_actor(),
-            ..submission(2, ErasureScopeV1::PrivateSubjectData)?
-        })
-        .map_err(fail)?
-        .state
-        .request();
-    let unscoped_state = fixture
-        .host
+/// Whether `request` has committed an erasure scope.
+fn request_scope_committed(
+    host: &mut ErasureExecutionHostV1,
+    request: ErasureReferenceV1,
+) -> TestResult<bool> {
+    let verified = host
         .read_sender()?
-        .erasure_state(unscoped)?
-        .ok_or("unscoped request missing")?;
-    assert!(unscoped_state.scope().is_none());
+        .erasure_state(request)?
+        .ok_or("request missing")?;
+    Ok(verified.scope().is_some())
+}
+
+/// Close the fixture's host and keep its `SQLite` store.
+fn closed_store(fixture: Fixture) -> TestResult<LocalStore> {
     let Fixture { host, sqlite, .. } = fixture;
     drop(host);
-    let store = sqlite.ok_or("a SQLite fixture keeps its store")?;
+    Ok(sqlite.ok_or("a SQLite fixture keeps its store")?)
+}
+
+/// Recover `store` under the explicitly closed composition.
+fn closed_recovery(store: &LocalStore) -> Result<(), ErasureHostErrorV1> {
+    let composition = ErasureCoordinatorCompositionV1::closed();
     let recovered = ErasureExecutionHostV1::open_with_authority(
-        StoreConfig::Sqlite { path: store.path },
-        &ErasureCoordinatorCompositionV1::closed(),
+        StoreConfig::Sqlite {
+            path: store.path.clone(),
+        },
+        &composition,
         ErasureRecoveryLimitsV1::compiled_maximum(),
     );
-    assert!(recovered.is_err());
+    recovered.map(drop)
+}
+
+/// ADR-141 P7 control (`SQLite`, which closes and reopens): the closed
+/// composition recovers the same fixture store while it holds no request.
+#[test]
+fn a_closed_composition_recovers_a_store_without_requests() -> TestResult {
+    let store = closed_store(Fixture::plain(Adapter::Sqlite)?)?;
+    assert_eq!(closed_recovery(&store), Ok(()));
+    Ok(())
+}
+
+/// ADR-141 P7 (`SQLite`): a store whose only request is submitted and has
+/// no scope is refused under the closed composition. Recovery observes the
+/// topology of every request head, scoped or not, and the closed authority
+/// answers no observation, so recovery is unavailable.
+#[test]
+fn a_closed_composition_refuses_a_store_with_an_unscoped_request() -> TestResult {
+    let mut fixture = Fixture::plain(Adapter::Sqlite)?;
+    submitted(&mut fixture.host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    assert!(!request_scope_committed(&mut fixture.host, request_of(1)?)?);
+    let store = closed_store(fixture)?;
+    assert_eq!(
+        closed_recovery(&store),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+/// ADR-141 P7 (`SQLite`): a store whose only request is frozen, with a
+/// committed scope, is refused under the closed composition.
+#[test]
+fn a_closed_composition_refuses_a_store_with_a_scoped_request() -> TestResult {
+    let mut fixture = Fixture::plain(Adapter::Sqlite)?;
+    freeze_actor_request(&mut fixture.host)?;
+    assert!(request_scope_committed(&mut fixture.host, request_of(1)?)?);
+    let store = closed_store(fixture)?;
+    assert_eq!(
+        closed_recovery(&store),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
     Ok(())
 }

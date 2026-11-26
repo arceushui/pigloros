@@ -288,9 +288,15 @@ fn the_same_prefix_folds_to_the_same_page_in_any_chunking() {
         chunked.projection_page_v1(None, page_limit(100)),
         folded_page(&events, 3, None, 100)
     );
+    let mut per_event =
+        ProjectionFoldV1::for_projection_cut_v1(Box::new(LastSeqReducer), Seq::from_u64(3));
+    for event in &events {
+        let folded = per_event.fold_projection_chunk_v1(std::slice::from_ref(event));
+        assert_eq!(folded, Ok(()));
+    }
     assert_eq!(
-        folded_page(&events, 3, None, 100),
-        folded_page(&events, 3, None, 100)
+        per_event.projection_page_v1(None, page_limit(100)),
+        chunked.projection_page_v1(None, page_limit(100))
     );
 }
 
