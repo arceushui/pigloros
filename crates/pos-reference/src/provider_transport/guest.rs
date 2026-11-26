@@ -97,6 +97,24 @@ impl GuestProviderClient {
             .map_err(GuestExecuteError::from)
     }
 
+    /// Status: one SDQ1 whose runtime-signed SDY1 proves that the provider
+    /// has activated the admitted policy (the selector's own revocation
+    /// synchronisation).
+    ///
+    /// # Errors
+    /// Fails closed when the provider is unreachable or its answer fails
+    /// authentication.
+    pub fn describe(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+        timeout: Duration,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.0
+            .synchronize_revocation(admitted, request_id, nonce, timeout)
+    }
+
     /// Send one SCQ1 and authenticate its SCY1.
     ///
     /// # Errors
