@@ -1,0 +1,13 @@
+# PIN/UV auth protocol 2 known answers (CTAP 2.1 PS §6.5.7), computed independently with
+# stdlib Python (affine P-256 arithmetic, RFC 5869 HKDF, RFC 2104 HMAC) and OpenSSL
+# `enc -aes-256-cbc -nopad`. Every input is derived at run time from its label:
+#   d = SHA-256("pos-owner-ctap protocol 2 KAT platform")       (platform scalar)
+#   e = SHA-256("pos-owner-ctap protocol 2 KAT authenticator")  (authenticator scalar)
+#   IV = the first 16 bytes of Drbg("pos-owner-ctap protocol 2 KAT iv")
+#   m = SHA-256("pos-owner-ctap protocol 2 KAT plaintext")
+platform_x bc1eb7ad3b8d15dc205f47b7923f77b85440e7e0b5d01f226f8855c25e2554f0
+authenticator_x 34b6dfa094f2ec22b8cc4caf0f19bf74d25cc1d2b11dc8b2ad11498f429a1e89
+shared_hmac_key b51011882a963243574fdc4b9da6f886a1e17a4c1faf55d74c83f0c97f7f6080
+shared_aes_key d594c2dfc1a7fcefbf4201c47a4bea40370378b43c90348b5e1d2efb94cc7fa1
+encrypt 4fe0338bf4c773658939af2ae9f7a1e456eeba51af059f54974d3e13164d811d5af8c8af5bda93caeed9541e9cdef3ad
+authenticate 8e17692d5b0357672da5ffae4639fa5618e1b4a6cde67fd6149f9535a1ab65da
