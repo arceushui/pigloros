@@ -22,8 +22,8 @@ use std::{convert::Infallible, fs::File, io, os::unix::net::UnixStream, sync::Ar
 use crate::{
     evaluator::CaseAttempt,
     sandbox_provider_protocol::{
-        AdmissionLedger, LaunchFailure, PayloadDescriptor, SandboxExecutionMode, SandboxLimit,
-        SelectorGrantCommitment, TransferRecord,
+        AdmissionLedger, LaunchFailure, LocalNetworkAdmission, PayloadDescriptor,
+        SandboxExecutionMode, SandboxLimit, SelectorGrantCommitment, TransferRecord,
     },
     selector::InstallationError,
 };
@@ -87,11 +87,6 @@ pub enum StagingError {
     /// The signed AGR1 failed the provider's own commitment check.
     #[error("the signed grant differs from the derived commitment")]
     GrantCommitmentMismatch,
-    /// The reconstructed execution mode is not one this provider serves:
-    /// SPE1 `8` (R11 Amendment 1 §7.5 row 9). Not in that amendment's §5
-    /// list of `StagingError` changes; an ADR erratum candidate.
-    #[error("the execution mode is not supported")]
-    CapabilityMissing,
     /// The image or the provider binary failed its identity check.
     #[error("image or provider binary identity differs")]
     ImageIdentity,
@@ -266,6 +261,8 @@ struct GrantedFacts {
     limits: Vec<SandboxLimit>,
     limits_digest: [u8; 32],
     mode: SandboxExecutionMode,
+    /// A Local attempt's admission, bound to the grant that was issued.
+    local: Option<LocalNetworkAdmission>,
     provider_binary_digest: [u8; 32],
     negative_probe_evidence: [u8; 32],
 }
@@ -315,6 +312,14 @@ impl IssuedGrant {
     #[must_use]
     pub fn execution_mode(&self) -> SandboxExecutionMode {
         self.admitted.mode
+    }
+
+    /// A Local attempt's admission, bound to the grant that was issued from
+    /// the same commitment and the exact LPS1 (ADR-069 R14 §3.5); `None` for
+    /// every other mode.
+    #[must_use]
+    pub fn local_network(&self) -> Option<&LocalNetworkAdmission> {
+        self.admitted.local.as_ref()
     }
 
     /// The admitted SPM1 provider binary digest: SPR1's
@@ -396,10 +401,27 @@ impl IssuedGrant {
                 limits,
                 limits_digest: [0xe1; 32],
                 mode,
+                local: None,
                 provider_binary_digest: [0xb1; 32],
                 negative_probe_evidence: [0x97; 32],
             }),
         }
+    }
+
+    /// The same grant carrying the Local `admission`, for tests that serve a
+    /// Local attempt without authenticating a grant.
+    #[must_use]
+    pub fn with_local_network(mut self, admission: LocalNetworkAdmission) -> Self {
+        let facts = &self.admitted;
+        self.admitted = Arc::new(GrantedFacts {
+            limits: facts.limits.clone(),
+            limits_digest: facts.limits_digest,
+            mode: facts.mode,
+            local: Some(admission),
+            provider_binary_digest: facts.provider_binary_digest,
+            negative_probe_evidence: facts.negative_probe_evidence,
+        });
+        self
     }
 
     /// The same grant whose AGR1 is the canonical `bytes`, for tests that

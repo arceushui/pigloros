@@ -8,9 +8,11 @@
 //! system bus transport with the multi-thread runtime that drives it. Both
 //! outlive reconciliation: every admitted attempt runs on them.
 //!
-//! The port serves the `AirGapped`, `Fork` and `Replay` modes; a `Local` case
-//! is refused with SPE1 `8 ProviderCapabilityMissing` (R11 Amendment 1 §7.5
-//! row 9) until #1488 serves it. Replay is evidence-only with empty plans
+//! The port serves every mode: R11 Amendment 1 §7.5 row 9 is gone (#1488,
+//! erratum G6). A `Local` attempt establishes its network through the
+//! port's [`AttemptNetwork`], the SPI1 attempt range over the netlink
+//! namespace control and the host egress, with the admission its issued
+//! grant carries (ADR-069 R14 §3.6). Replay is evidence-only with empty plans
 //! (#1488 journal 23125, G3): no FD 3 and no bytes reach the adapter.
 //!
 //! Each admitted attempt's launcher barrier is the production
@@ -22,7 +24,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pos_reference::evaluator_domain::ExecutionMode;
 use pos_reference::sandbox_provider_protocol::{
     NetworkCaptureStore, SandboxCancelRequest, SandboxCancelResponse, SandboxCancelResponseFields,
     SandboxExecutionMode, SandboxProviderErrorCode, SandboxReconcileRequest,
@@ -33,11 +34,16 @@ use tokio::runtime::Runtime;
 use crate::{
     fresh_nonce, sign_verified, AdmittedAttempt, AdmittedRuntimeKey, AttemptLaunch,
     AttemptLifecycle, AttemptLifecycleError, AuthorityCheck, BarrierError, BarrierFactory,
-    CancelSignal, CleanupBudget, FailClosedLocalNetwork, KernelObservedReadback,
-    KeyFileRuntimeSigner, ModePlan, NetlinkUnitNetwork, OwnedAttempt, ProviderNamespaces,
-    ProviderReleaseBarrier, RetainedResponse, RootRecheck, RuntimeAttestationSigner,
-    StagingDirectory, StagingLedger, SystemdAttemptSteps, SystemdTransientUnitTransport,
+    CancelSignal, CleanupBudget, HostEgress, IssuedGrant, KernelObservedReadback,
+    KeyFileRuntimeSigner, ModePlan, NamespacedLocalNetwork, NetlinkNamespaceControl,
+    NetlinkUnitNetwork, OwnedAttempt, ProviderNamespaces, ProviderReleaseBarrier, RetainedResponse,
+    RootRecheck, RuntimeAttestationSigner, StagingDirectory, StagingLedger, SystemdAttemptSteps,
+    SystemdTransientUnitTransport,
 };
+
+/// The Local network port of the SPI1 attempt range: each Local attempt
+/// establishes its namespace, veth pair and firewall through it.
+pub(super) type AttemptNetwork = NamespacedLocalNetwork<NetlinkNamespaceControl, HostEgress>;
 
 /// What an `Open` runtime's execute port holds for the life of the process.
 pub(super) struct ExecutePort {
@@ -51,6 +57,8 @@ pub(super) struct ExecutePort {
     pub(super) captures: Arc<NetworkCaptureStore>,
     /// The provider's own namespaces, retained at step 7.
     pub(super) namespaces: ProviderNamespaces,
+    /// The Local network port every Local attempt establishes through.
+    pub(super) network: Arc<AttemptNetwork>,
     /// The SPI1 terminal cleanup budget.
     pub(super) budget: CleanupBudget,
     /// Execute admission closed after a provider signing fault (R9 §5).
@@ -62,35 +70,30 @@ pub(super) struct ExecutePort {
     pub(super) runtime: Runtime,
 }
 
-/// Whether the port serves a case of `mode`: every mode but `Local`, which
-/// stays refused (SPE1 `8`) until #1488 serves it.
-pub(super) const fn serves(mode: ExecutionMode) -> bool {
-    matches!(
-        mode,
-        ExecutionMode::AirGapped | ExecutionMode::Fork | ExecutionMode::Replay
-    )
-}
-
-/// The network plan of an admitted `mode` the port serves: `Replay`'s with no
-/// exchanges, and the network-free plan of every other.
+/// The network plan of an admitted attempt: `Replay`'s with no exchanges,
+/// and the network plan of every other mode.
 ///
 /// A Replay case has no exchange to resolve: the plans it reconstructs are
 /// empty, because a non-empty SPX1 plan list fails the reconstruction
 /// equality (R11 Amendment 1 §7.5 row 7).
-const fn mode_plan(mode: SandboxExecutionMode) -> ModePlan {
-    match mode {
+pub(super) fn mode_plan(grant: &IssuedGrant) -> ModePlan {
+    match grant.execution_mode() {
         SandboxExecutionMode::Replay => ModePlan::Replay {
             exchanges: Vec::new(),
         },
-        other => network_free_plan(other),
+        other => network_plan(other, grant),
     }
 }
 
-/// `Fork`'s own plan, and `AirGapped`'s for every other mode, whose execution
-/// then refuses the mismatch.
-const fn network_free_plan(mode: SandboxExecutionMode) -> ModePlan {
-    match mode {
-        SandboxExecutionMode::Fork => ModePlan::Fork,
+/// `Local`'s admission, which its issued grant carries; `Fork`'s own plan;
+/// and `AirGapped`'s for every other case, whose execution then refuses the
+/// mismatch.
+fn network_plan(mode: SandboxExecutionMode, grant: &IssuedGrant) -> ModePlan {
+    match (mode, grant.local_network()) {
+        (SandboxExecutionMode::Local, Some(admission)) => ModePlan::Local {
+            admission: Box::new(admission.clone()),
+        },
+        (SandboxExecutionMode::Fork, _) => ModePlan::Fork,
         _ => ModePlan::AirGapped,
     }
 }
@@ -268,8 +271,8 @@ impl ExecutePort {
         None
     }
 
-    /// Run the owned attempt admitted in `mode` to its end and retain its
-    /// signed terminal response.
+    /// Run the owned attempt, whose network is `mode`, to its end and retain
+    /// its signed terminal response.
     ///
     /// # Errors
     /// Those of [`AttemptLifecycle::retain_response`]: a response that
@@ -277,14 +280,14 @@ impl ExecutePort {
     pub(super) fn run(
         &self,
         owned: OwnedAttempt<'_>,
-        mode: SandboxExecutionMode,
+        mode: ModePlan,
         signer: &Arc<KeyFileRuntimeSigner>,
         key: AdmittedRuntimeKey<'_>,
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
-        let network = FailClosedLocalNetwork;
-        let steps = SystemdAttemptSteps::new(&self.transport, &network, Arc::clone(&self.captures));
+        let steps =
+            SystemdAttemptSteps::new(&self.transport, &*self.network, Arc::clone(&self.captures));
         let launch = AttemptLaunch {
-            mode: mode_plan(mode),
+            mode,
             barrier: RuntimeBarriers {
                 signer: Arc::clone(signer),
                 transport: self.transport.clone(),
@@ -301,25 +304,55 @@ impl ExecutePort {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pos_reference::sandbox_provider_protocol::LocalNetworkAdmission;
+
     use super::*;
 
+    /// The grant of an attempt admitted in `mode`, whose Local admission,
+    /// if any, is `admission`.
+    fn issued(mode: SandboxExecutionMode, admission: Option<LocalNetworkAdmission>) -> IssuedGrant {
+        let grant = IssuedGrant::fixture(
+            crate::test_fixtures::GRANT_DIGEST,
+            crate::test_fixtures::execution_limits(1_000),
+            mode,
+        );
+        match admission {
+            Some(admission) => grant.with_local_network(admission),
+            None => grant,
+        }
+    }
+
     #[test]
-    fn the_port_serves_every_mode_but_local() {
-        assert!(serves(ExecutionMode::AirGapped));
-        assert!(serves(ExecutionMode::Fork));
-        assert!(serves(ExecutionMode::Replay));
-        assert!(!serves(ExecutionMode::Local));
+    fn every_mode_has_its_network_plan() {
+        let admission = crate::test_fixtures::admission(
+            crate::test_fixtures::ATTEMPT,
+            crate::test_fixtures::grant_authority(),
+            [4, 5, 6],
+            Vec::new(),
+        );
         assert!(matches!(
-            mode_plan(SandboxExecutionMode::Fork),
+            mode_plan(&issued(SandboxExecutionMode::Fork, None)),
             ModePlan::Fork
         ));
         assert!(matches!(
-            mode_plan(SandboxExecutionMode::Replay),
+            mode_plan(&issued(SandboxExecutionMode::Replay, None)),
             ModePlan::Replay { exchanges } if exchanges.is_empty()
         ));
-        for mode in [SandboxExecutionMode::AirGapped, SandboxExecutionMode::Local] {
-            assert!(matches!(mode_plan(mode), ModePlan::AirGapped));
-        }
+        assert!(matches!(
+            mode_plan(&issued(SandboxExecutionMode::AirGapped, None)),
+            ModePlan::AirGapped
+        ));
+        // A Local case carries the admission its grant was issued with.
+        assert!(matches!(
+            mode_plan(&issued(SandboxExecutionMode::Local, Some(admission.clone()))),
+            ModePlan::Local { admission: bound } if *bound == admission
+        ));
+        // A Local grant without one is refused by its execution as a mode
+        // mismatch, like any other plan that does not fit its mode.
+        assert!(matches!(
+            mode_plan(&issued(SandboxExecutionMode::Local, None)),
+            ModePlan::AirGapped
+        ));
     }
 
     /// The production barrier factory builds the release barrier over the

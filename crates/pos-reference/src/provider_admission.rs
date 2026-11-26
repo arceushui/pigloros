@@ -64,6 +64,8 @@ pub struct ProviderImageSnapshot {
     image: AdmittedSandboxImage,
     proof: VerifiedSandboxImageProof,
     launch: LaunchPolicy,
+    /// The exact canonical LPS1 that `launch` was decoded from.
+    launch_bytes: Vec<u8>,
     binary: AdmittedProviderBinary,
 }
 
@@ -185,7 +187,7 @@ impl ProviderImageSnapshot {
                 check_image(&admitted, &request, clock).map(|checked| (binary, checked))
             })
             .map_err(SnapshotFault::Image)?;
-        let launch = admitted
+        let (launch, launch_bytes) = admitted
             .bootstrap()
             .installed()
             .artifact(
@@ -197,11 +199,12 @@ impl ProviderImageSnapshot {
                 admitted
                     .provider()
                     .admit_launch_policy(&launch_bytes, &image)
+                    .map(|launch| (launch, launch_bytes))
                     .map_err(invalid)
             })
-            .and_then(|launch| {
+            .and_then(|(launch, launch_bytes)| {
                 if launch.policy_digest == request.authority.lps1_digest {
-                    Ok(launch)
+                    Ok((launch, launch_bytes))
                 } else {
                     Err(InstallationError::ArtifactInvalid)
                 }
@@ -213,6 +216,7 @@ impl ProviderImageSnapshot {
             image,
             proof,
             launch,
+            launch_bytes,
             binary,
         })
     }
@@ -239,6 +243,13 @@ impl ProviderImageSnapshot {
     #[must_use]
     pub const fn launch_policy(&self) -> &LaunchPolicy {
         &self.launch
+    }
+
+    /// The exact canonical LPS1 the launch policy was decoded from, which a
+    /// Local admission binds again (ADR-069 R14 §3.5).
+    #[must_use]
+    pub fn launch_policy_bytes(&self) -> &[u8] {
+        &self.launch_bytes
     }
 
     /// The retained, authenticated provider executable used as the launcher.
