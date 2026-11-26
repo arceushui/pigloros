@@ -1408,8 +1408,7 @@ fn the_provenance_record_is_deterministic_cbor() -> TestResult {
     let stored = events(&mut host)?;
     // The expected digests come from BLAKE3 directly, not from the function
     // under test.
-    let digest =
-        |payload: &CanonicalBytes| blake3::hash(payload.as_slice()).to_hex().to_string();
+    let digest = |payload: &CanonicalBytes| blake3::hash(payload.as_slice()).to_hex().to_string();
     for (preview, result) in [
         (&admitted, None),
         (&committed, Some(digest(&stored[1].payload))),
