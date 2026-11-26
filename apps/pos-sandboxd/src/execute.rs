@@ -65,12 +65,13 @@ use tokio::sync::watch;
 use zbus::OwnedFd;
 
 use crate::adapter_stdio::{open_channels, AdapterChannels};
+use crate::network_removal::{OwnedConnector, RemovalReport};
 use crate::{
     ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
-    LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
-    RequestedConfigurationProperty, ServeError, ServedProxy, SetupClass, SetupError,
-    StdioChannelError, SystemdTransientUnitReadback, TransientServiceUnitName,
+    LocalNetworkPort, LocalProxyBindError, NetworkRemovalFailure, OutputReservationRefused,
+    RequestedConfiguration, RequestedConfigurationProperty, ServeError, ServedProxy, SetupClass,
+    SetupError, StdioChannelError, SystemdTransientUnitReadback, TransientServiceUnitName,
     TransientUnitLaunchInputs, TransientUnitRequest, UnitStdio,
 };
 
@@ -605,6 +606,9 @@ pub struct ExecuteFailure<C, E = (), S = ()> {
     /// The verified start, once the unit's start completed: the exact unit
     /// object whose result the terminal evidence reads.
     pub started: Option<S>,
+    /// Why the attempt's Local network could not be removed, if it could
+    /// not: the attempt's `cleanup.result` is then 1 (ADR-069 R14 N7).
+    pub network_removal: Option<NetworkRemovalFailure>,
 }
 
 /// How a released attempt ended.
@@ -697,6 +701,9 @@ pub struct AttemptExecution<S, C, E = ()> {
     pub evidence: E,
     /// The adapter's stdin feed and its fenced stdout capture.
     pub adapter: AdapterIo,
+    /// Why the attempt's Local network could not be removed, if it could
+    /// not: the attempt's `cleanup.result` is then 1 (ADR-069 R14 N7).
+    pub network_removal: Option<NetworkRemovalFailure>,
 }
 
 /// The network behaviour prepared before the unit starts.
@@ -762,6 +769,11 @@ struct Prepared<C> {
 /// unit running. A drop outside a runtime cannot spawn it; the lifecycle
 /// (#442) reconciles any unit left behind.
 ///
+/// A Local network that could not be removed, on any path that dropped it,
+/// is returned as `network_removal` of the result, whether the execution
+/// completed or failed (ADR-069 R14 N7); a connector still owned when the
+/// execution returns counts as one that could not be removed.
+///
 /// # Errors
 /// An [`ExecuteFailure`] names the error and what is known of the unit. Any
 /// failure after the unit was submitted kills it. A failure after the cgroup
@@ -782,6 +794,7 @@ where
         job.attempt
             .claim_execution()
             .map_err(|error| ExecuteFailure {
+                network_removal: None,
                 error,
                 unit: UnitState::NotStarted,
                 cgroup: None,
@@ -791,11 +804,31 @@ where
     )
     .and_then(|()| async move {
         let mut guard = SubmissionGuard::new();
-        let result = drive(host, barrier, network, job, recheck, &mut guard).await;
+        let report = RemovalReport::default();
+        let result = drive(host, barrier, network, job, recheck, &mut guard, &report).await;
         guard.disarm();
-        result
+        // Every path that dropped the network has run by now (R14 N7).
+        with_removal(result, &report)
     })
     .await
+}
+
+/// `result`, with the first network removal failure of the execution.
+fn with_removal<S, C, E>(
+    result: Result<AttemptExecution<S, C, E>, ExecuteFailure<C, E, S>>,
+    report: &RemovalReport,
+) -> Result<AttemptExecution<S, C, E>, ExecuteFailure<C, E, S>> {
+    let network_removal = report.take();
+    match result {
+        Ok(execution) => Ok(AttemptExecution {
+            network_removal,
+            ..execution
+        }),
+        Err(failure) => Err(ExecuteFailure {
+            network_removal,
+            ..failure
+        }),
+    }
 }
 
 /// The failure of an execution over the host `H`.
@@ -828,19 +861,22 @@ async fn drive<H, B, N>(
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
     guard: &mut SubmissionGuard<H::Killer>,
+    report: &RemovalReport,
 ) -> Result<AttemptExecution<H::Started, H::Cgroup, H::Evidence>, Failure<H>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
     N: LocalNetworkPort + Sync,
 {
-    let prepared = prepare(barrier, network, job, recheck).map_err(|error| ExecuteFailure {
-        error,
-        unit: UnitState::NotStarted,
-        cgroup: None,
-        evidence: None,
-        started: None,
-    })?;
+    let prepared =
+        prepare(barrier, network, job, recheck, report).map_err(|error| ExecuteFailure {
+            network_removal: None,
+            error,
+            unit: UnitState::NotStarted,
+            cgroup: None,
+            evidence: None,
+            started: None,
+        })?;
     let Prepared {
         attempt,
         request,
@@ -907,6 +943,7 @@ where
     };
     let ending = finish.ending();
     Ok(AttemptExecution {
+        network_removal: None,
         attempt_id,
         started,
         cgroup,
@@ -1064,6 +1101,7 @@ where
 {
     if let Err(error) = attempt.submit_execution() {
         return Err(ExecuteFailure {
+            network_removal: None,
             error,
             unit: UnitState::NotStarted,
             cgroup: None,
@@ -1238,7 +1276,8 @@ fn prepare<B, N>(
     network: &N,
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError>,
-) -> Result<Prepared<N::Connector>, ExecuteError>
+    report: &RemovalReport,
+) -> Result<Prepared<OwnedConnector<N::Connector>>, ExecuteError>
 where
     B: LaunchBarrier,
     N: LocalNetworkPort,
@@ -1259,7 +1298,15 @@ where
                 .map_err(ExecuteError::HostService)?;
             let established = network
                 .establish(attempt.attempt_id(), &admitted_endpoints(&admission))
-                .map_err(|error| ExecuteError::Network(NetworkSetupFailure::new(error)))?;
+                .map(|established| established.owned_by(report))
+                .map_err(|error| {
+                    // A network the failed setup could not remove is owed
+                    // to the cleanup record (R14 N7).
+                    if let Some(removal) = error.removal() {
+                        report.record(removal);
+                    }
+                    ExecuteError::Network(NetworkSetupFailure::new(error))
+                })?;
             // A bad admission, namespace or channel never reaches the start.
             let checked = attempt.check_local(*admission, established, channel)?;
             (
@@ -1627,6 +1674,7 @@ where
 {
     let killed = kill_everything(host, unit, cgroup.as_mut(), bounds.call).await;
     ExecuteFailure {
+        network_removal: None,
         error,
         unit: match (killed, submission) {
             (true, _) => UnitState::Killed,

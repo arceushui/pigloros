@@ -180,6 +180,12 @@ pub fn capability(address: SocketAddr) -> NetworkCapability {
 /// Connects to the planned endpoint, like a real connector would.
 pub struct LoopbackConnector;
 
+impl crate::RemoveNetwork for LoopbackConnector {
+    fn remove(&mut self) -> Result<(), crate::NetworkRemovalFailure> {
+        Ok(())
+    }
+}
+
 impl NetworkEndpointConnector for LoopbackConnector {
     fn connect(&mut self, endpoint: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         TcpStream::connect_timeout(&endpoint, timeout)
