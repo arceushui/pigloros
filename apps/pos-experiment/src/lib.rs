@@ -189,8 +189,8 @@ fn bind_store_to_experiment_gate(
 
 fn map_action_submission_error(error: pos_runtime::ActionSubmissionError) -> ExperimentError {
     match error {
-        pos_runtime::ActionSubmissionError::Rejected(error) => {
-            ExperimentError::ActionRejected(error)
+        pos_runtime::ActionSubmissionError::Rejected { reason, .. } => {
+            ExperimentError::ActionRejected(reason)
         }
         pos_runtime::ActionSubmissionError::ErasureOperationUnavailable => {
             ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureOperationUnavailable)
@@ -9498,6 +9498,23 @@ mod coverage_entrypoints {
                 pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
             ))
         ));
+    }
+
+    #[test]
+    fn action_submission_maps_every_rejection_origin_to_its_reason() {
+        for origin in [
+            pos_runtime::ActionRejectionOriginV1::Registry,
+            pos_runtime::ActionRejectionOriginV1::Approver,
+            pos_runtime::ActionRejectionOriginV1::ApprovedOutput,
+        ] {
+            assert!(matches!(
+                map_action_submission_error(pos_runtime::ActionSubmissionError::Rejected {
+                    origin,
+                    reason: pos_core::ActionRejected::InvalidActorEntityId,
+                }),
+                ExperimentError::ActionRejected(pos_core::ActionRejected::InvalidActorEntityId)
+            ));
+        }
     }
 }
 

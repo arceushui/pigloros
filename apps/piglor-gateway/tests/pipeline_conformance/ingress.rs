@@ -17,9 +17,9 @@ use pos_experiment::{
     PipelineEvaluationOutcomeV1, StopCondition, TickOutcome,
 };
 use pos_runtime::{
-    ActionSubmissionError, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
-    LocalScheduledAdmissionHostV1, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1,
-    ScheduledPassAdmissionV1,
+    ActionRejectionOriginV1, ActionSubmissionError, HumanActionAdmissionErrorV1,
+    HumanActionAdmissionV1, LocalScheduledAdmissionHostV1, PluginRegistry, RuntimeError,
+    ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1,
 };
 use pos_store::{sqlite::SqliteStore, StoreConfig};
 
@@ -93,9 +93,10 @@ fn human_admission(
 /// A stable name for one typed human admission outcome.
 fn human_outcome(error: &HumanActionAdmissionErrorV1) -> String {
     match error {
-        HumanActionAdmissionErrorV1::Submission(ActionSubmissionError::Rejected(
-            ActionRejected::DomainValidationFailed(_),
-        )) => "domain-rejected".to_owned(),
+        HumanActionAdmissionErrorV1::Submission(ActionSubmissionError::Rejected {
+            reason: ActionRejected::DomainValidationFailed(_),
+            ..
+        }) => "domain-rejected".to_owned(),
         HumanActionAdmissionErrorV1::NotAdmitted(outcome) => format!("not-admitted:{outcome:?}"),
         HumanActionAdmissionErrorV1::Store(CoreError::Storage(_)) => "store-failure".to_owned(),
         HumanActionAdmissionErrorV1::Store(CoreError::StorageOutcomeUnknown(_)) => {
@@ -666,7 +667,10 @@ pub fn replay_never_resubmits() -> Capture {
             "replay.submit",
             matches!(
                 replay_submit,
-                ActionSubmissionError::Rejected(ActionRejected::UnknownEventType)
+                ActionSubmissionError::Rejected {
+                    origin: ActionRejectionOriginV1::Registry,
+                    reason: ActionRejected::UnknownEventType,
+                }
             ),
         );
         capture.record(store, "approvals", fixture.approvals());

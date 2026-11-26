@@ -371,9 +371,10 @@ async fn domain_denial_and_a_missing_plugin_commit_nothing() -> TestResult {
         assert!(
             matches!(
                 denied,
-                Err(GatewayError::ActionRejected(
-                    pos_core::ActionRejected::DomainValidationFailed(_)
-                ))
+                Err(GatewayError::ActionRejectedBy {
+                    origin: pos_runtime::ActionRejectionOriginV1::Approver,
+                    reason: pos_core::ActionRejected::DomainValidationFailed(_),
+                })
             ),
             "{name}: {denied:?}"
         );
@@ -401,9 +402,10 @@ async fn domain_denial_and_a_missing_plugin_commit_nothing() -> TestResult {
         assert!(
             matches!(
                 outcome,
-                Err(GatewayError::ActionRejected(
-                    pos_core::ActionRejected::UnknownEventType
-                ))
+                Err(GatewayError::ActionRejectedBy {
+                    origin: pos_runtime::ActionRejectionOriginV1::Registry,
+                    reason: pos_core::ActionRejected::UnknownEventType,
+                })
             ),
             "{name}: {outcome:?}"
         );

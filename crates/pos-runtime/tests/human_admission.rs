@@ -16,8 +16,9 @@ use pos_core::{
     RecordedSetCountsV1, Seq, SeqRange, TimelineId,
 };
 use pos_runtime::{
-    ActionSubmissionError, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
-    HumanActionReceiptV1, LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledAdmissionStoreV1,
+    ActionRejectionOriginV1, ActionSubmissionError, HumanActionAdmissionErrorV1,
+    HumanActionAdmissionV1, HumanActionReceiptV1, LocalScheduledAdmissionHostV1, PluginRegistry,
+    ScheduledAdmissionStoreV1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
@@ -322,18 +323,20 @@ fn denial_missing_plugin_stale_state_and_changed_authority_commit_nothing() {
         assert!(
             matches!(
                 denied,
-                HumanActionAdmissionErrorV1::Submission(ActionSubmissionError::Rejected(
-                    ActionRejected::DomainValidationFailed(_)
-                ))
+                HumanActionAdmissionErrorV1::Submission(ActionSubmissionError::Rejected {
+                    origin: ActionRejectionOriginV1::Approver,
+                    reason: ActionRejected::DomainValidationFailed(_),
+                })
             ),
             "{name}"
         );
         assert!(
             matches!(
                 missing,
-                HumanActionAdmissionErrorV1::Submission(ActionSubmissionError::Rejected(
-                    ActionRejected::UnknownEventType
-                ))
+                HumanActionAdmissionErrorV1::Submission(ActionSubmissionError::Rejected {
+                    origin: ActionRejectionOriginV1::Registry,
+                    reason: ActionRejected::UnknownEventType,
+                })
             ),
             "{name}"
         );

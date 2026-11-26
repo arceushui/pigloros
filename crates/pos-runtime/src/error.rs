@@ -39,12 +39,41 @@ pub enum WorldInstallationErrorV1 {
     ProfileMismatch,
 }
 
+/// Who refused a proposed action (ADR-141 §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionRejectionOriginV1 {
+    /// The registry's own structural checks before any approver runs.
+    Registry,
+    /// The owning Plugin's `ActionApprover` returned `Err`.
+    Approver,
+    /// The registry refused the approver's draft.
+    ApprovedOutput,
+}
+
+impl ActionRejectionOriginV1 {
+    /// The submission error for `reason`, attributed to this origin.
+    pub(crate) const fn action_submission_rejection(
+        self,
+        reason: ActionRejected,
+    ) -> ActionSubmissionError {
+        ActionSubmissionError::Rejected {
+            origin: self,
+            reason,
+        }
+    }
+}
+
 /// Closed result of one Timeline-bound proposed-action admission.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ActionSubmissionError {
-    /// The capability, payload, ownership, or Plugin domain policy rejected the action.
-    #[error(transparent)]
-    Rejected(#[from] ActionRejected),
+    /// The registry, the owning approver, or the approved-output check rejected the action.
+    #[error("{origin:?} rejected the action: {reason}")]
+    Rejected {
+        /// Who refused the action.
+        origin: ActionRejectionOriginV1,
+        /// The closed ADR-057 rejection.
+        reason: ActionRejected,
+    },
     /// No host-owned erasure gate was installed for the action boundary.
     #[error("proposed action requires a host-bound erasure containment gate")]
     ErasureOperationUnavailable,

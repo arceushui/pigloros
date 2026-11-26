@@ -106,7 +106,9 @@ pub use erasure_local_authority::{
     LOCAL_ERASURE_MAX_REPREPARE_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
     LOCAL_ERASURE_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };
-pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
+pub use error::{
+    ActionRejectionOriginV1, ActionSubmissionError, RuntimeError, WorldInstallationErrorV1,
+};
 pub use measured_process_image::MeasuredProcessImageV1;
 pub use output_admission::{
     validate_output_policy_artifacts_v1, OutputAdmissionErrorV1, OutputAdmissionV1,
