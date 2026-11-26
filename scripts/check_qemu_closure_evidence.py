@@ -199,7 +199,7 @@ DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-sta
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
                         "runtime-log", "provider-sha256", "start-state", "start-journal",
                         "execute-report", "execute-stderr", "execute-status", "attempt-journal",
-                        "exchange-journal", "leftover-mounts"}
+                        "exchange-journal", "leftover-mounts", "leftover-umount-failures"}
 # R11 5.2 gives the unit no environment, no descriptor and no credential. These environment and
 # descriptor lists must be empty or omitted (systemctl show omits some empty lists); the
 # credential lists cannot be read that way and are checked through `runtime-credentials`
@@ -1509,6 +1509,12 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
                             f"{failures or 'no Stopping and Deactivated successfully lines from systemd[1]'}; "
                             f"log: {log.strip()[-600:]!r}")
     execution = check_execute(evidence, base, name)
+    # A mount that outlives the runtime is a leak; the collector writes both files empty when
+    # nothing leaked and every detach succeeded.
+    for leftover in ("leftover-mounts", "leftover-umount-failures"):
+        if evidence.text(f"{base}/{leftover}") != "":
+            raise EvidenceError(f"the {name} runtime left mounts behind ({leftover}): "
+                                f"{evidence.text(f'{base}/{leftover}').strip()[:400]!r}")
     tree = {}
     for line in evidence.text(f"{base}/runtime-tree").splitlines():
         path, kind, mode = tab_fields(line, 3, "runtime-tree")

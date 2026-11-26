@@ -596,6 +596,7 @@ def daemon_files() -> dict[str, bytes | str]:
         f"{base}/execute-report": EXECUTE_REPORT, f"{base}/execute-stderr": "",
         f"{base}/execute-status": "0\n", f"{base}/attempt-journal": ATTEMPT_JOURNAL,
         f"{base}/exchange-journal": "", f"{base}/leftover-mounts": "",
+        f"{base}/leftover-umount-failures": "",
     }
 
 
@@ -1595,6 +1596,14 @@ class EvidenceTests(unittest.TestCase):
     def test_the_execute_evidence_is_the_selectors_own_observation(self):
         execution = self.verdict()["provider_runtime"]["start"]["execution"]
         self.assertEqual(execution, {"outcome": "Completed", "events": "1,2,3"})
+
+    def test_a_leaked_mount_or_a_failed_detach_fails_closed(self):
+        base = "guest/daemon/start"
+        for name in ("leftover-mounts", "leftover-umount-failures"):
+            for content in ("/run/pigloros/sandbox/attempts/x/root erofs\n", "\n", " "):
+                with self.subTest(name=name, content=content):
+                    with self.assertRaisesRegex(checker.EvidenceError, f"left mounts behind \\({name}\\)"):
+                        self.verdict(change=lambda f, n=name, c=content: f.update({f"{base}/{n}": c}))
 
     def test_the_attempt_unit_line_may_follow_other_lines_of_the_journal(self):
         noise = f"[ 109.0] {HOST} systemd[1]: Started something.service.\n"

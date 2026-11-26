@@ -306,9 +306,14 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   printf '%s\n' "${status}" >"${dir}/stage-status"
   # A mount that outlives the runtime (an attempt root that was not detached) is evidence of its
   # own; it is recorded, then detached so that the removal below, and the later cases, can run.
-  { findmnt --raw --noheadings --output TARGET,FSTYPE | grep "^${RUNTIME_ROOT}/" || true; } \
-    >"${dir}/leftover-mounts"
-  sort -r "${dir}/leftover-mounts" | while read -r target _; do umount --lazy "${target}" || true; done
+  # The checker requires both files to be empty: a leak is a failure, and a detach that fails
+  # is recorded, not swallowed.
+  findmnt --raw --noheadings --output TARGET,FSTYPE \
+    | awk -v root="${RUNTIME_ROOT}" '$1 == root || index($1, root "/") == 1' >"${dir}/leftover-mounts"
+  : >"${dir}/leftover-umount-failures"
+  LC_ALL=C sort -r "${dir}/leftover-mounts" | while read -r target _; do
+    umount --lazy "${target}" || printf '%s\n' "${target}" >>"${dir}/leftover-umount-failures"
+  done
   rm -rf "${RUNTIME_ROOT}"
 }
 
