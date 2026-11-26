@@ -1,0 +1,82 @@
+{
+  "name": "decision-preview-insufficient-evidence",
+  "operation_id": "getDecisionPreview",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0005"
+    },
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:decision-preview",
+      "id": "01JC0GATEWAYW90PREV1EW0005",
+      "generation": 2,
+      "provenance": {
+        "digest": "e4b7e2b8e6b9193001eaf07e86b5a68da6cb4bf05992617fc3a85cca2de1120e",
+        "origin": "host-derived"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "installed",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "state": "committed",
+      "inputs": {
+        "scenario_room": {
+          "id": "01JC0GATEWAYW9R00M00000001",
+          "revision": 2,
+          "digest": "fd6e6cb67f418f827eed51918ee73b195a95d0e478a85da75eb99db0145288ab"
+        },
+        "preference": {
+          "id": "01JC0GATEWAYW9PREF0000004A",
+          "revision": 1,
+          "digest": "1a3f6a2366631abdfb0d126a6d2ec5c73abaad2d57be6a91826c9361a9e98041"
+        },
+        "option_spec": {
+          "id": "01JC0GATEWAYW9QPT10N00004A",
+          "revision": 1,
+          "digest": "0d0b7b18fa612565d525a812b50b5ab2c9843eee3cfcc7fe4949fde8d099225d"
+        }
+      },
+      "factual_timeline_id": null,
+      "recommendation": {
+        "status": "insufficient-evidence"
+      },
+      "committed": {
+        "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "timeline_id": "4SKQW3XVN6B14SKZ8NNKJCHJ6G",
+        "event_id": "01JC0GATEWAYW90RES00000005",
+        "seq": 2,
+        "event_schema_id": "preview.result.v1",
+        "next_cursor": null
+      },
+      "failure": null,
+      "uncertainty": {
+        "status": "unavailable"
+      },
+      "calibration": {
+        "status": "unavailable",
+        "reason": "no-resolved-predictions"
+      },
+      "proposals": "inert",
+      "actuation": "none"
+    }
+  }
+}

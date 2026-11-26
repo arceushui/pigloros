@@ -102,6 +102,20 @@ impl OperationSpecV1 for RevokeConsentOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::REVOKE_CONSENT;
 }
 
+/// `POST /v1/decision-previews`.
+pub struct CreateDecisionPreviewOperation;
+
+impl OperationSpecV1 for CreateDecisionPreviewOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::CREATE_DECISION_PREVIEW;
+}
+
+/// `GET /v1/decision-previews/{preview_id}`.
+pub struct ReadDecisionPreviewOperation;
+
+impl OperationSpecV1 for ReadDecisionPreviewOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_DECISION_PREVIEW;
+}
+
 /// `POST /v1/me/erasures`.
 pub struct RequestErasureOperation;
 

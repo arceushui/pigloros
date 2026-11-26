@@ -271,11 +271,11 @@ fn bind_mode(
 /// `authorized` and `authorized-air-gapped` may create Timelines, read their Events and read
 /// their own Session, and hold no action, signal or network grant. `authorized-consented` may
 /// also revoke a consent, and its one consent, by the fixture actor to itself, governs Timeline
-/// creation. `authorized-rooms` may create Timelines, read its Session, revoke a consent and
-/// create, derive and read Scenario Rooms; it records the fixture governance record, and its
-/// one consent governs Timeline creation and permits export, so a room may name it as its
-/// `privacy_export_ref`. The `authorized-erasure` compositions (#1449) may request and read
-/// their own erasures and nothing else.
+/// creation. `authorized-rooms` may create Timelines, read its Session, revoke a consent,
+/// create, derive and read Scenario Rooms, and create and read Decision Previews (#305); it
+/// records the fixture governance record, and its one consent governs Timeline creation and
+/// permits export, so a room may name it as its `privacy_export_ref`. The `authorized-erasure`
+/// compositions (#1449) may request and read their own erasures and nothing else.
 fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
     let consent = |export_permitted| LocalConsentDraftV1 {
         subject: actor,
@@ -328,6 +328,8 @@ fn consented_document(
                 GatewayOperationV1::CREATE_SCENARIO_ROOM,
                 GatewayOperationV1::DERIVE_SCENARIO_ROOM,
                 GatewayOperationV1::READ_SCENARIO_ROOM,
+                GatewayOperationV1::CREATE_DECISION_PREVIEW,
+                GatewayOperationV1::READ_DECISION_PREVIEW,
             ],
             Some(consent(true)),
             entity(GOVERNANCE_RECORD_ID),
