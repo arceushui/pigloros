@@ -17,9 +17,11 @@
 //! In Wave 9 this stays test-support gated (ADR-123 G13); activation is
 //! #1438. Physical identity grants no key, consent or append authority.
 
+use std::collections::BTreeSet;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use pos_core::GatewayModeBindingErrorV1;
 use pos_crypto::subject_field_read::SubjectFieldOwnerReadErrorV1;
@@ -39,26 +41,34 @@ pub use crate::sqlite::owner_store_binding::{
 /// The two companions, in diagnostic order: the WAL, then the SHM file.
 const COMPANIONS: [&str; 2] = ["-wal", "-shm"];
 
-/// Main-file identities whose native connection was retained or whose handle
-/// was dropped without a proved close. The retained connection keeps its
-/// inode allocated, so an entry never names a different file later.
-static RETAINED: Mutex<Vec<SubjectStoreFileIdV1>> = Mutex::new(Vec::new());
+/// Device and inode of a main file: the registry key.
+pub(crate) type RegistryKeyV1 = [u64; 2];
 
-/// Record `file_id` as retained for the rest of the process (ADR-123 §1: a
-/// fresh context, wrapper or alias cannot escape quarantine).
-pub(crate) fn record_retained(file_id: SubjectStoreFileIdV1) {
-    RETAINED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(file_id);
+/// Main-file identities with a live or retained native connection in this
+/// process. An entry is removed only by a proved close or a proved refusal
+/// disposal; a retained or dropped connection keeps its inode allocated, so a
+/// kept entry never names a different file later.
+static CLAIMED: Mutex<BTreeSet<RegistryKeyV1>> = Mutex::new(BTreeSet::new());
+
+fn claimed() -> MutexGuard<'static, BTreeSet<RegistryKeyV1>> {
+    CLAIMED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Whether a native connection to `file_id` is retained in this process.
-pub(crate) fn is_retained(file_id: SubjectStoreFileIdV1) -> bool {
-    RETAINED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(&file_id)
+/// Record `key` as holding a native connection (ADR-123 §1: a replacement
+/// root, wrapper or alias resolves to the same state, and the profile has one
+/// connection per process).
+pub(crate) fn claim_identity(key: RegistryKeyV1) {
+    claimed().insert(key);
+}
+
+/// Forget `key` after its native connection was proved closed.
+pub(crate) fn release_identity(key: RegistryKeyV1) {
+    claimed().remove(&key);
+}
+
+/// Whether a native connection to `key` is live or retained in this process.
+pub(crate) fn is_claimed(key: RegistryKeyV1) -> bool {
+    claimed().contains(&key)
 }
 
 /// Closed refusals of the qualified owner-store constructor and its guarded
@@ -69,8 +79,10 @@ pub enum OwnerStoreBindingErrorV1 {
     /// `OperationActive` or `ContextQuarantined`.
     #[error("owner store admission refused")]
     Admission(SubjectFieldOwnerReadErrorV1),
-    /// The fixed unavailable result. No native connection was retained and
-    /// admission is idle again.
+    /// The fixed unavailable result. No native connection was retained or
+    /// opened, and admission is idle again. A main file that already has a
+    /// live or retained connection in this process is `Unavailable` before
+    /// any native open.
     #[error("protected owner store unavailable")]
     Unavailable,
     /// The persisted Gateway mode binding could not be attached; `Unbound`
@@ -165,6 +177,24 @@ impl OwnerStoreWitnessesV1 {
             device: self.namespace.main.stat.st_dev,
             inode: self.namespace.main.stat.st_ino,
         }
+    }
+
+    /// The main file's registry key, its device and inode.
+    pub(crate) const fn registry_key(&self) -> RegistryKeyV1 {
+        [
+            self.namespace.main.stat.st_dev,
+            self.namespace.main.stat.st_ino,
+        ]
+    }
+
+    /// A path naming the retained directory object itself through its own
+    /// descriptor, so a later interlock opens that object whatever the
+    /// original path names now (ADR-123 §3 L7). It is transport, not identity.
+    pub(crate) fn retained_directory_path(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            self.namespace.directory.as_raw_fd()
+        ))
     }
 
     /// The canonical absolute main path, checked against the retained
@@ -475,7 +505,6 @@ fn text_field<'text>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
     use super::*;
@@ -842,19 +871,40 @@ mod tests {
     }
 
     #[test]
-    fn a_retained_identity_is_refused_by_every_later_lookup() {
-        let retained = SubjectStoreFileIdV1::Linux {
-            device: u64::MAX,
-            inode: 1,
-        };
-        let other = SubjectStoreFileIdV1::Linux {
-            device: u64::MAX,
-            inode: 2,
-        };
-        assert!(!is_retained(retained));
-        record_retained(retained);
-        assert!(is_retained(retained));
-        assert!(!is_retained(other));
+    fn a_claimed_identity_is_refused_until_it_is_released() {
+        let claimed = [u64::MAX, 1];
+        let other = [u64::MAX, 2];
+        assert!(!is_claimed(claimed));
+        claim_identity(claimed);
+        claim_identity(claimed);
+        assert!(is_claimed(claimed));
+        assert!(!is_claimed(other));
+        release_identity(claimed);
+        assert!(!is_claimed(claimed));
+    }
+
+    #[test]
+    fn the_retained_directory_path_names_the_directory_after_a_rename() -> TestResult {
+        let parent = private_directory()?;
+        let moved = parent.path().join("moved");
+        let original = parent.path().join("original");
+        std::fs::create_dir(&original)?;
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700))?;
+        create(&original, "main", 0o600)?;
+        let witnesses =
+            OwnerStoreWitnessesV1::screen(&original, "main").ok_or("screening refused")?;
+        let [dev, ino] = witnesses.registry_key();
+        let metadata = std::fs::metadata(original.join("main"))?;
+        assert_eq!([dev, ino], [metadata.dev(), metadata.ino()]);
+        std::fs::rename(&original, &moved)?;
+        assert!(!witnesses.names_directory(&original));
+        assert!(witnesses.names_directory(&witnesses.retained_directory_path()));
+        let reopened = CheckedNamespace::open(&witnesses.retained_directory_path(), "main")?;
+        assert!(same_file(
+            &reopened.main.stat,
+            &witnesses.namespace.main.stat
+        ));
+        Ok(())
     }
 
     #[test]

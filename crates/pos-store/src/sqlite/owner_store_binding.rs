@@ -11,9 +11,18 @@
 //! (ADR-123 §1, §6): only [`QualifiedSqliteStoreV1::close`] closes it, under
 //! admission, the interlock and a witness recheck. A handle dropped without
 //! it, a panic before a proved close, or a close that cannot be proved safe
-//! retains the connection and its witnesses until process exit, keeps the
-//! context's native slot occupied and records the main file's identity so no
-//! later context in the process opens a second connection to it.
+//! retains the connection and its witnesses until process exit and keeps the
+//! context's native slot occupied.
+//!
+//! The main file's identity is claimed in a process-wide registry from the
+//! moment its connection opens: a second context, wrapper or alias is refused
+//! as `Unavailable` before any native open while the connection is live or
+//! retained (ADR-123 §1: one connection per process). Only a proved close or a
+//! proved refusal disposal releases the claim, so a retained or dropped handle
+//! keeps its file refused for the rest of the process. A panic during setup
+//! leaves the retained connection's `BEGIN IMMEDIATE` write transaction open
+//! until process exit: it keeps the `SQLite` write lock and blocks other
+//! processes' writers, which is the retention ADR-123 §6 intends.
 //!
 //! A failed diagnostic query (`sqlite_filestat` missing, over the length
 //! limit or malformed) always retains and quarantines, never a clean
@@ -22,13 +31,17 @@
 //!
 //! A proven identity that differs from the caller's pre-screen key returns
 //! the fixed `Unavailable` before the schema or mode binding is touched
-//! (ADR-123 §6 selects no new error variant). A lease-holding `serve` caller
-//! maps that result to ADR-137 `LeaseIdentityMismatch` itself, because it
-//! alone knows it supplied the key.
+//! (ADR-123 §6 fixes plain `Unavailable` only for lease-free writers). The
+//! mapping for a lease holder is undefined here: ADR-137 L5 step 5 requires
+//! `LeaseIdentityMismatch`, but `Unavailable` is also returned for a busy
+//! interlock or transaction, an unsafe or non-WAL file, a schema failure and
+//! a retained identity, so `serve` cannot tell a mismatch from them. An
+//! ADR-123/ADR-137 erratum that adds a distinguishable mismatch signal is
+//! needed before activation in #1438.
 
 use std::fmt;
 use std::mem::ManuallyDrop;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,7 +55,7 @@ use rustix::fd::OwnedFd;
 use super::SqliteStore;
 use crate::owner_store_admission::OwnerStoreOperationV1;
 use crate::owner_store_binding::{
-    is_retained, record_retained, OwnerStoreBindingErrorV1, OwnerStoreContextV1,
+    claim_identity, is_claimed, release_identity, OwnerStoreBindingErrorV1, OwnerStoreContextV1,
     OwnerStoreWitnessesV1,
 };
 use crate::owner_store_interlock::OwnerStoreFileInterlockV1;
@@ -72,11 +85,9 @@ thread_local! {
 /// trait object, and no `Deref` to a connection.
 pub struct QualifiedSqliteStoreV1 {
     context: Arc<OwnerStoreContextV1>,
-    directory: PathBuf,
     main_basename: String,
     file_id: SubjectStoreFileIdV1,
     native: ManuallyDrop<NativeOwnerV1>,
-    retention: RetentionGuardV1,
 }
 
 /// Everything retained with the native connection. The store is never
@@ -87,44 +98,13 @@ struct NativeOwnerV1 {
     native_witnesses: [OwnedFd; 3],
 }
 
-/// Records the main file's identity as retained when dropped armed, whether
-/// the handle was dropped, a step retained the connection or a panic unwound.
-/// Only a proved close or disposal disarms it.
-struct RetentionGuardV1 {
-    file_id: SubjectStoreFileIdV1,
-    armed: bool,
-}
-
-impl RetentionGuardV1 {
-    const fn new(file_id: SubjectStoreFileIdV1) -> Self {
-        Self {
-            file_id,
-            armed: true,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for RetentionGuardV1 {
-    fn drop(&mut self) {
-        if self.armed {
-            record_retained(self.file_id);
-        }
-    }
-}
-
-/// A native setup that opened: the retained owner and its retention guard.
-type BoundV1 = (NativeOwnerV1, RetentionGuardV1);
-
 /// Why [`QualifiedSqliteStoreV1::close`] did not close the connection.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum OwnerStoreCloseErrorV1 {
     /// Shared admission refused before any lower lock. The connection was not
     /// touched and nothing was quarantined by this call: the handle is
     /// returned so disposal can be retried.
+    #[error("owner store close refused by admission")]
     Refused {
         /// The admission refusal.
         error: SubjectFieldOwnerReadErrorV1,
@@ -134,6 +114,7 @@ pub enum OwnerStoreCloseErrorV1 {
     /// A busy interlock, a changed witness or a failed close. The connection
     /// and witnesses stay retained until process exit and the context is
     /// quarantined (ADR-123 §6).
+    #[error("protected owner store close quarantined")]
     Quarantined,
 }
 
@@ -154,12 +135,6 @@ impl StepV1 {
     fn release_refused_slot(&self, context: &OwnerStoreContextV1) {
         if let Self::Refuse(_) = self {
             context.release_native_slot();
-        }
-    }
-
-    fn record_retained(&self, file_id: SubjectStoreFileIdV1) {
-        if matches!(self, Self::Retain) {
-            record_retained(file_id);
         }
     }
 }
@@ -220,8 +195,9 @@ impl QualifiedSqliteStoreV1 {
     /// connection, if opened, was closed under the interlock after a witness
     /// recheck. A failed native proof, a failed length-limit restore or an
     /// unproved close returns `Quarantined`. A main file whose connection a
-    /// quarantined or dropped handle retained is `Unavailable` to every
-    /// context in this process.
+    /// quarantined or dropped handle retained, or that a live handle holds, is
+    /// `Unavailable` to every other context in this process before any native
+    /// open, and the live handle is unaffected.
     pub fn open(
         context: Arc<OwnerStoreContextV1>,
         test_database_directory: &Path,
@@ -244,13 +220,11 @@ impl QualifiedSqliteStoreV1 {
         } else {
             Err(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
         };
-        conclude(admitted, outcome).map(|(native, retention)| Self {
+        conclude(admitted, outcome).map(|native| Self {
             file_id: native.witnesses.store_file_id(),
             context,
-            directory: test_database_directory.to_path_buf(),
             main_basename: main_basename.to_owned(),
             native: ManuallyDrop::new(native),
-            retention,
         })
     }
 
@@ -263,10 +237,13 @@ impl QualifiedSqliteStoreV1 {
 
     /// Run one guarded operation in one `BEGIN IMMEDIATE` (ADR-123 §6).
     ///
-    /// Shared admission, the filesystem interlock and a recheck of every
-    /// retained witness precede the transaction; a fresh native proof follows
+    /// Shared admission, the filesystem interlock (taken through the retained
+    /// directory descriptor, so a swapped path cannot redirect it) and a
+    /// recheck of every retained witness precede the transaction; a fresh native proof follows
     /// it before `operation` runs. `Ok` from `operation` commits and `Err`
-    /// rolls back; either is returned inside `Ok`.
+    /// rolls back; either is returned inside `Ok`. A panic in `operation`
+    /// leaves the transaction open and the context quarantined; the handle
+    /// keeps its claim on the main file.
     ///
     /// # Errors
     /// Returns `Admission` before any lower lock, `Unavailable` when the
@@ -283,30 +260,24 @@ impl QualifiedSqliteStoreV1 {
             .map_err(OwnerStoreBindingErrorV1::Admission)?;
         let file_id = self.file_id;
         let native = &mut *self.native;
-        let directory = &self.directory;
-        let outcome =
-            OwnerStoreFileInterlockV1::try_acquire(&admitted, directory, &self.main_basename)
-                .map_err(|_| StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
-                .and_then(|_interlock| {
-                    native
-                        .witnesses
-                        .names_directory(directory)
-                        .then_some(())
-                        .ok_or(StepV1::Retain)
-                        .and_then(|()| run_guarded(native, file_id, operation))
-                })
-                .inspect_err(|step| step.record_retained(file_id));
+        let outcome = OwnerStoreFileInterlockV1::try_acquire(
+            &admitted,
+            &native.witnesses.retained_directory_path(),
+            &self.main_basename,
+        )
+        .map_err(|_| StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
+        .and_then(|_interlock| run_guarded(native, file_id, operation));
         conclude(admitted, outcome)
     }
 
     /// Close the native connection under admission and the interlock after
-    /// a recheck of every retained witness, then release the native slot.
+    /// a recheck of every retained witness, then release the native slot and
+    /// the process-wide claim on the main file.
     ///
     /// # Errors
     /// Returns `Refused` with the untouched handle when shared admission
-    /// refuses before any lower lock. A busy interlock, a directory that no
-    /// longer names the retained one, a changed witness or a failed close
-    /// returns `Quarantined` and retains the connection until process exit
+    /// refuses before any lower lock. A busy interlock, a changed witness or
+    /// a failed close returns `Quarantined` and retains the connection until process exit
     /// (ADR-123 §6). A panic before the close completes retains it too.
     pub fn close(self) -> Result<(), OwnerStoreCloseErrorV1> {
         let context = Arc::clone(&self.context);
@@ -320,19 +291,19 @@ impl QualifiedSqliteStoreV1 {
             }
         };
         let Self {
-            directory,
             main_basename,
             native,
-            retention,
             ..
         } = self;
+        let directory = native.witnesses.retained_directory_path();
+        let key = native.witnesses.registry_key();
         let outcome = OwnerStoreFileInterlockV1::try_acquire(&admitted, &directory, &main_basename)
             .map_err(|_| StepV1::Retain)
             .and_then(|_interlock| {
-                close_native(native, &directory)
+                close_native(native)
                     .then(|| {
                         context.release_native_slot();
-                        retention.disarm();
+                        release_identity(key);
                     })
                     .ok_or(StepV1::Retain)
             });
@@ -340,18 +311,16 @@ impl QualifiedSqliteStoreV1 {
     }
 }
 
-/// Dispose of the retained owner under the held interlock, once the
-/// interlock's directory is the retained one. The store stays inside
-/// `ManuallyDrop` until `managed_close` owns the bare connection.
-fn close_native(native: ManuallyDrop<NativeOwnerV1>, directory: &Path) -> bool {
-    native.witnesses.names_directory(directory) && {
-        let NativeOwnerV1 {
-            store,
-            witnesses,
-            native_witnesses,
-        } = ManuallyDrop::into_inner(native);
-        dispose(store, witnesses, native_witnesses)
-    }
+/// Dispose of the retained owner under the held interlock, which was taken
+/// through the retained directory. The store stays inside `ManuallyDrop`
+/// until `managed_close` owns the bare connection.
+fn close_native(native: ManuallyDrop<NativeOwnerV1>) -> bool {
+    let NativeOwnerV1 {
+        store,
+        witnesses,
+        native_witnesses,
+    } = ManuallyDrop::into_inner(native);
+    dispose(store, witnesses, native_witnesses)
 }
 
 /// Finish an admitted step: proved outcomes restore idle admission, a
@@ -381,9 +350,9 @@ fn setup(
     directory: &Path,
     main_basename: &str,
     pre_screen_key: SubjectStoreFileIdV1,
-) -> Result<BoundV1, StepV1> {
+) -> Result<NativeOwnerV1, StepV1> {
     OwnerStoreWitnessesV1::screen(directory, main_basename)
-        .filter(|witnesses| !is_retained(witnesses.store_file_id()))
+        .filter(|witnesses| !is_claimed(witnesses.registry_key()))
         .and_then(|witnesses| {
             witnesses
                 .sqlite_path(directory, main_basename)
@@ -415,15 +384,18 @@ fn open_native(path: &Path) -> Option<ManuallyDrop<SqliteStore>> {
     })
 }
 
-/// Configure, prove and attach inside the setup transaction; dispose of the
-/// connection on any refusal. The identity check follows the proof at once.
+/// Claim the main file's identity, then configure, prove and attach inside the
+/// setup transaction; dispose of the connection and release the claim on a
+/// proved refusal. A retained connection keeps the claim. The identity check
+/// follows the proof at once.
 fn bind_native(
     mut store: ManuallyDrop<SqliteStore>,
     witnesses: OwnerStoreWitnessesV1,
     pre_screen_key: SubjectStoreFileIdV1,
-) -> Result<BoundV1, StepV1> {
+) -> Result<NativeOwnerV1, StepV1> {
     let file_id = witnesses.store_file_id();
-    let retention = RetentionGuardV1::new(file_id);
+    let key = witnesses.registry_key();
+    claim_identity(key);
     let bound = configure(&store.conn)
         .then_some(())
         .ok_or(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
@@ -444,16 +416,13 @@ fn bind_native(
                 .map(|()| native_witnesses)
         });
     match bound {
-        Ok(native_witnesses) => Ok((
-            NativeOwnerV1 {
-                store,
-                witnesses,
-                native_witnesses,
-            },
-            retention,
-        )),
+        Ok(native_witnesses) => Ok(NativeOwnerV1 {
+            store,
+            witnesses,
+            native_witnesses,
+        }),
         Err(StepV1::Refuse(error)) => Err(if dispose(store, witnesses, ()) {
-            retention.disarm();
+            release_identity(key);
             StepV1::Refuse(error)
         } else {
             StepV1::Retain
@@ -627,6 +596,7 @@ mod tests {
     use std::cell::Cell;
     use std::num::NonZeroU64;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::path::PathBuf;
     use std::thread::LocalKey;
 
     use pos_core::{GatewayModeBindingHostV1, GatewayModeProfileRefV1};
@@ -902,7 +872,15 @@ mod tests {
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(fixture.open().err(), Some(ACTIVE));
         assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(ACTIVE));
-        let Some(OwnerStoreCloseErrorV1::Refused { error, store }) = store.close().err() else {
+        let Some(refused) = store.close().err() else {
+            return Err("an active admission must refuse the close".into());
+        };
+        assert_eq!(
+            refused.to_string(),
+            "owner store close refused by admission"
+        );
+        assert!(std::error::Error::source(&refused).is_none());
+        let OwnerStoreCloseErrorV1::Refused { error, store } = refused else {
             return Err("an active admission must refuse the close".into());
         };
         assert_eq!(OwnerStoreBindingErrorV1::Admission(error), ACTIVE);
@@ -1103,10 +1081,15 @@ mod tests {
         assert_eq!(store.guarded(|_| Ok::<(), ()>(()))?, Ok(()));
         let interlock =
             OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.directory.path(), MAIN)?;
+        let quarantined = store.close().err();
         assert!(matches!(
-            store.close().err(),
+            quarantined,
             Some(OwnerStoreCloseErrorV1::Quarantined)
         ));
+        assert_eq!(
+            quarantined.map(|error| error.to_string()),
+            Some("protected owner store close quarantined".to_owned())
+        );
         drop(interlock);
         operation.complete_cleanly();
         assert_eq!(fixture.open().err(), Some(QUARANTINED));
@@ -1123,6 +1106,12 @@ mod tests {
             Some(OwnerStoreBindingErrorV1::Quarantined)
         );
         assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(QUARANTINED));
+        // The quarantined handle is still alive: only the process-wide claim
+        // can refuse a fresh context (the replaced WAL screens fine).
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
         assert!(matches!(
             store.close().err(),
             Some(OwnerStoreCloseErrorV1::Refused {
@@ -1160,6 +1149,10 @@ mod tests {
             Some(OwnerStoreBindingErrorV1::Quarantined)
         );
         assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
         Ok(())
     }
 
@@ -1172,6 +1165,76 @@ mod tests {
         });
         assert_eq!(finished.err(), Some(OwnerStoreBindingErrorV1::Quarantined));
         assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_store_refuses_a_fresh_context_and_stays_usable() -> TestResult {
+        let fixture = installed(true)?;
+        let mut store = fixture.open()?;
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        // A second native connection would have failed this fresh proof.
+        assert_eq!(store.guarded(|_| Ok::<(), ()>(()))?, Ok(()));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        closed(store)?;
+        closed(fixture.open_fresh_context()?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_panic_in_a_guarded_operation_leaves_the_transaction_open_and_quarantines() -> TestResult {
+        let fixture = installed(true)?;
+        let mut store = fixture.open()?;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.guarded(|_| -> Result<(), ()> { std::panic::resume_unwind(Box::new("closure")) })
+        }));
+        assert!(unwound.is_err());
+        assert!(!store.native.store.conn.is_autocommit());
+        assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(QUARANTINED));
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        drop(store);
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn guarded_and_close_operate_on_the_retained_directory_after_a_path_swap() -> TestResult {
+        let fixture = installed(true)?;
+        let mut store = fixture.open()?;
+        let original = fixture.directory.path().to_path_buf();
+        let mut moved = original.clone().into_os_string();
+        moved.push("-moved");
+        let moved = PathBuf::from(moved);
+        std::fs::rename(&original, &moved)?;
+        std::fs::create_dir(&original)?;
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700))?;
+        let operated = store.guarded(|binding| {
+            binding
+                .store()
+                .conn
+                .execute_batch("CREATE TABLE swapped_probe (value INTEGER)")
+        });
+        let closed_clean = store.close().map_err(|error| error.to_string());
+        std::fs::remove_dir_all(&original)?;
+        std::fs::rename(&moved, &original)?;
+        assert!(matches!(operated, Ok(Ok(()))));
+        assert_eq!(closed_clean, Ok(()));
         Ok(())
     }
 
