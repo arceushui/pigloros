@@ -10,7 +10,7 @@
 //! Every bound is an argument, so the host tests use tiny ones.
 
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -22,8 +22,10 @@ use crate::AdapterRunError;
 const TASK_LIFETIME: Duration = Duration::from_millis(1_500);
 /// The size of one memory-exhaustion allocation.
 const MEMORY_CHUNK: usize = 1 << 20;
-/// The size of one write of the output and work-area fixtures.
-const WRITE_CHUNK: usize = 64 << 10;
+/// The byte of the oversized-output filler.
+const OUTPUT_FILLER: u8 = 0x5a;
+/// The byte of the work-area and memory fillers.
+const HELD_FILLER: u8 = 0xa5;
 /// The work area (`TemporaryFileSystem=/work`).
 const WORK_AREA: &str = "/work";
 /// The marker of the malformed-output fixture: not an EAO1 stream.
@@ -137,27 +139,22 @@ pub fn apply(fixture: Fixture, output: &mut impl Write) -> Result<After, Adapter
         Fixture::AdapterCrash => Err(AdapterRunError::Crashed),
         Fixture::MalformedOutput => write_all(output, MALFORMED).map(|()| After::Written),
         Fixture::OversizedOutput(bytes) => write_filler(output, bytes).map(|()| After::Written),
-        Fixture::OrphanedChild => {
-            leave_orphan();
-            Ok(After::Report)
-        }
+        Fixture::OrphanedChild => Ok(then_report(leave_orphan())),
         Fixture::WorkAreaExhaustion(bytes) => {
-            fill_work_area(Path::new(WORK_AREA), bytes);
-            Ok(After::Report)
+            Ok(then_report(fill_work_area(Path::new(WORK_AREA), bytes)))
         }
-        Fixture::TaskExhaustion(tasks) => {
-            exhaust_tasks(tasks);
-            Ok(After::Report)
-        }
-        Fixture::MemoryExhaustion(bytes) => {
-            exhaust_memory(bytes);
-            Ok(After::Report)
-        }
+        Fixture::TaskExhaustion(tasks) => Ok(then_report(exhaust_tasks(tasks))),
+        Fixture::MemoryExhaustion(bytes) => Ok(then_report(exhaust_memory(bytes))),
         Fixture::WatchdogExpiry(milliseconds) | Fixture::Idle(milliseconds) => {
             std::thread::sleep(Duration::from_millis(milliseconds));
             Ok(After::Report)
         }
     }
+}
+
+/// Whatever the effect did, the run goes on to report honestly.
+fn then_report<T>(_effect: T) -> After {
+    After::Report
 }
 
 /// Report honestly if every attempt was denied.
@@ -179,55 +176,48 @@ fn write_all(output: &mut impl Write, bytes: &[u8]) -> Result<(), AdapterRunErro
         .or(Err(AdapterRunError::Output))
 }
 
-/// Write `bytes` of filler, in chunks, with no frame around them.
+/// Write exactly `bytes` of filler with no frame around them.
 fn write_filler(output: &mut impl Write, bytes: u64) -> Result<(), AdapterRunError> {
-    let chunk = vec![0x5a_u8; WRITE_CHUNK];
-    let mut remaining = bytes;
-    while remaining > 0 {
-        let length = usize::try_from(remaining).map_or(WRITE_CHUNK, |rest| rest.min(WRITE_CHUNK));
-        write_all(output, &chunk[..length])?;
-        remaining -= length as u64;
-    }
-    Ok(())
+    io::copy(&mut io::repeat(OUTPUT_FILLER).take(bytes), output)
+        .and_then(|_| output.flush())
+        .or(Err(AdapterRunError::Output))
 }
 
-/// Start a detached idle child of this executable and do not wait for it. If
-/// it cannot be started there is nothing to orphan.
-pub fn leave_orphan() {
-    let child = std::env::current_exe().and_then(|executable| {
-        Command::new(executable)
-            .args(["idle", "600000"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-    });
-    drop(child);
+/// Start a detached idle child of this executable, do not wait for it, and
+/// return its process ID. If it cannot be started there is nothing to orphan.
+#[must_use]
+pub fn leave_orphan() -> Option<u32> {
+    std::env::current_exe()
+        .and_then(|executable| {
+            Command::new(executable)
+                .args(["idle", "600000"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        })
+        .ok()
+        .map(|child| child.id())
 }
 
-/// Write `bytes` to one file of `area`. A refusal (a full area) is a denied
-/// operation, not a failure.
-pub fn fill_work_area(area: &Path, bytes: u64) {
-    let mut file = OpenOptions::new()
+/// Write `bytes` to one file of `area` and return how many were written.
+///
+/// # Errors
+/// Fails when the file cannot be created or the area refuses the write. Either
+/// is a denied operation of the fixture, not a failure of the run.
+pub fn fill_work_area(area: &Path, bytes: u64) -> io::Result<u64> {
+    OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(area.join("fill"))
-        .ok();
-    let chunk = vec![0xa5_u8; WRITE_CHUNK];
-    let mut remaining = bytes;
-    while let (Some(file), true) = (file.as_mut(), remaining > 0) {
-        let length = usize::try_from(remaining).map_or(WRITE_CHUNK, |rest| rest.min(WRITE_CHUNK));
-        if file.write_all(&chunk[..length]).is_err() {
-            break;
-        }
-        remaining -= length as u64;
-    }
+        .and_then(|mut file| io::copy(&mut io::repeat(HELD_FILLER).take(bytes), &mut file))
 }
 
-/// Keep `tasks` threads alive together for [`TASK_LIFETIME`]; stop starting
-/// more at the first refusal.
-pub fn exhaust_tasks(tasks: u64) {
+/// Keep `tasks` threads alive together for `TASK_LIFETIME`, stop starting
+/// more at the first refusal, and return how many were started.
+#[must_use]
+pub fn exhaust_tasks(tasks: u64) -> usize {
     let started: Vec<_> = (0..tasks)
         .map_while(|_| {
             std::thread::Builder::new()
@@ -235,18 +225,20 @@ pub fn exhaust_tasks(tasks: u64) {
                 .ok()
         })
         .collect();
+    let count = started.len();
     for handle in started {
         drop(handle.join());
     }
+    count
 }
 
-/// Hold `bytes` of memory, one touched chunk at a time.
-pub fn exhaust_memory(bytes: u64) {
-    let mut held: Vec<Vec<u8>> = Vec::new();
-    let mut total = 0_u64;
-    while total < bytes {
-        held.push(vec![0xa5_u8; MEMORY_CHUNK]);
-        total += MEMORY_CHUNK as u64;
-    }
+/// Hold `bytes` of touched memory, rounded up to whole `MEMORY_CHUNK`s, and
+/// return how many bytes are held.
+#[must_use]
+pub fn exhaust_memory(bytes: u64) -> u64 {
+    let held: Vec<Vec<u8>> = (0..bytes.div_ceil(MEMORY_CHUNK as u64))
+        .map(|_| vec![HELD_FILLER; MEMORY_CHUNK])
+        .collect();
     std::hint::black_box(&held);
+    held.iter().map(|chunk| chunk.len() as u64).sum()
 }

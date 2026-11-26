@@ -446,31 +446,34 @@ fn a_broken_output_stream_is_an_output_failure_for_the_fixtures_that_own_it() {
 #[test]
 fn the_work_area_fixture_writes_its_bound_and_stops_at_a_full_area() -> TestResult {
     let dir = tempfile::tempdir()?;
-    fill_work_area(dir.path(), 200_000);
+    assert_eq!(fill_work_area(dir.path(), 200_000)?, 200_000);
     assert_eq!(fs::metadata(dir.path().join("fill"))?.len(), 200_000);
-    fill_work_area(dir.path(), 10);
+    assert_eq!(fill_work_area(dir.path(), 10)?, 10);
     assert_eq!(fs::metadata(dir.path().join("fill"))?.len(), 10);
 
-    // A full area refuses the write; the fixture stops without failing.
+    // A full area refuses the write; the run goes on without failing.
     let full = tempfile::tempdir()?;
     symlink("/dev/full", full.path().join("fill"))?;
-    fill_work_area(full.path(), 1 << 20);
+    assert!(fill_work_area(full.path(), 1 << 20).is_err());
 
     // A missing area has nothing to fill.
     let missing = dir.path().join("missing");
-    fill_work_area(&missing, 10);
+    assert!(fill_work_area(&missing, 10).is_err());
     assert!(!missing.exists());
     Ok(())
 }
 
 #[test]
-fn the_task_and_memory_fixtures_hold_their_bound_while_they_run() {
+fn the_task_memory_and_orphan_fixtures_report_what_they_held() -> TestResult {
     let started = Instant::now();
-    exhaust_tasks(3);
+    assert_eq!(exhaust_tasks(3), 3);
     assert!(started.elapsed() >= Duration::from_millis(1_500));
-    exhaust_memory(3 << 20);
-    exhaust_memory(1);
-    leave_orphan();
+    assert_eq!(exhaust_memory(3 << 20), 3 << 20);
+    assert_eq!(exhaust_memory(1), 1 << 20);
+    assert_eq!(exhaust_memory(0), 0);
+    let orphan = leave_orphan().ok_or("no orphan was started")?;
+    assert!(orphan > 1 && orphan != std::process::id());
+    Ok(())
 }
 
 #[test]
