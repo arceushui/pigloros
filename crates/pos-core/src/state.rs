@@ -83,12 +83,22 @@ impl StateRegistry {
         self.states.is_empty()
     }
 
+    /// Fold one Event, as [`Self::apply_projected`] does, without the result.
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {
-        self.apply_observing_initial(reducer, event, &mut |_| {});
+        self.apply_projected(reducer, event);
     }
 
-    /// [`Self::apply`], first showing `observe` the `initial()` State of an
-    /// entity this Event creates, before `apply` runs on it.
+    /// Fold one Event and report whether it reached the reducer (ADR-141 P25).
+    ///
+    /// `false` for a geographic or consent Event, which never reaches a
+    /// reducer, and for an Event the reducer's `projects_event` refuses; the
+    /// registry is then unchanged.
+    pub fn apply_projected(&mut self, reducer: &dyn Reducer, event: &Event) -> bool {
+        self.apply_observing_initial(reducer, event, &mut |_| {})
+    }
+
+    /// [`Self::apply_projected`], first showing `observe` the `initial()`
+    /// State of an entity this Event creates, before `apply` runs on it.
     ///
     /// Host-internal: used by `pos-state`'s staged candidate accounting
     /// (ADR-113 §4 E5); not a Plugin API.
@@ -97,7 +107,7 @@ impl StateRegistry {
         reducer: &dyn Reducer,
         event: &Event,
         observe: &mut dyn FnMut(&State),
-    ) {
+    ) -> bool {
         // Geographic evidence is owned by the Core visibility boundary.  A
         // generic StateRegistry must never hand it to a plugin reducer, even
         // when a caller bypasses ProjectionRegistry and uses this low-level
@@ -105,9 +115,9 @@ impl StateRegistry {
         if is_geographic_event_type(&event.event_type)
             || crate::is_consent_event_type(&event.event_type)
         {
-            return;
+            return false;
         }
-        self.apply_reducer_event(reducer, event, observe);
+        self.apply_reducer_event(reducer, event, observe)
     }
 
     fn apply_reducer_event(
@@ -115,9 +125,9 @@ impl StateRegistry {
         reducer: &dyn Reducer,
         event: &Event,
         observe: &mut dyn FnMut(&State),
-    ) {
+    ) -> bool {
         if !reducer.projects_event(event) {
-            return;
+            return false;
         }
         let state = self.states.entry(event.entity).or_insert_with(|| {
             let initial = reducer.initial();
@@ -125,6 +135,7 @@ impl StateRegistry {
             initial
         });
         reducer.apply(state, event);
+        true
     }
 
     /// Forget cached projection state for one subject without touching Timeline history.
@@ -282,6 +293,55 @@ mod tests {
                 .get(&entity)
                 .and_then(|state| state.get("count")),
             Some(&serde_json::json!(1))
+        );
+    }
+
+    /// One Event of each kind `apply_projected` distinguishes, with whether
+    /// it reaches a reducer that projects every Event.
+    fn projection_cases(entity: EntityId) -> [(Event, bool); 3] {
+        let mut geographic = make_event(entity);
+        geographic.event_type = crate::Kind::new(crate::GEOGRAPHIC_EVENT_TYPE);
+        let mut consent = make_event(entity);
+        consent.event_type = crate::Kind::new(crate::EVENT_TYPE_CONSENT_REVOKED_V1);
+        [(make_event(entity), true), (geographic, false), (consent, false)]
+    }
+
+    #[test]
+    fn apply_projected_reports_the_core_exclusions() {
+        let entity = EntityId::new();
+        for (event, projected) in projection_cases(entity) {
+            let mut registry = StateRegistry::new();
+            assert_eq!(registry.apply_projected(&CountReducer, &event), projected);
+            assert_eq!(registry.get(&entity).is_some(), projected);
+        }
+    }
+
+    #[test]
+    fn apply_projected_reports_a_refusing_reducer() {
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        assert!(!registry.apply_projected(&RejectAllReducer, &make_event(entity)));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn apply_projected_leaves_the_state_apply_leaves() {
+        let entity = EntityId::new();
+        let mut applied = StateRegistry::new();
+        let mut projected = StateRegistry::new();
+        for (event, _) in projection_cases(entity) {
+            applied.apply(&CountReducer, &event);
+            projected.apply_projected(&CountReducer, &event);
+            applied.apply(&RejectAllReducer, &event);
+            projected.apply_projected(&RejectAllReducer, &event);
+        }
+        assert_eq!(applied, projected);
+        assert_eq!(
+            projected
+                .get(&entity)
+                .and_then(|state| state.get("count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
         );
     }
 

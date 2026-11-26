@@ -6285,6 +6285,7 @@ dependencies = [
  "num-traits",
  "pos-core",
  "pos-runtime",
+ "pos-state",
  "pos-store",
  "serde",
  "serde_json",
