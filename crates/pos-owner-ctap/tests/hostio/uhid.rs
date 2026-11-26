@@ -83,7 +83,10 @@ fn a_ceremony_runs_through_the_kernel_with_a_pin_typed_at_a_pseudo_terminal() ->
             }
             Ok::<(), String>(())
         });
-        (enroll_and_unlock(&mut port, &SystemClock, 2), user.join())
+        (
+            enroll_and_unlock(&mut port, &SystemClock, 2, Duration::from_mins(2)),
+            user.join(),
+        )
     });
     let outputs = outcome?;
     assert_eq!(outputs.len(), 2);

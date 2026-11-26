@@ -309,10 +309,11 @@ fn perform(
     clock: &dyn MonotonicClock,
     request: &RequestImage,
     kind: CeremonyKind,
+    ceremony: Duration,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut reply = ReplyImage::zeroed();
     reply.select(kind);
-    let deadline = clock.now() + Duration::from_mins(2);
+    let deadline = clock.now() + ceremony;
     let length = port.perform(request, &mut reply, deadline, clock)?;
     Ok(reply.as_bytes()[..length].to_vec())
 }
@@ -320,18 +321,20 @@ fn perform(
 /// Enroll one credential, then unlock with it `gets` times, and return each verified PRF output.
 ///
 /// Every unlock uses the enrollment's PRF input, so the outputs must be equal. The port is
-/// asked for one PIN or user-verification entry per ceremony.
+/// asked for one PIN or user-verification entry per ceremony, and each ceremony has `ceremony`
+/// to finish. The terminal poll is bounded by it, so a test that types on a pty keeps it short.
 fn enroll_and_unlock(
     port: &mut dyn OwnerAuthenticatorPort,
     clock: &dyn MonotonicClock,
     gets: usize,
+    ceremony: Duration,
 ) -> Result<Vec<[u8; 32]>, Box<dyn Error>> {
     let create = Ceremony::drawn("create");
     let options = CreateOptionsV1::new(create.id, create.challenge, create.user, create.prf);
     let request = create.image(CeremonyKind::Create, |payload| {
         text(encode_create_options(&options, payload))
     })?;
-    let payload = perform(port, clock, &request, CeremonyKind::Create)?;
+    let payload = perform(port, clock, &request, CeremonyKind::Create, ceremony)?;
     let reply = text(decode_attestation_reply(&payload))?;
     let context = CreateVerificationContext::new(create.id, create.challenge);
     let enrolled = text(verify_attestation_reply(&reply, context))?;
@@ -353,7 +356,7 @@ fn enroll_and_unlock(
         let request = get.image(CeremonyKind::Get, |payload| {
             text(encode_get_options(&options, payload))
         })?;
-        let payload = perform(port, clock, &request, CeremonyKind::Get)?;
+        let payload = perform(port, clock, &request, CeremonyKind::Get, ceremony)?;
         let reply = text(decode_assertion_reply(&payload))?;
         let stored = text(StoredCredential::new(
             enrolled.credential_id(),

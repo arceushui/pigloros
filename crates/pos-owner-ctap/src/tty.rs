@@ -77,7 +77,8 @@ impl TtyPrompt {
 
     /// Show `text` on the terminal, continuing after a partial write. A terminal that cannot take
     /// the rest, because it is gone or full, is not an error: the entry that follows fails or
-    /// times out on its own.
+    /// times out on its own. A zero-byte write is not detected: a terminal never reports one for
+    /// non-empty text.
     fn show(&self, mut text: &[u8]) {
         while !text.is_empty() {
             match write(&self.fd, text) {

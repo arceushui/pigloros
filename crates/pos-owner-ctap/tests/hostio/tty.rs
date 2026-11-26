@@ -81,7 +81,7 @@ fn ctrl_d_at_the_start_of_a_line_cancels_the_entry() -> TestResult {
 #[test]
 fn the_entry_gives_up_at_the_deadline() -> TestResult {
     // The deadline is 50 ms away and the clock moves 40 ms a read: the first wait has 10 ms
-    // left and idles, and the next read of the clock is past the deadline.
+    // left, nobody types, and the idle poll is itself the timeout.
     let run = run_prompt(
         Duration::from_millis(40),
         Duration::from_millis(50),
@@ -308,7 +308,10 @@ fn a_pin_typed_at_a_terminal_enrolls_and_unlocks_with_the_software_key() -> Test
             }
             Ok::<(), String>(())
         });
-        (enroll_and_unlock(&mut port, &clock, 2), user.join())
+        (
+            enroll_and_unlock(&mut port, &clock, 2, FIVE_SECONDS * 2),
+            user.join(),
+        )
     });
     let outputs = outcome?;
     assert_eq!(outputs.len(), 2);
