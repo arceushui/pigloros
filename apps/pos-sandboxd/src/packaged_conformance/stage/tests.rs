@@ -4,7 +4,7 @@ use std::io;
 use std::os::unix::ffi::OsStringExt as _;
 
 use super::{run_stage, StageCase};
-use crate::packaged_conformance::{describe, release, run, ConformanceError};
+use crate::packaged_conformance::{describe, release, run_mode, ConformanceError};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -110,7 +110,7 @@ fn the_stager_refuses_unusable_arguments_before_staging_anything() {
 
 #[tokio::test]
 async fn the_stage_argument_selects_the_stager() {
-    let outcome = run(
+    let outcome = run_mode(
         arguments(&["stage"]),
         io::empty(),
         &mut Vec::new(),

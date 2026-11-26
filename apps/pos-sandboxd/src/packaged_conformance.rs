@@ -1,10 +1,10 @@
 //! #444 packaged-closure conformance driver (feature `test-support`).
 //!
 //! Only the disposable QEMU TCG evidence guest runs it, through the
-//! `pos-sandboxd-conformance` binary. With `stage` as its first argument a
-//! run is the stager (`stage`): it stages the installation for the composed
-//! provider runtime, holds it until its control input closes and removes it.
-//! Otherwise one run is one case:
+//! `pos-sandboxd-conformance` binary. [`run_mode`] runs the stager (`stage`)
+//! when `stage` is the first argument: it stages the installation for the
+//! composed provider runtime, holds it until its control input closes and
+//! removes it. Otherwise one run is one case ([`run`]):
 //!
 //! 1. `ConformanceCase::stage` stages the signed test installation around
 //!    one caller-built SIM1 DDI, its signer certificate and the exact bytes
@@ -257,10 +257,6 @@ pub fn release(mount: VerifiedRootMount, directory: &PreparedAttemptDirectory) -
 /// `failed` or `none`) and the attempt directory's removal. A mounted root is
 /// held until `control` reaches end of input and then released by `release`.
 ///
-/// With `stage` as the first argument it runs the stager instead (see the
-/// `stage` module): it stages the installation for a composed provider runtime
-/// and holds it until `control` ends.
-///
 /// # Errors
 /// Returns the first [`ConformanceError`] that keeps the case from reaching
 /// activation, or from reading `control` and writing `report`.
@@ -279,14 +275,40 @@ where
         ) -> Release<'directory>
         + Send,
 {
-    if arguments.first().is_some_and(|mode| mode == STAGE_MODE) {
-        return stage::run_stage(&arguments[1..], control, report);
-    }
     let case = ConformanceCase::from_arguments(&arguments)?;
     let staged = case.stage()?;
     let ActivatedCase { directory, outcome } = activate(&staged).await?;
     exercise(outcome, describe, release, &directory, control, report).await?;
     report_line(report, &removal_line(&directory.remove_unmounted()))
+}
+
+/// Run the stager when `arguments` start with `stage`, and one case (see
+/// [`run`]) otherwise.
+///
+/// The stager (the `stage` module) stages the installation for a composed
+/// provider runtime and holds it until `control` ends.
+///
+/// # Errors
+/// As [`run`], or the stager's.
+pub async fn run_mode<Describe, Detach>(
+    arguments: Vec<OsString>,
+    control: impl Read + Send,
+    report: &mut (impl Write + Send),
+    describe: Describe,
+    release: Detach,
+) -> Result<(), ConformanceError>
+where
+    Describe: FnOnce(&VerifiedRootMount) -> String + Send,
+    Detach: for<'directory> FnOnce(
+            VerifiedRootMount,
+            &'directory PreparedAttemptDirectory,
+        ) -> Release<'directory>
+        + Send,
+{
+    if arguments.first().is_some_and(|mode| mode == STAGE_MODE) {
+        return stage::run_stage(&arguments[1..], control, report);
+    }
+    run(arguments, control, report, describe, release).await
 }
 
 /// Report one activation outcome, hold a mounted root until `control`

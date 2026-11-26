@@ -23,7 +23,9 @@ use std::{
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_sandboxd::packaged_conformance::{activate, describe, release, run, ConformanceError};
+use pos_sandboxd::packaged_conformance::{
+    activate, describe, release, run, run_mode, ConformanceError,
+};
 use pos_sandboxd::ImageActivationError;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -267,7 +269,7 @@ async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResul
     };
     let mut report = Vec::new();
     let arguments = stager_arguments(scratch.path())?;
-    run(arguments, control, &mut report, describe, release).await?;
+    run_mode(arguments, control, &mut report, describe, release).await?;
 
     // The control input saw the one installed provider executable, which is
     // the one the report names, and the installation is gone after the run.
@@ -295,7 +297,7 @@ async fn a_failing_report_or_control_input_still_removes_the_installation() -> T
     }
     let scratch = tempfile::tempdir()?;
     let arguments = stager_arguments(scratch.path())?;
-    let unreported = run(
+    let unreported = run_mode(
         arguments.clone(),
         io::empty(),
         &mut Broken,
@@ -305,7 +307,7 @@ async fn a_failing_report_or_control_input_still_removes_the_installation() -> T
     .await;
     assert!(matches!(unreported, Err(ConformanceError::Io(_))));
     assert!(!Path::new("/var/lib/pigloros").exists());
-    let uncontrolled = run(arguments, BrokenControl, &mut Vec::new(), describe, release).await;
+    let uncontrolled = run_mode(arguments, BrokenControl, &mut Vec::new(), describe, release).await;
     assert!(matches!(uncontrolled, Err(ConformanceError::Io(_))));
     assert!(!Path::new("/var/lib/pigloros").exists());
     Ok(())
