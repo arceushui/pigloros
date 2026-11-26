@@ -59,6 +59,10 @@ const FILE: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
     device: 7,
     inode: 9,
 };
+const FOREIGN: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
+    device: 7,
+    inode: 10,
+};
 const WRAP: BridgeError = BridgeError::Owner(OwnerError::new(OwnerErrorKind::Wrap));
 const REGISTRY: BridgeError = BridgeError::Owner(OwnerError::new(OwnerErrorKind::Registry));
 const DURABLE_WRITE: OwnerError = OwnerError::new(OwnerErrorKind::DurableWrite);
@@ -306,11 +310,15 @@ enum Fail {
 }
 
 /// A volatile store that runs `on_staging` as step 3 begins and can fail
-/// step 3 or step 6 with `DurableWrite`.
+/// step 3 or step 6 with `DurableWrite`. Once a record is staged, its P1
+/// ceiling read can be replaced by `cleanup_ceiling`, which only the P5
+/// deletion of a failed attempt reads.
 struct FaultyStore<'a> {
     inner: VolatileEnrollmentStore,
     on_staging: Box<dyn FnMut() + 'a>,
     fail: Fail,
+    cleanup_ceiling: Option<Result<u64, OwnerError>>,
+    ceiling_reads: usize,
 }
 
 impl<'a> FaultyStore<'a> {
@@ -319,6 +327,8 @@ impl<'a> FaultyStore<'a> {
             inner: VolatileEnrollmentStore::new(FILE),
             on_staging: Box::new(on_staging),
             fail,
+            cleanup_ceiling: None,
+            ceiling_reads: 0,
         }
     }
 }
@@ -329,7 +339,11 @@ impl EnrollmentStore for FaultyStore<'_> {
         owner_id: &str,
         subject_id: EntityId,
     ) -> Result<u64, OwnerError> {
-        self.inner.registry_epoch_ceiling(owner_id, subject_id)
+        self.ceiling_reads += 1;
+        match self.cleanup_ceiling {
+            Some(answer) if staged(&self.inner).len() == 1 => answer,
+            _ => self.inner.registry_epoch_ceiling(owner_id, subject_id),
+        }
     }
 
     fn commit_staging_record(
@@ -349,6 +363,10 @@ impl EnrollmentStore for FaultyStore<'_> {
             return Err(DURABLE_WRITE);
         }
         self.inner.register(registration)
+    }
+
+    fn delete_staging_record(&mut self, owner_id: &str, epoch: u64) -> Result<(), OwnerError> {
+        self.inner.delete_staging_record(owner_id, epoch)
     }
 }
 
@@ -838,13 +856,13 @@ fn a_failed_staging_record_stages_nothing() -> TestResult {
 }
 
 #[test]
-fn a_failed_wrap_or_binding_write_stops_before_the_ledger_row() -> TestResult {
-    for (blocked, staged_names) in [
-        (wrap_name(SUBJECT, 1), vec![wrap_name(SUBJECT, 1)]),
-        (
-            binding_name(SUBJECT, 1),
-            vec![binding_name(SUBJECT, 1), wrap_name(SUBJECT, 1)],
-        ),
+fn a_failed_wrap_or_binding_write_deletes_the_attempt_at_once() -> TestResult {
+    // The blocking entry sits at the canonical name, so the rename refuses
+    // it; P5 then deletes every reserved name of the attempt by name.
+    for blocked in [
+        wrap_name(SUBJECT, 1),
+        binding_name(SUBJECT, 1),
+        format!("{}.tmp", binding_name(SUBJECT, 1)),
     ] {
         let fixture = Fixture::new()?;
         let keys = fixture.keys();
@@ -855,32 +873,42 @@ fn a_failed_wrap_or_binding_write_stops_before_the_ledger_row() -> TestResult {
             enroll_subject(&fixture, SUBJECT, &mut store)?,
             Err(BridgeError::Owner(DURABLE_WRITE))
         );
-        assert_eq!(fixture.names()?, staged_names);
+        assert!(fixture.names()?.is_empty(), "{blocked}");
         assert!(fixture.ledger_rows()?.is_empty());
-        // The staging record stays for ADR-137 P5 recovery (immediate
-        // deletion is planned in #1487).
-        assert_eq!(staged(&store.inner), [(owner(SUBJECT), 1)]);
+        assert!(staged(&store.inner).is_empty());
+        assert!(store.inner.registrations().is_empty());
+        // Step 2 at open and commit, then P5's own P1 read.
+        assert_eq!(store.ceiling_reads, 3);
     }
     Ok(())
 }
 
 #[test]
-fn a_failed_ledger_row_leaves_the_ledger_and_the_staged_files() -> TestResult {
+fn a_failed_ledger_row_deletes_the_staged_files_and_the_record() -> TestResult {
     let fixture = Fixture::new()?;
+    // Rows of this owner at another epoch and of another owner at this
+    // epoch, both of another store, are not this attempt's row.
+    let mut unrelated = [row(SUBJECT, 7), row(OTHER, 1)];
+    for row in &mut unrelated {
+        row.store_file_id = FOREIGN;
+    }
     let blocker = fixture.state().join("subject-nonce-ledger.v1.tmp");
     let mut store = FaultyStore::new(Fail::Nothing, || {
+        assert!(fixture.write_ledger(&unrelated).is_ok());
         assert!(write_private(&blocker, b"busy").is_ok());
     });
     assert_eq!(
         enroll_subject(&fixture, SUBJECT, &mut store)?,
         Err(BridgeError::Owner(DURABLE_WRITE))
     );
-    assert_eq!(
-        fixture.names()?,
-        [binding_name(SUBJECT, 1), wrap_name(SUBJECT, 1)]
-    );
-    assert!(fixture.ledger_rows()?.is_empty());
+    assert!(fixture.names()?.is_empty());
+    assert_eq!(fixture.ledger_rows()?, unrelated);
+    assert!(staged(&store.inner).is_empty());
+    Ok(())
+}
 
+#[test]
+fn an_unreadable_ledger_keeps_the_whole_attempt_for_p5_recovery() -> TestResult {
     let fixture = Fixture::new()?;
     let ledger = fixture.ledger();
     let mut store = FaultyStore::new(Fail::Nothing, || {
@@ -891,9 +919,129 @@ fn a_failed_ledger_row_leaves_the_ledger_and_the_staged_files() -> TestResult {
         Err(BridgeError::Owner(DURABLE_WRITE))
     );
     assert_eq!(fs::read(fixture.ledger())?, b"not SNL1");
+    assert_eq!(
+        fixture.names()?,
+        [binding_name(SUBJECT, 1), wrap_name(SUBJECT, 1)]
+    );
+    assert_eq!(staged(&store.inner), [(owner(SUBJECT), 1)]);
     Ok(())
 }
 
+/// The staged row of `SUBJECT` at epoch 1 with `store_file_id`, as a
+/// competing writer would leave it at P3 step 3.
+fn competing_row(store_file_id: SubjectStoreFileIdV1) -> SubjectNonceLedgerRowV1 {
+    SubjectNonceLedgerRowV1 {
+        store_file_id,
+        ..row(SUBJECT, 1)
+    }
+}
+
+#[test]
+fn this_stores_row_for_the_attempt_is_removed_with_its_files() -> TestResult {
+    let fixture = Fixture::new()?;
+    let rows = [row(SUBJECT, 0x0f), row(OTHER, 1)];
+    let mut store = FaultyStore::new(Fail::Nothing, || {
+        // The row already exists, so adding it at step 5 refuses.
+        let staged = [competing_row(FILE), rows[0].clone(), rows[1].clone()];
+        assert!(fixture.write_ledger(&staged).is_ok());
+    });
+    assert_eq!(
+        enroll_subject(&fixture, SUBJECT, &mut store)?,
+        Err(BridgeError::Owner(DURABLE_WRITE))
+    );
+    assert!(fixture.names()?.is_empty());
+    assert_eq!(fixture.ledger_rows()?, rows);
+    assert!(staged(&store.inner).is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_row_of_another_store_keeps_the_files_and_the_row() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut store = FaultyStore::new(Fail::Nothing, || {
+        assert!(fixture.write_ledger(&[competing_row(FOREIGN)]).is_ok());
+    });
+    assert_eq!(
+        enroll_subject(&fixture, SUBJECT, &mut store)?,
+        Err(BridgeError::Owner(DURABLE_WRITE))
+    );
+    // The files may serve the other store; only this store's record goes.
+    assert_eq!(
+        fixture.names()?,
+        [binding_name(SUBJECT, 1), wrap_name(SUBJECT, 1)]
+    );
+    assert_eq!(fixture.ledger_rows()?, [competing_row(FOREIGN)]);
+    assert!(staged(&store.inner).is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_failed_row_removal_keeps_the_record() -> TestResult {
+    let fixture = Fixture::new()?;
+    let blocker = fixture.state().join("subject-nonce-ledger.v1.tmp");
+    let mut store = FaultyStore::new(Fail::Nothing, || {
+        assert!(fixture.write_ledger(&[competing_row(FILE)]).is_ok());
+        assert!(write_private(&blocker, b"busy").is_ok());
+    });
+    assert_eq!(
+        enroll_subject(&fixture, SUBJECT, &mut store)?,
+        Err(BridgeError::Owner(DURABLE_WRITE))
+    );
+    assert!(fixture.names()?.is_empty());
+    assert_eq!(fixture.ledger_rows()?, [competing_row(FILE)]);
+    assert_eq!(staged(&store.inner), [(owner(SUBJECT), 1)]);
+    Ok(())
+}
+
+#[test]
+fn a_refused_file_deletion_keeps_the_row_and_the_record() -> TestResult {
+    let fixture = Fixture::new()?;
+    let keys = fixture.keys();
+    let mut store = FaultyStore::new(Fail::Nothing, || {
+        // A directory at the binding's staging name blocks both its staging
+        // and its deletion; the wrap's names are deleted first.
+        assert!(fs::create_dir(keys.join(format!("{}.tmp", binding_name(SUBJECT, 1)))).is_ok());
+        assert!(fixture.write_ledger(&[competing_row(FILE)]).is_ok());
+    });
+    assert_eq!(
+        enroll_subject(&fixture, SUBJECT, &mut store)?,
+        Err(BridgeError::Owner(DURABLE_WRITE))
+    );
+    assert_eq!(
+        fixture.names()?,
+        [format!("{}.tmp", binding_name(SUBJECT, 1))]
+    );
+    assert_eq!(fixture.ledger_rows()?, [competing_row(FILE)]);
+    assert_eq!(staged(&store.inner), [(owner(SUBJECT), 1)]);
+    Ok(())
+}
+
+#[test]
+fn nothing_is_deleted_while_p1_is_unreadable_or_may_hold_the_identity() -> TestResult {
+    // A ceiling at the attempt's epoch may mean a registered identity.
+    for answer in [Err(OwnerError::new(OwnerErrorKind::Registry)), Ok(1), Ok(2)] {
+        let fixture = Fixture::new()?;
+        let blocker = fixture.state().join("subject-nonce-ledger.v1.tmp");
+        let mut store = FaultyStore::new(Fail::Nothing, || {
+            assert!(write_private(&blocker, b"busy").is_ok());
+        });
+        store.cleanup_ceiling = Some(answer);
+        assert_eq!(
+            enroll_subject(&fixture, SUBJECT, &mut store)?,
+            Err(BridgeError::Owner(DURABLE_WRITE))
+        );
+        assert_eq!(
+            fixture.names()?,
+            [binding_name(SUBJECT, 1), wrap_name(SUBJECT, 1)],
+            "{answer:?}"
+        );
+        assert_eq!(staged(&store.inner), [(owner(SUBJECT), 1)]);
+    }
+    Ok(())
+}
+
+/// Step 6 may fail with an unknown commit outcome, which is not definite:
+/// nothing is deleted, and P5 recovery reads the registry at restart.
 #[test]
 fn a_failed_registration_leaves_every_artifact_staged() -> TestResult {
     let fixture = Fixture::new()?;
