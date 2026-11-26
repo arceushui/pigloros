@@ -257,7 +257,7 @@ impl SetupError for AttemptNetworkError {
     /// [`SetupClass::Creation`]. A failed readback, an existing namespace
     /// and a slot held twice contradict the provider's own state.
     fn setup_class(&self) -> SetupClass {
-        match self {
+        match self.cause() {
             Self::Exhausted
             | Self::Plan(_)
             | Self::Open(_)
@@ -274,8 +274,9 @@ impl SetupError for AttemptNetworkError {
             Self::Establish(_)
             | Self::Egress(HostEgressError::Readback | HostEgressError::Forwarding)
             | Self::InUse
-            | Self::Exists => SetupClass::Contradiction,
-            Self::Unremoved { cause, .. } => cause.setup_class(),
+            | Self::Exists
+            // Peeled by `cause`, so never matched.
+            | Self::Unremoved { .. } => SetupClass::Contradiction,
         }
     }
 
@@ -287,6 +288,16 @@ impl SetupError for AttemptNetworkError {
                 ..
             }) => Some(NetworkRemovalFailure::new(removal.to_string())),
             _ => None,
+        }
+    }
+}
+
+impl AttemptNetworkError {
+    /// The failure itself, without the removal failure that followed it.
+    fn cause(&self) -> &Self {
+        match self {
+            Self::Unremoved { cause, .. } => cause.cause(),
+            other => other,
         }
     }
 }
