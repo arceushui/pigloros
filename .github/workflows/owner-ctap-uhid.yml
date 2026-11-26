@@ -1,0 +1,55 @@
+# ADR-110 E20 U-tier (Redmine #1476): the Linux hidraw transport, terminal prompt and
+# native CTAP2 client against a kernel uhid virtual FIDO device backed by the software
+# authenticator, with a PIN typed at a pseudo-terminal. Only the device helper and the
+# hidraw hand-over run under sudo (UG1, Redmine #1474); the tests run as the runner user.
+# The lane exports its coverage, which cargo-crap merges with the Linux coverage.
+name: owner-ctap-uhid
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  owner-ctap-uhid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTC_BOOTSTRAP: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - name: Install coverage producer
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Test the U-tier coverage merge
+        run: python3 scripts/test_merge_owner_uhid_lcov.py
+      # The hosted kernel provides the uhid module (UG1, Redmine #1474 showed it loads);
+      # a runner image or kernel without it fails here, loudly, and the lane fails with it.
+      - name: Load uhid
+        run: |
+          sudo modprobe uhid
+          ls -l /dev/uhid
+      # The script itself fails unless all five scenario tests left their evidence, so a
+      # lane whose tests were skipped cannot pass. The helper waits inside it are 30 s each.
+      - name: Run the U-tier scenarios and export their coverage
+        timeout-minutes: 15
+        run: scripts/owner_uhid_tier.sh "${RUNNER_TEMP}/owner-uhid-lcov"
+      - name: Retain the U-tier LCOV, receipt and evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: owner-uhid-lcov-${{ github.sha }}
+          path: ${{ runner.temp }}/owner-uhid-lcov/
+          if-no-files-found: error
+          retention-days: 1

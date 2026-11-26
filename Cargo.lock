@@ -6037,6 +6037,7 @@ dependencies = [
  "p256",
  "pos-owner-bridge",
  "pos-owner-bridge-codec",
+ "rustix 1.1.6",
  "sha2 0.11.1",
  "unicode-normalization",
  "zeroize",
