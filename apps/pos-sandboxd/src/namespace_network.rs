@@ -20,6 +20,9 @@ mod attempt_network;
 mod control;
 mod firewall;
 mod host_egress;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod netfilter_fake;
 pub mod netlink;
 mod pinned;
 mod plan;
@@ -33,7 +36,7 @@ pub use attempt_network::{
 };
 pub use control::{NetlinkNamespaceControl, OrphanSweepError};
 pub use host_egress::{
-    AttemptEgress, EgressControl, ForwardingRecords, HostEgress, HostEgressError,
+    AttemptEgress, EgressControl, EgressSlice, ForwardingRecords, HostEgress, HostEgressError,
     FORWARDING_RECORDS, HOST_TABLE,
 };
 pub use pinned::NetworkNamespaces;
@@ -332,6 +335,11 @@ pub struct ObservedNamespace {
     /// Both identifiers must be assigned: a negative identifier, such as
     /// `NETNSA_NSID_NOT_ASSIGNED` (-1), never verifies.
     pub host_netnsid: i32,
+    /// The namespace's `NFTA_GEN_ID`, which `NFT_MSG_GETGEN` reported before
+    /// and after the table, chain and rule dumps and found unchanged
+    /// (ADR-069 R14 §3.2 step 4). It is a record, not part of the expected
+    /// state: [`ExpectedNamespace::verify`] ignores it.
+    pub firewall_generation: u32,
 }
 
 /// The first part of a read-back that differs from its expectation.
@@ -533,7 +541,13 @@ pub trait NamespaceControl {
     fn install(&self, expected: &ExpectedNamespace) -> Result<(), Self::Error>;
 
     /// Read back the complete state of namespace `name` and of the host veth
-    /// end `host_link`.
+    /// end `host_link`, with the ruleset generation its firewall read settled
+    /// at.
+    ///
+    /// The namespace is opened by name, not through a descriptor the caller
+    /// holds: a caller that holds one (the attempt's connector) must check
+    /// afterwards that the name still binds it, which leaves only an
+    /// A-B-A re-pin undetected (ADR-069 R14 §3.2 step 6).
     ///
     /// # Errors
     /// Fails if any part cannot be read, or holds state these types cannot
