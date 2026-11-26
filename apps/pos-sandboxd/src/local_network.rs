@@ -13,20 +13,24 @@
 //! The namespace, veth and nftables state behind a real Local network come
 //! from `NamespacedLocalNetwork` (#911), which reaches exactly the admitted
 //! endpoints; the provider runtime serves every Local attempt through it.
-//! [`FailClosedLocalNetwork`] establishes no namespace and refuses every
-//! outbound connection: the port of the tests of the execute composition that
-//! need no network.
+//! `FailClosedLocalNetwork` (test builds only) establishes no namespace and
+//! refuses every outbound connection: the port of the tests of the execute
+//! composition that need no network.
 
 use std::error::Error;
 use std::future::{poll_fn, Future};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+#[cfg(test)]
+use std::net::TcpStream;
+use std::net::{Shutdown, SocketAddr};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use pos_reference::sandbox_provider_protocol::{
     serve_proxy, AdmissionGrant, LocalNetworkAdmission, LocalNetworkReadback, LocalNetworkSession,
@@ -154,10 +158,12 @@ pub trait RemoveNetwork {
 /// The error of [`FailClosedLocalNetwork`], which never fails; it names a
 /// class and no removal, so the port needs no blanket answer for a foreign
 /// error type.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("the fail-closed Local network cannot fail")]
 pub struct FailClosedSetup;
 
+#[cfg(test)]
 impl SetupError for FailClosedSetup {
     fn setup_class(&self) -> SetupClass {
         SetupClass::Creation
@@ -251,13 +257,15 @@ pub trait LocalNetworkPort {
 }
 
 /// A Local network port that owns no namespace, for tests of the execute
-/// composition that need none.
+/// composition that need none. It exists in test builds only.
 ///
 /// Its connector refuses every connection and reads back as other state, so a
 /// Local attempt can never reach the host network, or be released, through it.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FailClosedLocalNetwork;
 
+#[cfg(test)]
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
     type Error = FailClosedSetup;
@@ -272,9 +280,11 @@ impl LocalNetworkPort for FailClosedLocalNetwork {
 }
 
 /// A connector that fails every connection.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct RefusingConnector;
 
+#[cfg(test)]
 impl NetworkReadback for RefusingConnector {
     /// It has no namespace to read back, so a Local attempt over it reads
     /// back as other state: its KOE1 has status 2 and it is never released
@@ -284,12 +294,14 @@ impl NetworkReadback for RefusingConnector {
     }
 }
 
+#[cfg(test)]
 impl RemoveNetwork for RefusingConnector {
     fn remove(&mut self) -> Result<(), NetworkRemovalFailure> {
         Ok(())
     }
 }
 
+#[cfg(test)]
 impl NetworkEndpointConnector for RefusingConnector {
     fn connect(&mut self, _endpoint: SocketAddr, _timeout: Duration) -> io::Result<TcpStream> {
         Err(io::ErrorKind::PermissionDenied.into())

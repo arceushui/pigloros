@@ -3057,6 +3057,14 @@ mod tests {
             issued.execution_mode(),
             snapshot.launch_policy().execution_mode
         );
+        // Only a Local grant carries an admission (ADR-069 R14 §3.5); the
+        // staged installation is Air-Gapped, so a grant that carried one
+        // here would be wired wrongly.
+        assert_eq!(
+            issued.local_network().is_some(),
+            issued.execution_mode()
+                == crate::sandbox_provider_protocol::SandboxExecutionMode::Local
+        );
         let provider = snapshot.admitted.provider();
         assert_eq!(
             issued.provider_binary_digest(),

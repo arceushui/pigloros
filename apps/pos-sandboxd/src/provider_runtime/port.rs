@@ -86,8 +86,13 @@ pub(super) fn mode_plan(grant: &IssuedGrant) -> ModePlan {
 }
 
 /// `Local`'s admission, which its issued grant carries; `Fork`'s own plan;
-/// and `AirGapped`'s for every other case, whose execution then refuses the
-/// mismatch.
+/// and `AirGapped`'s for every other case.
+///
+/// A Local grant without an admission cannot be issued: `signed_grant` binds
+/// one for every Local launch policy. Were one ever missing, the `AirGapped`
+/// plan here is not the admitted mode, so `prepare` refuses it before any
+/// network exists or unit starts (`ExecuteError::ModeMismatch`; the execute
+/// test `nothing_starts_when_the_plan_is_not_the_admitted_mode`).
 fn network_plan(mode: SandboxExecutionMode, grant: &IssuedGrant) -> ModePlan {
     match (mode, grant.local_network()) {
         (SandboxExecutionMode::Local, Some(admission)) => ModePlan::Local {
@@ -347,8 +352,10 @@ mod tests {
             mode_plan(&issued(SandboxExecutionMode::Local, Some(admission.clone()))),
             ModePlan::Local { admission: bound } if *bound == admission
         ));
-        // A Local grant without one is refused by its execution as a mode
-        // mismatch, like any other plan that does not fit its mode.
+        // A Local grant without one gets a plan that is not its mode, which
+        // `prepare` refuses as `ModeMismatch` before anything starts (the
+        // execute test `nothing_starts_when_the_plan_is_not_the_admitted_mode`
+        // runs that refusal with a Local attempt and this plan).
         assert!(matches!(
             mode_plan(&issued(SandboxExecutionMode::Local, None)),
             ModePlan::AirGapped
