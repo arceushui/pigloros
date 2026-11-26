@@ -6,11 +6,13 @@
 //! Every attempt also gets host egress (`host_egress`) to exactly its
 //! endpoints once its namespace is read back, and loses it first on teardown.
 //!
-//! Teardown is RAII. Dropping the connector removes the namespace and frees
-//! the slot. A removal that fails quarantines the slot and closes the port:
-//! every later establishment fails, naming the slot, until restart
-//! reconciliation removes the remaining state (ADR-069 §1: an
-//! ineffective property closes admission).
+//! Teardown is the connector's removal (ADR-069 R14 N7). Removing the
+//! connector removes the namespace once, frees the slot and reports the
+//! result. Dropping a connector that was not removed does the same, but only
+//! the slot's quarantine records a failure then. A removal that fails
+//! quarantines the slot and closes the port: every later establishment fails,
+//! naming the slot, until restart reconciliation removes the remaining state
+//! (ADR-069 §1: an ineffective property closes admission).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -30,7 +32,10 @@ use super::{
     establish_namespace, EstablishError, EstablishFailure, ExpectedNamespace, NamespaceControl,
     NetworkPlanError, NetworkRange,
 };
-use crate::{EstablishedNetwork, LocalNetworkPort, SetupClass, SetupError};
+use crate::{
+    EstablishedNetwork, LocalNetworkPort, NetworkRemovalFailure, RemoveNetwork, SetupClass,
+    SetupError,
+};
 
 /// Which attempt holds each slot, and the first slot whose namespace could
 /// not be removed.
@@ -130,6 +135,16 @@ pub enum AttemptNetworkError {
     /// The attempt holds a slot already.
     #[error("the attempt holds an attempt network already")]
     InUse,
+    /// A setup failed after it began installing, and the network it had
+    /// installed could not be removed (R14 N7).
+    #[error("the attempt network setup failed and its cleanup failed: {removal}")]
+    Unremoved {
+        /// Why the setup failed.
+        #[source]
+        cause: Box<Self>,
+        /// Why the removal failed.
+        removal: NetworkRemovalFailure,
+    },
     /// A namespace of the attempt's name exists, so this establishment
     /// installed nothing and removes nothing.
     #[error("an attempt namespace of this name exists")]
@@ -188,9 +203,32 @@ struct Teardown<C: NamespaceControl, E: EgressControl> {
     egress: Arc<E>,
     attempt: AttemptEgress,
     slot: SlotLease,
+    /// Whether the one removal was tried.
+    removed: bool,
 }
 
 impl<C: NamespaceControl, E: EgressControl> Teardown<C, E> {
+    /// Try the removal once, and quarantine the slot if it fails. A repeat
+    /// returns `Ok`: the failure was reported by the first call.
+    fn remove_once(&mut self) -> Result<(), String> {
+        if std::mem::replace(&mut self.removed, true) {
+            return Ok(());
+        }
+        // Removal waits on the kernel, a few netlink replies each bounded by
+        // the receive timeout. On a Tokio worker it gives the worker's other
+        // tasks to another thread first.
+        let removed = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if runtime.runtime_flavor() == RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| self.remove())
+            }
+            _ => self.remove(),
+        };
+        if let Err(reason) = &removed {
+            self.slot.quarantine(reason.clone());
+        }
+        removed
+    }
+
     /// Remove the egress, then the namespace, attempting both, and report
     /// the first failure.
     fn remove(&self) -> Result<(), String> {
@@ -208,18 +246,9 @@ impl<C: NamespaceControl, E: EgressControl> Teardown<C, E> {
 
 impl<C: NamespaceControl, E: EgressControl> Drop for Teardown<C, E> {
     fn drop(&mut self) {
-        // Removal waits on the kernel, a few netlink replies each bounded by
-        // the receive timeout. On a Tokio worker it gives the worker's other
-        // tasks to another thread first.
-        let removed = match tokio::runtime::Handle::try_current() {
-            Ok(runtime) if runtime.runtime_flavor() == RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(|| self.remove())
-            }
-            _ => self.remove(),
-        };
-        if let Err(reason) = removed {
-            self.slot.quarantine(reason);
-        }
+        // A connector dropped without a removal (a cancelled execution) has
+        // nobody to report to; the quarantine a failure sets is the record.
+        drop(self.remove_once());
     }
 }
 
@@ -228,7 +257,7 @@ impl SetupError for AttemptNetworkError {
     /// [`SetupClass::Creation`]. A failed readback, an existing namespace
     /// and a slot held twice contradict the provider's own state.
     fn setup_class(&self) -> SetupClass {
-        match self {
+        match self.cause() {
             Self::Exhausted
             | Self::Plan(_)
             | Self::Open(_)
@@ -245,8 +274,42 @@ impl SetupError for AttemptNetworkError {
             Self::Establish(_)
             | Self::Egress(HostEgressError::Readback | HostEgressError::Forwarding)
             | Self::InUse
-            | Self::Exists => SetupClass::Contradiction,
+            | Self::Exists
+            // Peeled by `cause`, so never matched.
+            | Self::Unremoved { .. } => SetupClass::Contradiction,
         }
+    }
+
+    fn removal(&self) -> Option<NetworkRemovalFailure> {
+        match self {
+            Self::Unremoved { removal, .. } => Some(removal.clone()),
+            Self::Establish(EstablishError {
+                removal: Some(removal),
+                ..
+            }) => Some(NetworkRemovalFailure::new(removal.to_string())),
+            _ => None,
+        }
+    }
+}
+
+impl AttemptNetworkError {
+    /// The failure itself, without the removal failure that followed it.
+    fn cause(&self) -> &Self {
+        match self {
+            Self::Unremoved { cause, .. } => cause.cause(),
+            other => other,
+        }
+    }
+}
+
+/// `cause`, joined with the failure of the removal that followed it.
+fn after_removal(cause: AttemptNetworkError, removal: Result<(), String>) -> AttemptNetworkError {
+    match removal {
+        Ok(()) => cause,
+        Err(reason) => AttemptNetworkError::Unremoved {
+            cause: Box::new(cause),
+            removal: NetworkRemovalFailure::new(reason),
+        },
     }
 }
 
@@ -258,12 +321,13 @@ impl SetupError for AttemptNetworkError {
 /// scoped, so it is joined before `connect` returns; the sockets it created
 /// belong to the caller, which drops them before the connector; and the
 /// fields drop in declaration order, so `namespace` is closed before
-/// `_teardown` removes the egress and the namespace.
+/// `teardown` removes the egress and the namespace.
 #[derive(Debug)]
 pub struct NamespaceConnector<C: NamespaceControl, E: EgressControl = HostEgress> {
-    // Declared first: closed before the teardown below runs.
-    namespace: OwnedFd,
-    _teardown: Teardown<C, E>,
+    // Declared first: closed before the teardown below runs. `None` once the
+    // network was removed.
+    namespace: Option<OwnedFd>,
+    teardown: Teardown<C, E>,
 }
 
 impl<C: NamespaceControl, E: EgressControl> NetworkEndpointConnector for NamespaceConnector<C, E> {
@@ -273,11 +337,24 @@ impl<C: NamespaceControl, E: EgressControl> NetworkEndpointConnector for Namespa
         let endpoint = SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port());
         // The socket keeps the namespace it was created in after the thread
         // that created it ends.
-        in_namespace(self.namespace.as_fd(), || {
+        let Some(namespace) = &self.namespace else {
+            return Err(io::ErrorKind::NotConnected.into());
+        };
+        in_namespace(namespace.as_fd(), || {
             TcpStream::connect_timeout(&endpoint, timeout)
         })
         .map_err(io::Error::other)
         .and_then(std::convert::identity)
+    }
+}
+
+impl<C: NamespaceControl, E: EgressControl> RemoveNetwork for NamespaceConnector<C, E> {
+    fn remove(&mut self) -> Result<(), NetworkRemovalFailure> {
+        // The namespace is closed before its removal (R15 §3.6 item 4).
+        drop(self.namespace.take());
+        self.teardown
+            .remove_once()
+            .map_err(NetworkRemovalFailure::new)
     }
 }
 
@@ -353,19 +430,36 @@ where
                 endpoints: endpoints.to_vec(),
             },
             slot,
+            removed: false,
         };
-        // Dropping the teardown on a failure removes whatever was installed.
-        self.egress
-            .install(&teardown.attempt)
-            .map_err(AttemptNetworkError::Egress)?;
-        self.namespaces
+        self.install_and_open(teardown)
+    }
+
+    /// Give the established namespace of `teardown` its host egress and open
+    /// it for the connector. A failure removes whatever was installed, and
+    /// says if it could not.
+    fn install_and_open(
+        &self,
+        mut teardown: Teardown<C, E>,
+    ) -> Result<NamespaceConnector<C, E>, AttemptNetworkError> {
+        if let Err(error) = self.egress.install(&teardown.attempt) {
+            let cause = AttemptNetworkError::Egress(error);
+            return Err(after_removal(cause, teardown.remove_once()));
+        }
+        let opened = self
+            .namespaces
             .open(&teardown.attempt.namespace)
-            .and_then(|namespace| namespace.ok_or(NetlinkError::Io(rustix::io::Errno::NOENT)))
-            .map(|namespace| NamespaceConnector {
-                namespace,
-                _teardown: teardown,
-            })
-            .map_err(AttemptNetworkError::Open)
+            .and_then(|namespace| namespace.ok_or(NetlinkError::Io(rustix::io::Errno::NOENT)));
+        match opened {
+            Ok(namespace) => Ok(NamespaceConnector {
+                namespace: Some(namespace),
+                teardown,
+            }),
+            Err(error) => {
+                let cause = AttemptNetworkError::Open(error);
+                Err(after_removal(cause, teardown.remove_once()))
+            }
+        }
     }
 }
 

@@ -176,9 +176,13 @@ plans an endpoint the launch policy does not allow, is refused before anything
 is submitted. A proxy protocol failure kills the unit at once and the evidence
 is kept; after a watchdog expiry the unit is killed while the proxy thread is
 still being joined. The Local
-network port owns its namespace by RAII: the execute path drops it on every
-path that does not serve it. The unit host, the barrier and the Local network
-are ports, so the composition is exercised without systemd.
+network port owns its namespace, and the execute path removes it on every
+path, serving or not, and at the normal end, reporting a removal that failed
+as `network_removal` of the result (ADR-069 R14 N7). A failed removal leaves
+the attempt's `cleanup.result` at 1 and quarantines the lifecycle. A
+cancelled execution future drops its network without a report; the port's
+slot quarantine is the record then. The unit host, the barrier and the Local
+network are ports, so the composition is exercised without systemd.
 
 - Local: the FD 3 socket pair is created with the attempt, and
   `piglor-host-service-v1` precedes `piglor-release-v1`. `CheckedLocal` is the

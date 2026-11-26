@@ -351,6 +351,8 @@ fn an_install_that_cannot_be_undone_quarantines_its_slot() -> TestResult {
         matches!(&failed, Err(AttemptNetworkError::Establish(error)) if error.removal.is_some()),
         "{failed:?}"
     );
+    // The removal that failed is the cleanup's to report (R14 N7).
+    assert!(failed.is_err_and(|error| error.removal().is_some()));
     assert!(matches!(
         network.establish([2; 16], &[ENDPOINT]),
         Err(AttemptNetworkError::Quarantined { slot: 0, .. })
@@ -834,8 +836,8 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
         holders: Mutex::new(Holders::default()),
     });
     let mut connector = NamespaceConnector {
-        namespace: std::fs::File::open("/proc/self/ns/net").map(OwnedFd::from)?,
-        _teardown: Teardown {
+        namespace: Some(std::fs::File::open("/proc/self/ns/net").map(OwnedFd::from)?),
+        teardown: Teardown {
             control: Arc::clone(&control),
             egress: Arc::new(FakeEgress::default()),
             attempt: AttemptEgress {
@@ -844,6 +846,7 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
                 endpoints: vec![ENDPOINT],
             },
             slot: slots.take([1; 16])?,
+            removed: false,
         },
     };
     // Entering a namespace needs `CAP_SYS_ADMIN`, which the workspace tests
@@ -856,6 +859,121 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
     );
     assert_eq!(entries(&control.journal).removed, ["piglor-h0"]);
     assert!(slots.take([1; 16]).is_ok());
+    Ok(())
+}
+
+/// R14 N7: a setup that failed after it began installing says when the
+/// network it had installed could not be removed, and keeps its own class.
+#[test]
+fn a_setup_failure_names_the_removal_that_failed_after_it() -> TestResult {
+    use crate::SetupError as _;
+    let directory = tempfile::tempdir()?;
+    let stuck = FakeEgress {
+        refuse_install: true,
+        refuse_removal: true,
+        ..FakeEgress::default()
+    };
+    let (network, _) = network_with(directory.path(), pinning(directory.path()), &stuck, 24)?;
+    let failed = network.establish([1; 16], &[ENDPOINT]).map(drop);
+    let Err(error) = failed else {
+        return Err("the install was refused".into());
+    };
+    assert!(
+        matches!(
+            &error,
+            AttemptNetworkError::Unremoved { cause, .. }
+                if matches!(**cause, AttemptNetworkError::Egress(HostEgressError::Readback))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(error.setup_class(), SetupClass::Contradiction);
+    assert!(error.removal().is_some());
+    assert!(error.source().is_some());
+    assert_eq!(
+        error.to_string(),
+        "the attempt network setup failed and its cleanup failed: the Local network \
+         could not be removed: the host egress table read back differently"
+    );
+    // A failed setup whose removal worked, or an error that never installed,
+    // owes nothing.
+    assert!(AttemptNetworkError::Exists.removal().is_none());
+    Ok(())
+}
+
+/// An established network that cannot be opened is removed, and a failed
+/// removal is named.
+#[test]
+fn a_namespace_that_cannot_be_opened_is_removed_and_a_failed_removal_named() -> TestResult {
+    use crate::SetupError as _;
+    let directory = tempfile::tempdir()?;
+    // A kernel that pins nothing leaves no namespace to open.
+    let (unpinned, journal) = network(directory.path(), FakeControl::default(), 24)?;
+    let failed = unpinned.establish([1; 16], &[ENDPOINT]).map(drop);
+    assert!(
+        matches!(&failed, Err(AttemptNetworkError::Open(_))),
+        "{failed:?}"
+    );
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    let stuck = FakeControl {
+        refuse_removal: true,
+        ..FakeControl::default()
+    };
+    let (stuck_network, _) = network(directory.path(), stuck, 24)?;
+    let Err(error) = stuck_network.establish([1; 16], &[ENDPOINT]).map(drop) else {
+        return Err("the namespace opened".into());
+    };
+    assert!(
+        matches!(
+            &error,
+            AttemptNetworkError::Unremoved { cause, .. }
+                if matches!(**cause, AttemptNetworkError::Open(_))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(error.setup_class(), SetupClass::Creation);
+    Ok(())
+}
+
+/// A connector removes its network when asked, once, and refuses every
+/// connection afterwards; a removal that fails is reported and quarantines.
+#[test]
+fn a_connector_reports_its_removal_once() -> TestResult {
+    for refuse_removal in [false, true] {
+        let control = Arc::new(FakeControl {
+            refuse_removal,
+            ..FakeControl::default()
+        });
+        let slots = Arc::new(Slots {
+            count: 1,
+            holders: Mutex::new(Holders::default()),
+        });
+        let mut connector = NamespaceConnector {
+            namespace: Some(std::fs::File::open("/proc/self/ns/net").map(OwnedFd::from)?),
+            teardown: Teardown {
+                control: Arc::clone(&control),
+                egress: Arc::new(FakeEgress::default()),
+                attempt: AttemptEgress {
+                    namespace: NamespaceName::for_attempt([1; 16]),
+                    host_link: LinkName::new("piglor-h0")?,
+                    endpoints: vec![ENDPOINT],
+                },
+                slot: slots.take([1; 16])?,
+                removed: false,
+            },
+        };
+        assert_eq!(connector.remove().is_err(), refuse_removal);
+        // The first call reported; the second has nothing left to report.
+        assert_eq!(connector.remove(), Ok(()));
+        assert_eq!(
+            connector
+                .connect(ENDPOINT, Duration::from_millis(10))
+                .map_err(|error| error.kind())
+                .err(),
+            Some(io::ErrorKind::NotConnected)
+        );
+        drop(connector);
+        assert_eq!(slots.take([2; 16]).is_ok(), !refuse_removal);
+    }
     Ok(())
 }
 

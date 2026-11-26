@@ -49,6 +49,12 @@ mod lifecycle;
 mod local_network;
 #[cfg(target_os = "linux")]
 mod namespace_network;
+// Public module reachability keeps the removal report and the connector that
+// owns it `pub(crate)` without Clippy's `redundant_pub_crate` lint, as for
+// `provider_lifecycle` below; nothing in it is public.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod network_removal;
 #[cfg(target_os = "linux")]
 mod provider_barrier;
 #[cfg(target_os = "linux")]
@@ -340,9 +346,10 @@ pub use lifecycle::{
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{
-    BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
-    HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
-    ServedProxy, SetupClass, SetupError,
+    BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, FailClosedSetup,
+    HostServiceChannel, HostServiceStream, LocalNetworkPort, LocalProxyBindError,
+    NetworkRemovalFailure, RefusingConnector, RemoveNetwork, ServeError, ServedProxy, SetupClass,
+    SetupError,
 };
 #[cfg(target_os = "linux")]
 pub use namespace_network::netlink;
