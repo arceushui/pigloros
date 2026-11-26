@@ -402,5 +402,7 @@ fn read_regular(
         })
 }
 
+mod delete;
+
 #[cfg(test)]
 mod tests;

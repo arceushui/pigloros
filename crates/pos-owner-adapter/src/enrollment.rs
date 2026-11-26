@@ -16,11 +16,12 @@
 //! and authenticated opening; `Registry` for a refused identity, inventory,
 //! ledger or epoch; `DurableWrite` for a failed P3 step 4 or 5 write.
 //!
-//! A commit that fails after its P3a staging record leaves that record and
-//! whatever it staged (wrap, binding, SNL1 row) in place. ADR-137 P5 orphan
-//! recovery is the cleanup path for them. The immediate P5 deletion that P3
-//! asks for after a definite failure is planned in #1487; until then P5
-//! recovery is the only cleanup.
+//! A commit that fails after its P3a staging record and before step 6 has a
+//! definite outcome: the identity is not registered. It then runs the
+//! ADR-137 P5 deletion for this attempt at once, after wiping the root
+//! (P3): the wrap and binding files, the SNL1 row and the record. A failed
+//! registration (step 6) may have an unknown commit outcome, so it deletes
+//! nothing and leaves the attempt to P5 recovery at the next owner start.
 //!
 //! Known limitation: the pos-crypto key types take the root and the PRF
 //! output as by-value `[u8; 32]` arrays, so each passes through a stack
@@ -49,10 +50,12 @@ use pos_owner_bridge_codec::{
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
+mod discard;
 mod store;
 
 use crate::inventory::Inventory;
 use crate::RP_ID;
+use discard::{discard_attempt, Attempt};
 pub use store::{EnrollmentStore, SubjectKeyRegistration, VolatileEnrollmentStore};
 
 /// The root, the wrap salt and the subkey salt (32 bytes each) and the
@@ -84,9 +87,11 @@ pub struct EnrollmentCandidate {
 /// [`Self::open`] until it drops.
 pub struct OwnerEnrollmentAdapter<'lock, S, R> {
     lock: &'lock SubjectEncryptorLock,
-    _owner: SubjectOwnerExclusiveGuard<'lock>,
+    owner: SubjectOwnerExclusiveGuard<'lock>,
     context: EnrollmentContext,
     subject: EntityId,
+    /// The reserved wrap and binding names of this enrollment.
+    names: [SubjectKeyArtifactName; 2],
     store: S,
     random: R,
 }
@@ -124,19 +129,29 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
         let epoch = Inventory::read(lock)
             .and_then(|inventory| next_epoch(lock, &mut store, &owner_id, subject, &inventory))
             .map_err(BridgeError::Owner)?;
-        Ok(Self {
-            lock,
-            _owner: owner,
-            context: EnrollmentContext {
-                owner_id,
-                subject_id,
-                epoch,
-                owner_window,
-            },
-            subject,
-            store,
-            random,
-        })
+        let [wrap, binding] = [
+            SubjectKeyArtifactKind::Wrap,
+            SubjectKeyArtifactKind::Binding,
+        ]
+        .map(|kind| SubjectKeyArtifactName::new(kind, &owner_id, epoch));
+        wrap.zip(binding)
+            .map(<[_; 2]>::from)
+            .map(|names| Self {
+                lock,
+                owner,
+                context: EnrollmentContext {
+                    owner_id,
+                    subject_id,
+                    epoch,
+                    owner_window,
+                },
+                subject,
+                names,
+                store,
+                random,
+            })
+            // Unreachable: the owner is non-nil and the epoch is at least 1.
+            .ok_or(BridgeError::Owner(REGISTRY))
     }
 
     /// The context to pass to `OwnerBridge::enroll` with this adapter.
@@ -180,15 +195,19 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
             .ok_or(REGISTRY)
     }
 
-    fn stage(&self, kind: SubjectKeyArtifactKind, bytes: &[u8]) -> Result<(), OwnerError> {
-        SubjectKeyArtifactName::new(kind, &self.context.owner_id, self.context.epoch)
-            // Unreachable: open() derived a non-nil owner and the epoch is at least 1.
-            .ok_or(DURABLE_WRITE)
-            .and_then(|name| {
-                self.lock
-                    .stage_subject_key_artifact(&name, bytes)
-                    .or(Err(DURABLE_WRITE))
-            })
+    /// P3 steps 4 and 5: the wrap, the binding, then the SNL1 row.
+    fn stage(
+        &self,
+        names: &[SubjectKeyArtifactName; 2],
+        contents: [&[u8]; 2],
+        row: SubjectNonceLedgerRowV1,
+    ) -> Result<(), OwnerError> {
+        names
+            .iter()
+            .zip(contents)
+            .try_for_each(|(name, bytes)| self.lock.stage_subject_key_artifact(name, bytes))
+            .or(Err(DURABLE_WRITE))
+            .and_then(|()| self.stage_ledger_row(row))
     }
 
     /// P3 step 5: re-read the ledger under the held lock, add the new row
@@ -201,15 +220,8 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
     fn stage_ledger_row(&self, row: SubjectNonceLedgerRowV1) -> Result<(), OwnerError> {
         read_ledger(self.lock)
             .and_then(|ledger| with_row(&ledger, row))
-            .and_then(|ledger| {
-                self.lock
-                    .replace_nonce_ledger_bytes(ledger.as_bytes())
-                    .ok()
-                    .and_then(|()| self.lock.read_nonce_ledger_bytes().ok())
-                    .filter(|read| read.as_slice() == ledger.as_bytes())
-            })
-            .map(drop)
             .ok_or(DURABLE_WRITE)
+            .and_then(|ledger| write_ledger(self.lock, &ledger))
     }
 }
 
@@ -253,7 +265,8 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
         confirm(candidate, prf.as_bytes())
     }
 
-    /// Re-check, then stage and register in ADR-137 P3 order.
+    /// Re-check, then stage and register in ADR-137 P3 order, or delete a
+    /// definitely failed attempt by ADR-137 P5.
     ///
     /// The binding must name this adapter's owner, subject and epoch and the
     /// wrap's credential, and the wrap this subject and epoch. Then one
@@ -262,8 +275,12 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
     /// for the row refuses with `Registry` before anything is staged. The
     /// probe is conservative: it uses the widest store-file identity, so it
     /// may refuse a ledger with up to 16 bytes of headroom that the real row
-    /// would fit. Steps 3 to 6 follow: the staging record, the wrap, the
-    /// binding, the SNL1 row with both counters at 1, and registration.
+    /// would fit. The root is wiped once its digest is taken. Steps 3 to 6
+    /// follow: the staging record, the wrap, the binding, the SNL1 row with
+    /// both counters at 1, and registration. When step 4 or 5 fails, the P5
+    /// deletion of this attempt runs before the error returns. It keeps
+    /// everything while P1 may hold the identity or the ledger is unreadable,
+    /// and keeps the files and the row when the row names another store.
     fn commit(
         &mut self,
         candidate: EnrollmentCandidate,
@@ -283,20 +300,33 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
         {
             return Err(REGISTRY);
         }
+        let EnrollmentCandidate { root, wrap } = candidate;
+        let root_material_digest = *root.material_digest().as_bytes();
+        // Only the digest is needed from here on, so the root is wiped now.
+        drop(root);
         let store_file_id = self
             .store
             .commit_staging_record(&self.context.owner_id, epoch)?;
-        self.stage(SubjectKeyArtifactKind::Wrap, &candidate.wrap.to_bytes())?;
-        self.stage(SubjectKeyArtifactKind::Binding, &binding)?;
-        let root_material_digest = *candidate.root.material_digest().as_bytes();
-        self.stage_ledger_row(SubjectNonceLedgerRowV1 {
+        let row = SubjectNonceLedgerRowV1 {
             owner_id: self.context.owner_id.clone(),
             epoch,
             root_material_digest,
             store_file_id,
             data_next: 1,
             bootstrap_next: 1,
-        })?;
+        };
+        if let Err(error) = self.stage(&self.names, [&wrap.to_bytes(), &binding], row) {
+            let attempt = Attempt {
+                subject: self.subject,
+                epoch,
+                store_file_id,
+                names: &self.names,
+            };
+            // A failed deletion leaves the staging record, so P5 recovery at
+            // the next owner start finishes it; the staging error is returned.
+            let _retained = discard_attempt(self.lock, &self.owner, &mut self.store, &attempt);
+            return Err(error);
+        }
         self.store.register(&SubjectKeyRegistration {
             owner_id: self.context.owner_id.clone(),
             subject_id: self.subject,
@@ -420,6 +450,24 @@ fn with_row(
     let mut rows: Vec<_> = ledger.rows().cloned().chain([row]).collect();
     rows.sort_by(|left, right| (&left.owner_id, left.epoch).cmp(&(&right.owner_id, right.epoch)));
     SubjectNonceLedgerV1::new(rows).ok()
+}
+
+/// Durably replace the ledger with `ledger` and read it back unchanged, as
+/// ADR-137 N1 replaces it.
+///
+/// # Errors
+/// Returns `DurableWrite` when the replacement fails or the read-back
+/// differs. The outcome may then be unconfirmed.
+fn write_ledger(
+    lock: &SubjectEncryptorLock,
+    ledger: &SubjectNonceLedgerV1,
+) -> Result<(), OwnerError> {
+    lock.replace_nonce_ledger_bytes(ledger.as_bytes())
+        .ok()
+        .and_then(|()| lock.read_nonce_ledger_bytes().ok())
+        .filter(|read| read.as_slice() == ledger.as_bytes())
+        .map(drop)
+        .ok_or(DURABLE_WRITE)
 }
 
 /// Read and strictly decode the SNL1 ledger, or `None`.
