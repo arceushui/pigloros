@@ -1,7 +1,7 @@
 //! The guest test client's view of the selector provider transport.
 //!
 //! Compiled only with the `test-support` feature. It wraps the one selector
-//! transport (execute, SCQ1 and SRQ1) without a second protocol
+//! transport (execute, status via SDQ1, SCQ1 and SRQ1) without a second protocol
 //! implementation: the endpoint stays root-owned and every connection must
 //! come from the named provider process (ADR-069 R11 §5.0 step 8).
 //!
