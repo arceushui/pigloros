@@ -928,7 +928,7 @@ fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
         0x1_0000..=0xffff_ffff => (26, &bytes[4..]),
         _ => (27, &bytes[..]),
     };
-    out.push((major << 5) | info);
+    out.push((major << 5) + info);
     out.extend_from_slice(argument);
 }
 
