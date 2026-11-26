@@ -8,6 +8,7 @@
 //! components are opened separately later (E16).
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -21,14 +22,23 @@ pub enum StateDirVariable {
     Home,
 }
 
+impl fmt::Display for StateDirVariable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::XdgStateHome => "XDG_STATE_HOME",
+            Self::Home => "HOME",
+        })
+    }
+}
+
 /// Why no owner state directory could be resolved.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum StateDirError {
-    /// Neither `XDG_STATE_HOME` nor `HOME` is set.
-    #[error("neither XDG_STATE_HOME nor HOME is set")]
+    /// Neither a non-empty `XDG_STATE_HOME` nor `HOME` is set.
+    #[error("neither a non-empty XDG_STATE_HOME nor HOME is set")]
     Unset,
     /// The selected variable is not an absolute path (an empty `HOME` counts).
-    #[error("{0:?} is not an absolute path")]
+    #[error("{0} is not an absolute path")]
     NotAbsolute(StateDirVariable),
 }
 
@@ -180,11 +190,15 @@ mod tests {
     fn errors_render_a_message() {
         assert_eq!(
             StateDirError::Unset.to_string(),
-            "neither XDG_STATE_HOME nor HOME is set"
+            "neither a non-empty XDG_STATE_HOME nor HOME is set"
         );
         assert_eq!(
             StateDirError::NotAbsolute(StateDirVariable::Home).to_string(),
-            "Home is not an absolute path"
+            "HOME is not an absolute path"
+        );
+        assert_eq!(
+            StateDirError::NotAbsolute(StateDirVariable::XdgStateHome).to_string(),
+            "XDG_STATE_HOME is not an absolute path"
         );
     }
 }
