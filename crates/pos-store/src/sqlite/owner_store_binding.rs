@@ -93,6 +93,8 @@ thread_local! {
     /// Test-only seam: runs once after the screening, before the identity proof.
     static AFTER_SCREEN: HookSlot =
         const { std::cell::RefCell::new(None) };
+    /// Test-only seam: how many native opens were attempted on this thread.
+    static NATIVE_OPENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -209,9 +211,9 @@ impl QualifiedSqliteStoreV1 {
     /// `pre_screen_key` is the main-file candidate the caller pre-screened
     /// and keyed its in-child Gateway mode lock on. The order is: shared
     /// admission, the context's native slot, the filesystem interlock,
-    /// the proof that the interlock's directory and main file are the screened
-    /// ones, screening and empty-companion provisioning, a read-write no-follow
-    /// open on the `unix` VFS with `busy_timeout` 0, a WAL and UTF-8 check,
+    /// screening and empty-companion provisioning, the proof that the
+    /// interlock's directory and main file are the screened ones, a read-write
+    /// no-follow open on the `unix` VFS with `busy_timeout` 0, a WAL and UTF-8 check,
     /// then one setup `BEGIN IMMEDIATE` holding the native proof, schema
     /// validation (the store is never initialized) and the LC3 mode attach:
     /// `load_mode_binding`, then `attach_mode_binding` to that record's
@@ -429,8 +431,9 @@ fn bind(
 }
 
 /// Open and bind under the held interlock. The recheck proves the entries are
-/// still the screened ones now that the lock is held. `is_claimed` and the claim in `bind_native` are one atomic step only
-/// because that interlock is held across both.
+/// still the screened ones now that the lock is held. `is_claimed` and the
+/// claim in `bind_native` are one atomic step only because that interlock is
+/// held across both.
 fn setup(
     witnesses: OwnerStoreWitnessesV1,
     directory: &Path,
@@ -459,6 +462,8 @@ fn setup(
 /// the standard `unix` VFS and no reservation connection. The store leaves
 /// here already inside `ManuallyDrop`, so no unwind can run its destructor.
 fn open_native(path: &Path) -> Option<ManuallyDrop<SqliteStore>> {
+    #[cfg(test)]
+    NATIVE_OPENS.with(|opens| opens.set(opens.get() + 1));
     Connection::open_with_flags_and_vfs(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -1456,12 +1461,19 @@ mod tests {
         Ok(names)
     }
 
+    /// The replacement main file is private, empty and singly linked, so the
+    /// screening accepts it and, as ADR-123 section 4 orders it, provisions the
+    /// missing empty `-wal` and `-shm` before the identity proof refuses: the
+    /// interlock is keyed on the original inode, the replacement has another.
+    /// Nothing removes those two companions; no claim and no native open
+    /// happen, and a later clean open tolerates them.
     #[test]
     fn a_main_file_replaced_in_place_after_the_interlock_is_refused_before_any_claim() -> TestResult
     {
         let fixture = installed(true)?;
         let original = fixture.directory.path().to_path_buf();
         let before = entry_names(&original)?;
+        let opens_before = NATIVE_OPENS.with(Cell::get);
         let kept = original.join(format!("{MAIN}.kept"));
         let hook_kept = kept.clone();
         let hook_main = original.join(MAIN);
@@ -1479,10 +1491,22 @@ mod tests {
         let refused = fixture.open();
         assert_eq!(refused.err(), Some(OwnerStoreBindingErrorV1::Unavailable));
         assert!(kept.exists());
+        let replacement = std::fs::metadata(original.join(MAIN))?;
+        assert!(!is_claimed([replacement.dev(), replacement.ino()]));
+        assert_eq!(NATIVE_OPENS.with(Cell::get), opens_before);
         std::fs::remove_file(original.join(MAIN))?;
         std::fs::rename(&kept, original.join(MAIN))?;
-        assert_eq!(entry_names(&original)?, before);
+        let mut provisioned = before;
+        provisioned.extend([format!("{MAIN}-shm"), format!("{MAIN}-wal")]);
+        provisioned.sort();
+        assert_eq!(entry_names(&original)?, provisioned);
+        for suffix in ["-shm", "-wal"] {
+            let companion = std::fs::metadata(original.join(format!("{MAIN}{suffix}")))?;
+            assert_eq!(companion.len(), 0);
+            assert_eq!(companion.permissions().mode() & 0o777, 0o600);
+        }
         closed(fixture.open()?)?;
+        assert_eq!(NATIVE_OPENS.with(Cell::get), opens_before + 1);
         Ok(())
     }
 
