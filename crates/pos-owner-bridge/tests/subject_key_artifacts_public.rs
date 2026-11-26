@@ -158,6 +158,13 @@ fn unsafe_artifact_directories_are_refused_by_every_operation() -> TestResult {
             Err(UNAVAILABLE),
             "{kind}"
         );
+        let owner = guard.try_lock_subject_owner_exclusive(OWNER)?;
+        assert_eq!(
+            guard.delete_subject_key_artifact(&owner, &wrap()?),
+            Err(UNAVAILABLE),
+            "{kind}"
+        );
+        drop(owner);
         let after = fs::symlink_metadata(&directory)?;
         assert_eq!(
             (before.ino(), before.mode()),
@@ -440,5 +447,115 @@ fn inventory_accepts_exactly_the_entry_bound_and_fails_closed_above_it() -> Test
         guard.list_and_read_subject_key_artifacts(),
         Err(UNAVAILABLE)
     );
+    Ok(())
+}
+
+#[test]
+fn deletion_removes_both_names_of_exactly_one_artifact_and_repeats() -> TestResult {
+    let (root, guard, directory) = admitted()?;
+    let owner = guard.try_lock_subject_owner_exclusive(OWNER)?;
+    let (wrap, binding) = (wrap()?, binding()?);
+    let later = name(SubjectKeyArtifactKind::Wrap, 4)?;
+    guard.stage_subject_key_artifact(&wrap, b"wrap bytes")?;
+    write_private(&directory.join(wrap.temporary()), b"torn wrap")?;
+    guard.stage_subject_key_artifact(&binding, b"binding bytes")?;
+    write_private(&directory.join(later.temporary()), b"torn later wrap")?;
+    write_private(&directory.join("notes"), b"unrelated")?;
+
+    guard.delete_subject_key_artifact(&owner, &wrap)?;
+    let mut remaining = entry_names(&guard)?;
+    assert_eq!(
+        remaining,
+        [
+            binding.canonical().into_bytes(),
+            b"notes".to_vec(),
+            later.temporary().into_bytes(),
+        ]
+    );
+    // Absent from the start: an idempotent success that changes nothing.
+    guard.delete_subject_key_artifact(&owner, &wrap)?;
+    assert_eq!(entry_names(&guard)?, remaining);
+    // Only the `.tmp` name present.
+    guard.delete_subject_key_artifact(&owner, &later)?;
+    // Only the canonical name present.
+    guard.delete_subject_key_artifact(&owner, &binding)?;
+    remaining = entry_names(&guard)?;
+    assert_eq!(remaining, [b"notes".to_vec()]);
+    assert_guard_retained(&root.0);
+    Ok(())
+}
+
+#[test]
+fn deletion_needs_this_locks_exclusive_hold_of_the_names_owner() -> TestResult {
+    let (_root, guard, directory) = admitted()?;
+    let (_other_root, other_lock, _) = admitted()?;
+    let wrap = wrap()?;
+    guard.stage_subject_key_artifact(&wrap, b"wrap bytes")?;
+    let other_owner =
+        guard.try_lock_subject_owner_exclusive("subject:101112131415161718191a1b1c1d1e1f")?;
+    let foreign = other_lock.try_lock_subject_owner_exclusive(OWNER)?;
+    for refused in [&other_owner, &foreign] {
+        assert_eq!(
+            guard.delete_subject_key_artifact(refused, &wrap),
+            Err(UNAVAILABLE)
+        );
+        assert_eq!(fs::read(directory.join(wrap.canonical()))?, b"wrap bytes");
+    }
+    let owner = guard.try_lock_subject_owner_exclusive(OWNER)?;
+    guard.delete_subject_key_artifact(&owner, &wrap)?;
+    assert!(!directory.join(wrap.canonical()).exists());
+    Ok(())
+}
+
+#[test]
+fn an_unsafe_or_busy_entry_at_either_name_refuses_before_any_unlink() -> TestResult {
+    for slot in ["canonical", "temporary"] {
+        for kind in ["symlink", "hardlink", "directory", "fifo", "mode", "busy"] {
+            let (root, guard, directory) = admitted()?;
+            let owner = guard.try_lock_subject_owner_exclusive(OWNER)?;
+            let wrap = wrap()?;
+            let (unsafe_name, safe_name) = if slot == "canonical" {
+                (wrap.canonical(), wrap.temporary())
+            } else {
+                (wrap.temporary(), wrap.canonical())
+            };
+            let (path, safe) = (directory.join(unsafe_name), directory.join(safe_name));
+            write_private(&safe, b"safe")?;
+            let original = root.0.join("original");
+            write_private(&original, b"retained")?;
+            match kind {
+                "symlink" => symlink(&original, &path)?,
+                "hardlink" => fs::hard_link(&original, &path)?,
+                "directory" => private_directory(&path)?,
+                "fifo" => fifo(&path)?,
+                _ => write_private(&path, b"retained wrap")?,
+            }
+            if kind == "mode" {
+                fs::set_permissions(&path, Permissions::from_mode(0o640))?;
+            }
+            let busy = if kind == "busy" {
+                let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+                flock(&file, FlockOperation::NonBlockingLockExclusive)?;
+                Some(file)
+            } else {
+                None
+            };
+            let before = fs::symlink_metadata(&path)?;
+            assert_eq!(
+                guard.delete_subject_key_artifact(&owner, &wrap),
+                Err(UNAVAILABLE),
+                "{slot} {kind}"
+            );
+            let after = fs::symlink_metadata(&path)?;
+            assert_eq!(
+                (before.ino(), before.mode()),
+                (after.ino(), after.mode()),
+                "{slot} {kind}"
+            );
+            assert_eq!(fs::read(&safe)?, b"safe", "{slot} {kind}");
+            assert_eq!(fs::read(&original)?, b"retained");
+            drop(busy);
+        }
+    }
     Ok(())
 }
