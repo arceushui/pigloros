@@ -1,5 +1,6 @@
 #![cfg(any(test, feature = "test-support"))]
-//! The test-support `EnrollmentStore`: the ADR-137 P3 steps 2, 3 and 6 semantics.
+//! The test-support `EnrollmentStore`: the ADR-137 P3 steps 2, 3 and 6 and
+//! the P5 record deletion.
 #![cfg(target_os = "linux")]
 
 use pos_core::EntityId;
@@ -105,4 +106,22 @@ fn registration_needs_its_staging_record_and_an_epoch_above_the_mark() {
     assert_eq!(staged(&store), [(OWNER.to_owned(), 1)]);
     assert_eq!(store.registrations(), [registration(2)]);
     assert_eq!(store.registry_epoch_ceiling(OWNER, subject(0x10)), Ok(2));
+}
+
+#[test]
+fn deleting_a_staging_record_removes_exactly_it_and_repeats() {
+    let mut store = VolatileEnrollmentStore::new(FILE);
+    assert_eq!(store.commit_staging_record(OWNER, 1), Ok(FILE));
+    assert_eq!(store.commit_staging_record(OWNER, 2), Ok(FILE));
+    assert_eq!(store.commit_staging_record(OTHER, 1), Ok(FILE));
+    assert_eq!(store.delete_staging_record(OWNER, 1), Ok(()));
+    assert_eq!(
+        staged(&store),
+        [(OWNER.to_owned(), 2), (OTHER.to_owned(), 1)]
+    );
+    // A missing record is an idempotent success.
+    assert_eq!(store.delete_staging_record(OWNER, 1), Ok(()));
+    assert_eq!(staged(&store).len(), 2);
+    // The epoch is free to stage again.
+    assert_eq!(store.commit_staging_record(OWNER, 1), Ok(FILE));
 }

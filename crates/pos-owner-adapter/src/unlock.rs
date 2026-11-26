@@ -23,7 +23,8 @@
 //!
 //! A `.tmp` copy that a crash left behind counts as a duplicate too, so the
 //! key stays unavailable (fail closed) until it is removed. This slice
-//! performs no recovery: ADR-137 P5 recovery (#1373, #1487) is the cleanup.
+//! performs no recovery: ADR-137 P5 recovery (#1373) is the cleanup. The
+//! immediate P5 deletion of #1487 covers only a failed enrollment attempt.
 //!
 //! `persist_binding_update` replaces the binding atomically (ADR-110 §9).
 //! Updates from concurrent unlocks are serialized by one process-wide binding
