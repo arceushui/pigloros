@@ -148,7 +148,13 @@ impl<'a> CommunityAnnotationManifestV1<'a> {
     /// manifest digest.
     #[must_use]
     pub fn digest(&self) -> Hash {
-        digest(b"PiglorOS.Community.CAT1.v1\0", &self.to_canonical_cbor())
+        self.identity().0
+    }
+
+    /// The CAT1 digest and its encoding from one encoding.
+    pub(super) fn identity(&self) -> (Hash, Zeroizing<Vec<u8>>) {
+        let encoded = self.to_canonical_cbor();
+        (digest(b"PiglorOS.Community.CAT1.v1\0", &encoded), encoded)
     }
 
     /// Decode one complete preferred CAT1, borrowing claims and digests.

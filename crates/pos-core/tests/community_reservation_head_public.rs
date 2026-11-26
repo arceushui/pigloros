@@ -284,6 +284,18 @@ fn reservation_has_exact_ten_fields_and_independent_native_ordinal() -> TestResu
 }
 
 #[test]
+fn reservation_identity_is_the_labelled_hash_of_its_exact_wire() -> TestResult {
+    let record = Reservation::new(reservation_input(24)?)?;
+    let mut preimage = b"PiglorOS.Community.CPR1.v1\0".to_vec();
+    preimage.extend_from_slice(&record.to_canonical_cbor());
+    assert_eq!(
+        record.digest(),
+        Hash::from_bytes(*blake3::hash(&preimage).as_bytes())
+    );
+    Ok(())
+}
+
+#[test]
 fn reservation_rejects_missing_links_zero_native_ordinal_and_bad_horizons() -> TestResult {
     for field in [3, 5, 6, 7, 8] {
         let mut fields = reservation_fields(reservation_input(1)?)?;

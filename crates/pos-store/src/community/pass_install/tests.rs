@@ -397,6 +397,7 @@ fn a_reinstallation_is_refused_while_a_pass_is_unresolved() -> Fallible<()> {
         prior_shared_counts: pos_core::community_lifecycle::CommunitySharedCountsV1::default(),
         materialization: None,
         status,
+        sealed_result_digest: None,
         live: false,
     };
     domain.pass_records.insert(
