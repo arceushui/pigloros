@@ -17,12 +17,15 @@ use std::{
     fs,
     io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_sandboxd::packaged_conformance::{activate, describe, release, run, ConformanceError};
+use pos_sandboxd::packaged_conformance::{
+    activate, describe, release, run, run_mode, ConformanceError,
+};
 use pos_sandboxd::ImageActivationError;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -180,6 +183,132 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
         String::from_utf8(output.stdout)?,
         "activation\trefused\tHostFeatureUnavailable\nrelease\tnone\nremoval\tremoved\n"
     );
+    assert!(!Path::new("/var/lib/pigloros").exists());
+    Ok(())
+}
+
+/// A control input whose every read fails.
+struct BrokenControl;
+
+impl io::Read for BrokenControl {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("broken control input"))
+    }
+}
+
+/// A control input that observes the held installation at its first read and
+/// then ends.
+///
+/// The stager holds the staged installation until its control input ends, so
+/// exactly one provider executable must be installed while this is read.
+struct ObservingControl {
+    seen: Arc<Mutex<Option<PathBuf>>>,
+}
+
+impl io::Read for ObservingControl {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        let mut providers = fs::read_dir("/var/lib/pigloros/sandbox/providers")?;
+        let installed = providers
+            .next()
+            .ok_or_else(|| io::Error::other("no provider executable is installed"))??;
+        if providers.next().is_some() {
+            return Err(io::Error::other("more than one provider executable"));
+        }
+        *self.seen.lock().map_err(|_| io::Error::other("poisoned"))? = Some(installed.path());
+        Ok(0)
+    }
+}
+
+/// The stager's arguments over the DDI vector and small stand-in files in
+/// `scratch`.
+fn stager_arguments(scratch: &Path) -> Result<Vec<OsString>, Box<dyn Error>> {
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
+    let image = scratch.join("image.raw");
+    let expanded = Command::new("gzip")
+        .arg("-dc")
+        .arg(vectors.join("image.raw.gz"))
+        .stdout(fs::File::create(&image)?)
+        .status()?;
+    assert!(expanded.success());
+    let (adapter, spi1, provider) = (
+        scratch.join("adapter"),
+        scratch.join("spi1"),
+        scratch.join("provider"),
+    );
+    fs::write(&adapter, b"adapter")?;
+    fs::write(&spi1, b"spi1 bytes")?;
+    fs::write(&provider, b"provider bytes")?;
+    Ok(vec![
+        "stage".into(),
+        image.into(),
+        vectors.join("signer.der").into(),
+        VECTOR_KEY_DESCRIPTION.into(),
+        adapter.into(),
+        spi1.into(),
+        "runtime.key".into(),
+        provider.into(),
+        "honest".into(),
+    ])
+}
+
+/// One staging and one gzip per container, as `staged_provider_public.rs`
+/// does, since the isolated runner bounds each test at 30 s.
+#[tokio::test]
+async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResult {
+    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
+        return run_isolated("the_stager_holds_the_installation_until_its_control_ends");
+    }
+    if fs::metadata("/proc/self")?.uid() != 0 {
+        return Err("the isolated conformance child is not root".into());
+    }
+    let scratch = tempfile::tempdir()?;
+    let seen = Arc::new(Mutex::new(None));
+    let control = ObservingControl {
+        seen: Arc::clone(&seen),
+    };
+    let mut report = Vec::new();
+    let arguments = stager_arguments(scratch.path())?;
+    run_mode(arguments, control, &mut report, describe, release).await?;
+
+    // The control input saw the one installed provider executable, which is
+    // the one the report names, and the installation is gone after the run.
+    let installed = seen
+        .lock()
+        .map_err(|_| "poisoned")?
+        .clone()
+        .ok_or("the control input was never read")?;
+    assert!(installed.starts_with("/var/lib/pigloros/sandbox/providers"));
+    assert_eq!(
+        String::from_utf8(report)?,
+        format!("staged\t{}\nunstaged\n", installed.display())
+    );
+    assert!(!Path::new("/var/lib/pigloros").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failing_report_or_control_input_still_removes_the_installation() -> TestResult {
+    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
+        return run_isolated("a_failing_report_or_control_input_still_removes_the_installation");
+    }
+    if fs::metadata("/proc/self")?.uid() != 0 {
+        return Err("the isolated conformance child is not root".into());
+    }
+    let scratch = tempfile::tempdir()?;
+    let arguments = stager_arguments(scratch.path())?;
+    let unreported = run_mode(
+        arguments.clone(),
+        io::empty(),
+        &mut Broken,
+        describe,
+        release,
+    )
+    .await;
+    assert!(matches!(unreported, Err(ConformanceError::Io(_))));
+    assert!(!Path::new("/var/lib/pigloros").exists());
+    let uncontrolled = run_mode(arguments, BrokenControl, &mut Vec::new(), describe, release).await;
+    assert!(matches!(uncontrolled, Err(ConformanceError::Io(_))));
     assert!(!Path::new("/var/lib/pigloros").exists());
     Ok(())
 }

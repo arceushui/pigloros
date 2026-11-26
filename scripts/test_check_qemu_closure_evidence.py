@@ -211,6 +211,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
     files.update(case_files())
     files.update(executable_files(architecture))
     files.update(network_files())
+    files.update(daemon_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
         ("311", WORKER, b"LANG=C.UTF-8\0MOUNTFS_FIXED_WORKER=1\0"),
@@ -513,7 +514,7 @@ ROUTES6 = ("local ::1 dev lo table local proto kernel metric 0 pref medium\n"
 
 def network_files() -> dict[str, bytes | str]:
     files: dict[str, bytes | str] = {
-        "guest/network/boot-sysctl": "0\n",
+        "guest/network/boot-sysctl": "1\n",
         "guest/network/init-netns": INIT_NETNS + "\n",
         "guest/network/init-links": LINK_LO + FALLBACKS,
         "guest/network/modules": MODULES,
@@ -527,6 +528,66 @@ def network_files() -> dict[str, bytes | str]:
             f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
         })
     return files
+
+
+PROVIDER_BINARY = "/var/lib/pigloros/sandbox/providers/" + "ab" * 32
+RUNTIME_PROPERTY_ROWS = {
+    "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
+    "MainPID": "412", "Type": "notify", "NotifyAccess": "main", "ExitType": "main",
+    "KillMode": "control-group", "Restart": "no", "CollectMode": "inactive-or-failed", "UMask": "0077",
+    "StandardInput": "null", "TimeoutStartUSec": "30s", "RuntimeMaxUSec": "infinity", "Environment": "",
+    "PassEnvironment": "",
+    "ExecStart": f"{{ path={PROVIDER_BINARY} ; argv[]={PROVIDER_BINARY} provider-runtime ; ignore_errors=no ; "
+                 "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+}
+
+
+def runtime_properties(**changes: str | None) -> str:
+    """The `systemctl show` text, with rows replaced, or removed for None."""
+    rows = {**RUNTIME_PROPERTY_ROWS, **changes}
+    return "".join(f"{key}={value}\n" for key, value in rows.items() if value is not None)
+
+
+RUNTIME_PROPERTIES = runtime_properties()
+
+
+def runtime_credentials(**data: object) -> str:
+    """The collector's credential lines: one `NAME<TAB>JSON` each, empty lists unless given."""
+    return "".join(f'{key}\t{json.dumps({"type": kind, "data": data.get(key, [])}, separators=(",", ":"))}\n'
+                   for key, kind in checker.CREDENTIAL_PROPERTIES.items())
+
+
+RUNTIME_CREDENTIALS = runtime_credentials()
+HOST = "piglor-qemu-evidence"
+STOPPING = f"[ 120.0] {HOST} systemd[1]: Stopping /var/lib/pigloros/sandbox/providers/ab provider-runtime...\n"
+DEACTIVATED = f"[ 121.0] {HOST} systemd[1]: piglor-sandbox-runtime.service: Deactivated successfully.\n"
+RUNTIME_LOG = (f"[ 100.0] {HOST} systemd[1]: Starting /var/lib/pigloros/sandbox/providers/ab provider-runtime...\n"
+               f"[ 101.0] {HOST} systemd[1]: Started /var/lib/pigloros/sandbox/providers/ab provider-runtime.\n"
+               + STOPPING + DEACTIVATED)
+RUNTIME_TREE = ("\td\t700\nsandbox\td\t700\nsandbox/staging\td\t700\nsandbox/registry\td\t700\n"
+                "provider-execute.sock\ts\t600\nprovider-control.sock\ts\t600\n")
+LAUNCHER_HEADERS = ("ELF Header:\n  Type:                              EXEC (Executable file)\n"
+                    "Program Headers:\n  Type           Offset   VirtAddr\n  LOAD           0x000000 0x400000\n"
+                    "  GNU_STACK      0x000000 0x000000\n\nThere is no dynamic section in this file.\n")
+LAUNCHER_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def daemon_files() -> dict[str, bytes | str]:
+    base = "guest/daemon/start"
+    return {
+        f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\nunstaged\n", f"{base}/stage-stderr": "",
+        f"{base}/stage-status": "0\n", f"{base}/start-status": "0\n", f"{base}/stop-status": "0\n",
+        f"{base}/start-stderr": "",
+        f"{base}/launcher-sha256": LAUNCHER_DIGEST + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd\n",
+        f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  {PROVIDER_BINARY}\n",
+        f"{base}/start-state": "ActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\n",
+        f"{base}/start-journal": RUNTIME_LOG.split("[ 120.0]")[0],
+        f"{base}/launcher-program-headers": LAUNCHER_HEADERS,
+        f"{base}/fb-tunnels-sysctl": "1\n",
+        f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
+        f"{base}/runtime-credentials": RUNTIME_CREDENTIALS,
+        f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
+    }
 
 
 def write(root: pathlib.Path, files: dict[str, bytes | str]) -> None:
@@ -894,6 +955,22 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(checker.EvidenceError):
                 checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
                           untrusted_certificate=UNTRUSTED)
+
+    def test_a_changed_sysctl_drop_in_is_refused(self):
+        dropin = "deploy/sysctl.d/60-piglor-sandbox.conf"
+        self.assertIn(dropin, checker.PROVENANCE_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = pathlib.Path(directory)
+            for other in checker.PROVENANCE_FILES:
+                (repository / other).parent.mkdir(parents=True, exist_ok=True)
+                (repository / other).write_bytes((ROOT / other).read_bytes())
+            evidence = self.evidence()
+            checker.check(evidence, "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
+                          untrusted_certificate=UNTRUSTED)
+            (repository / dropin).write_bytes(b"net.core.fb_tunnels_only_for_init_net = 0\n")
+            with self.assertRaisesRegex(checker.EvidenceError, "60-piglor-sandbox.conf differs"):
+                checker.check(evidence, "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
+                              untrusted_certificate=UNTRUSTED)
 
     def test_the_compiled_in_list_must_be_exactly_the_certificate(self):
         der = checker.pem_certificate(CERTIFICATE)
@@ -1478,7 +1555,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_private_network_unit_holds_only_the_loopback_once_the_sysctl_is_set(self):
         network = self.verdict()["private_network"]
-        self.assertEqual(network["boot_sysctl"], 0)
+        self.assertEqual(network["boot_sysctl"], 1)
         self.assertEqual(network["fb-0"]["links"], ["lo", "tunl0", "sit0", "ip6tnl0", "gre0"])
         for case in ("fb-1", "fb-2"):
             self.assertEqual(network[case]["links"], ["lo"])
@@ -1499,6 +1576,237 @@ class EvidenceTests(unittest.TestCase):
         addresses = ADDRESSES.replace("1: lo ", "1: lo@lo ", 1)
         self.assertEqual(self.verdict(change=lambda f: f.update({"guest/network/fb-1/addrs": addresses}))
                          ["private_network"]["fb-1"]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+
+    def test_the_provider_runtime_is_the_staged_binary_started_as_the_selector_would(self):
+        daemon = self.verdict()["provider_runtime"]["start"]
+        self.assertEqual(daemon["binary"], PROVIDER_BINARY)
+        self.assertEqual(daemon["properties"]["Type"], "notify")
+        self.assertEqual(sorted(daemon["endpoints"]), ["provider-control.sock", "provider-execute.sock"])
+
+    def test_provider_runtime_fabrication_fails_closed(self):
+        base = "guest/daemon/start"
+        properties = f"{base}/runtime-properties"
+        changes = [
+            (lambda f: f.pop(f"{base}/runtime-log"), "malformed daemon record start"),
+            (lambda f: f.pop(f"{base}/start-stderr"), "malformed daemon record start"),
+            (lambda f: f.update({f"{base}/extra": ""}), "unexpected"),
+            (lambda f: f.update({"guest/daemon/other/x": ""}), "does not hold exactly"),
+            (lambda f: f.update({f"{base}/stage-status": "1\n"}), "did not stage and unstage"),
+            (lambda f: f.update({f"{base}/stage-report": "staged\t/tmp/x\nunstaged\n"}), "did not stage"),
+            (lambda f: f.update({f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\n"}), "did not stage"),
+            (lambda f: f.update({f"{base}/stage-report": ""}), "did not stage"),
+            (lambda f: f.update({f"{base}/start-status": "1\n", f"{base}/start-stderr": "Job failed\n"}),
+             "start stderr: 'Job failed'"),
+            (lambda f: f.update({f"{base}/stop-status": "1\n"}), "did not start and stop cleanly"),
+            # The executable that stands in for the provider.
+            (lambda f: f.update({f"{base}/runtime-exe": "/nix/store/x-other\n"}), "not the staged provider binary"),
+            # The runtime refuses step 7 below 1 (R14 N12): only a start at 1 or more counts.
+            *[(lambda f, value=value: f.update({f"{base}/fb-tunnels-sysctl": value}),
+               "below the 1 that the provider requires")
+              for value in ("0\n", "x\n", "\n", "-1\n", "\u0661\n", "1" * 5000 + "\n", "1" * 10 + "\n")],
+            (lambda f: f.update({f"{base}/launcher-sha256": "nothing\n"}), "launcher digest line is malformed"),
+            # One case per sub-check of the digest line (the rest of the line stays valid).
+            *[(lambda f, line=line: f.update({f"{base}/launcher-sha256": line + "\n"}),
+               "launcher digest line is malformed")
+              for line in (
+                  "c" * 63 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  "c" * 65 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  "g" * 64 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  "C" * 64 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /tmp/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd  x",
+                  LAUNCHER_DIGEST + " /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  # A bare digest has one field; the path must start with /nix/store/ exactly.
+                  LAUNCHER_DIGEST,
+                  LAUNCHER_DIGEST + "  /nix/other/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /nix/storefoo/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /tmp/nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd")],
+            # The ELF Type line: only an executable or a position-independent executable passes.
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "REL (Relocatable file)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "  Type:                              EXEC (Executable file)\n", "")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "CORE (Core file)")}),
+             "not a loadable statically linked"),
+            # The Type value must be exactly EXEC or DYN followed by its description, and the
+            # line must start with `Type:`.
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "NONE (None)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "EXECUTABLE (Executable file)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "DYNAMIC (Shared object file)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "  Type:  ", "  Machine type: Type:  ")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS + "  INTERP  0x0\n"}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace("LOAD", "NOTE")}),
+             "not a loadable statically linked"),
+            # DOWNLOAD is not a LOAD segment, and a dynamic section that NEEDs a library is not static.
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace("LOAD", "DOWNLOAD")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS
+                                 + " 0x0001 (NEEDED)  Shared library: [libc.so.6]\n"}),
+             "not a loadable statically linked"),
+            # The installed copy must be the launcher, byte for byte.
+            (lambda f: f.update({f"{base}/provider-sha256": f"{'d' * 64}  {PROVIDER_BINARY}\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  /tmp/other\n"}),
+             "installed provider executable is not the launcher"),
+            # A well-formed path of another installed object, and a malformed line, are refused.
+            (lambda f: f.update({f"{base}/provider-sha256":
+                                 f"{LAUNCHER_DIGEST}  /var/lib/pigloros/sandbox/providers/{'cd' * 32}\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": "nothing\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": LAUNCHER_DIGEST + "\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  {PROVIDER_BINARY}  x\n"}),
+             "installed provider executable is not the launcher"),
+            # How it stopped: the unit is collected, so the journal carries the Result. One
+            # marker per case, each on a line that would otherwise be a good stop.
+            *[(lambda f, marker=marker: f.update({f"{base}/runtime-log": RUNTIME_LOG + marker + "\n"}),
+               "Result=success")
+              for marker in ("systemd[1]: piglor-sandbox-runtime.service: Failed with result 'exit-code'.",
+                             "systemd[1]: piglor-sandbox-runtime.service: Main process exited, killed with SIGKILL",
+                             "systemd[1]: piglor-sandbox-runtime.service: Stopping timed out. Terminating.",
+                             "systemd[1]: piglor-sandbox-runtime.service: Killing process 412 (pos-sandboxd)")],
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace("Deactivated successfully.", "Stopped.")}),
+             "no Stopping and Deactivated"),
+            # Only PID 1's line counts: not the daemon's own, not another unit's, not a stale one.
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                f"{HOST} systemd[1]: piglor-sandbox-runtime.service:",
+                f"{HOST} piglor-sandbox-runtime[412]: Deactivated successfully.\n[ 0.0] x y:")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "piglor-sandbox-runtime.service: Deactivated", "other.service: Deactivated")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": DEACTIVATED + RUNTIME_LOG.replace(DEACTIVATED, "")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(STOPPING, "")}),
+             "no Stopping and Deactivated"),
+            # Each anchor of RUNTIME_STOPPED, one case per mutant: the Stopping line must start a
+            # journal line (the leading ^); the Deactivated line must start one (text before its
+            # `[` on the same line, such as a daemon writing a copy, does not count) and end its
+            # line (the trailing $); and both lines are PID 1's, so `systemd[1]` is exact.
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                DEACTIVATED, "daemon wrote: " + DEACTIVATED)}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "systemd[1]: Stopping", "systemd[412]: Stopping")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "systemd[1]: piglor-sandbox-runtime.service: Deactivated",
+                "systemd[412]: piglor-sandbox-runtime.service: Deactivated")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "Deactivated successfully.\n", "Deactivated successfully. (copied)\n")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                STOPPING, "x " + STOPPING)}),
+             "no Stopping and Deactivated"),
+            # Socket and directory modes (R11 5.2 O9).
+            (lambda f: f.update({f"{base}/runtime-tree": RUNTIME_TREE.replace("provider-execute.sock\ts\t600", "provider-execute.sock\ts\t777")}),
+             "provider-execute.sock has mode 777"),
+            (lambda f: f.update({f"{base}/runtime-tree": RUNTIME_TREE.replace("sandbox/staging\td\t700", "sandbox/staging\td\t755")}),
+             "directories .*staging.* are not mode 700"),
+            (lambda f: f.update({f"{base}/runtime-tree": "\td\t700\nprovider-execute.sock\ts\t600\n"}),
+             "no socket at /run/pigloros/provider-control.sock"),
+            (lambda f: f.update({f"{base}/runtime-tree": "provider-execute.sock\tf\t600\n"
+                                                         "provider-control.sock\ts\t600\n"}),
+             "no socket at /run/pigloros/provider-execute.sock"),
+            # ExecStart: the path clause must be the binary as well as argv[0].
+            (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
+                f"path={PROVIDER_BINARY} ;", "path=/nix/store/x-other ;"))}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(MainPID="0")}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
+                "ignore_errors=no", "ignore_errors=yes"))}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(
+                ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"] + " { path=/bin/true ; argv[]=/bin/true ; "
+                                                               "ignore_errors=no ; }")}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
+                " provider-runtime ;", " recovery-peer ;"))}), "does not run"),
+            (lambda f: f.update({properties: RUNTIME_PROPERTIES + "Id=again\n"}), "malformed"),
+            # Properties R11 5.2 does not allow, or an environment of any kind.
+            *[(lambda f, key=key: f.update({properties: RUNTIME_PROPERTIES + f"{key}=something\n"}), key)
+              for key in checker.EMPTY_UNIT_PROPERTIES],
+            # The credential lists are read over the bus: all five must be there and empty.
+            *[(lambda f, key=key: f.update({f"{base}/runtime-credentials": runtime_credentials(
+                **{key: [["name", [1, 2, 3]]]})}), f"has credentials: \\['{key}'\\]")
+              for key in checker.CREDENTIAL_PROPERTIES],
+            (lambda f: f.update({f"{base}/runtime-credentials": ""}), "credential properties are \\[\\]"),
+            (lambda f: f.update({f"{base}/runtime-credentials":
+                                 "".join(RUNTIME_CREDENTIALS.splitlines(True)[1:])}),
+             "credential properties are"),
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS + RUNTIME_CREDENTIALS.splitlines(True)[0]}),
+             "credential line is malformed"),
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS + "Other\t{\"data\":[]}\n"}),
+             "credential properties are"),
+            (lambda f: f.update({f"{base}/runtime-credentials": "SetCredential\t[unprintable]\n"}),
+             "credential line is malformed"),
+            (lambda f: f.update({f"{base}/runtime-credentials": "SetCredential no tab\n"}),
+             "credential line is malformed"),
+            # A busctl that failed leaves the name and a tab and no JSON: refused, naming the line.
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                'LoadCredential\t{"type":"a(ss)","data":[]}', "LoadCredential\t", 1)}),
+             r"credential line is malformed or of the wrong type: 'LoadCredential\\t'"),
+            # Each property carries its own D-Bus type.
+            *[(lambda f, key=key, kind=kind, wrong=wrong: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                f'{key}\t{{"type":"{kind}"', f'{key}\t{{"type":"{wrong}"', 1)}), "wrong type")
+              for key, kind in checker.CREDENTIAL_PROPERTIES.items()
+              for wrong in ("s", "a(sv)", "as" if kind != "as" else "a(say)")],
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                '"type":"a(say)",', "", 1)}),
+             "wrong type"),
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                '"data":[]', '"data":"x"', 1)}),
+             "credential line is malformed"),
+            (lambda f: f.update({properties: runtime_properties(Environment=None)}), "Environment=None"),
+            (lambda f: f.update({properties: runtime_properties(PassEnvironment=None)}), "PassEnvironment=None"),
+        ]
+        # One mutation per required property: a wrong value for each row of the table.
+        wrong = {"Id": "other.service", "ActiveState": "failed", "SubState": "dead", "Type": "exec",
+                 "NotifyAccess": "all", "ExitType": "cgroup", "KillMode": "process", "Restart": "always",
+                 "CollectMode": "inactive", "UMask": "0022", "StandardInput": "tty",
+                 "TimeoutStartUSec": "infinity", "RuntimeMaxUSec": "5s", "Environment": "SECRET=1",
+                 "PassEnvironment": "HOME"}
+        for key, value in wrong.items():
+            changes.append((lambda f, key=key, value=value: f.update({properties: runtime_properties(**{key: value})}),
+                            f"{key}={value!r}"))
+        for change, message in changes:
+            with self.subTest(change=change, message=message), self.assertRaisesRegex(checker.EvidenceError, message):
+                self.verdict(change=change)
+
+    def test_the_runtime_may_start_at_one_or_more(self):
+        base = "guest/daemon/start"
+        for value in ("1\n", "2\n"):
+            with self.subTest(value=value):
+                self.verdict(change=lambda f, v=value: f.update({f"{base}/fb-tunnels-sysctl": v}))
+
+    def test_a_static_executable_or_a_static_pie_is_a_launcher(self):
+        base = "guest/daemon/start"
+        for kind in ("EXEC (Executable file)", "DYN (Position-Independent Executable file)",
+                     "DYN (Shared object file)"):
+            headers = LAUNCHER_HEADERS.replace("EXEC (Executable file)", kind)
+            with self.subTest(kind=kind):
+                self.verdict(change=lambda f, h=headers: f.update({f"{base}/launcher-program-headers": h}))
+
+    def test_only_the_interp_segment_type_makes_the_launcher_dynamic(self):
+        base = "guest/daemon/start"
+        # A word that merely contains INTERP is not the program interpreter segment.
+        accepted = LAUNCHER_HEADERS + "  NOTE           0x0 NOTINTERP INTERPOSED-COMMENT\n"
+        self.verdict(change=lambda f: f.update({f"{base}/launcher-program-headers": accepted}))
+        with self.assertRaisesRegex(checker.EvidenceError, "not a loadable statically linked"):
+            self.verdict(change=lambda f: f.update(
+                {f"{base}/launcher-program-headers": LAUNCHER_HEADERS + "  INTERP         0x0\n"}))
 
     def test_a_failed_probe_explains_itself(self):
         """The first QEMU run failed with no probe files: the error must carry the unit's stderr."""
@@ -1569,7 +1877,8 @@ class EvidenceTests(unittest.TestCase):
             (lambda f: f.update({f"{base}/extra": ""}), "does not hold exactly"),
             (lambda f: f.pop(f"{base}/fb-1/routes6"), "completed but wrote only"),
             (lambda f: f.update({f"{base}/boot-sysctl": "x\n"}), "does not boot"),
-            (lambda f: f.update({f"{base}/boot-sysctl": "1\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "0\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "2\n"}), "does not boot"),
             (lambda f: f.update({f"{base}/boot-sysctl": "7\n"}), "does not boot"),
             # The modules, and the control: value 0 must show the host's fallback devices.
             (lambda f: f.update({f"{base}/modules": ""}), "tunnel modules are not loaded"),

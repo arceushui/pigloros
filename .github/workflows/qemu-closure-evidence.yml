@@ -12,6 +12,8 @@ on:
     paths:
       - .github/workflows/qemu-closure-evidence.yml
       - deploy/nixos/**
+      # The production sysctl drop-in the guest installs (ADR-069 R14 N12).
+      - deploy/sysctl.d/**
       # The guest's part (b) driver and the crates it compiles.
       - Cargo.lock
       - Cargo.toml
