@@ -62,12 +62,13 @@ const CONTROL: [u8; 16] = [0xc0; 16];
 const NOW: u64 = 500;
 const ISSUED: u64 = 100;
 const EXPIRES: u64 = 30_000_100;
-const ALL_ACTIONS: [&str; 5] = [
+const ALL_ACTIONS: [&str; 6] = [
     "community.initialize.v1",
     "community.transition.v1",
     "community.fork.v1",
     "community.retire.v1",
     "community.quarantine.reset.v1",
+    "community.pass.abort.v1",
 ];
 
 const fn hash(value: u8) -> Hash {
@@ -217,8 +218,22 @@ fn reset() -> Operation {
     }
 }
 
-fn operations() -> [Operation; 5] {
-    [initialize(), transition(), fork(), retire(), reset()]
+fn pass_abort() -> Operation {
+    Operation::PassAbort {
+        timeline: target(),
+        reservation_operation_id: CONTROL,
+    }
+}
+
+fn operations() -> [Operation; 6] {
+    [
+        initialize(),
+        transition(),
+        fork(),
+        retire(),
+        reset(),
+        pass_abort(),
+    ]
 }
 
 /// The grant scope a test issues.
@@ -501,6 +516,7 @@ fn derivation_follows_the_closed_action_table() -> TestResult {
         ),
         (retire(), Action::Retire, target(), 'c', CONTROL),
         (reset(), Action::QuarantineReset, target(), 'c', CONTROL),
+        (pass_abort(), Action::PassAbort, target(), 'r', CONTROL),
     ] {
         let request = Request::derive(&operation)?;
         assert_eq!(request.action(), action);
@@ -520,6 +536,7 @@ fn derivation_follows_the_closed_action_table() -> TestResult {
         Action::Fork,
         Action::Retire,
         Action::QuarantineReset,
+        Action::PassAbort,
     ]
     .map(Action::as_str);
     assert_eq!(actions, ALL_ACTIONS);
@@ -609,6 +626,14 @@ fn derivation_refuses_every_shape_outside_the_table() {
         Operation::QuarantineReset {
             timeline: target(),
             control_operation_id: [0; 16],
+        },
+        Operation::PassAbort {
+            timeline: zero,
+            reservation_operation_id: CONTROL,
+        },
+        Operation::PassAbort {
+            timeline: target(),
+            reservation_operation_id: [0; 16],
         },
     ] {
         assert_eq!(Request::derive(&invalid), Err(Error::InvalidBinding));
@@ -969,7 +994,7 @@ fn credential_validity_holds_from_issue_until_expiry() -> TestResult {
     Ok(())
 }
 
-/// I2: in the 5×5 administrative grant/operation matrix only the diagonal is
+/// I2: in the 6×6 administrative grant/operation matrix only the diagonal is
 /// admitted, and the same chain loaded fresh decides every call (I6 basis).
 #[test]
 fn only_the_diagonal_of_the_administrative_matrix_is_admitted() -> TestResult {
