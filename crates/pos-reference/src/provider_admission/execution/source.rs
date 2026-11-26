@@ -3044,26 +3044,6 @@ mod tests {
         Ok(())
     }
 
-    /// The authority of a grant fixture: thirteen distinct filler digests.
-    fn filler_authority() -> AdmissionAuthority {
-        let digest = |label: u8| [label; 32];
-        AdmissionAuthority {
-            evr1_digest: digest(1),
-            fixture_contract_digest: digest(2),
-            fixture_digest: digest(3),
-            execution_profile_digest: digest(4),
-            lps1_digest: digest(5),
-            sim1_digest: digest(6),
-            apt1_digest: digest(7),
-            trs1_digest: digest(8),
-            rvs1_digest: digest(9),
-            spm1_digest: digest(10),
-            pcf1_digest: digest(11),
-            pcr1_digest: digest(12),
-            hcp1_digest: digest(13),
-        }
-    }
-
     /// An issued grant answers its Local admission with exactly the one it was
     /// given, and with none otherwise (ADR-069 R14 §3.5).
     #[test]
@@ -3075,7 +3055,7 @@ mod tests {
         assert_eq!(grant.local_network(), None);
         let admission = LocalNetworkAdmission::fixture(
             [2; 16],
-            filler_authority(),
+            AdmissionAuthority::fixture(),
             [1, 2, 3],
             Vec::new(),
             NetworkProxyLimits {
