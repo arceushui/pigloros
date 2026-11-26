@@ -117,10 +117,12 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a
   Crockford base32 ULID), in lower-case hex. The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
   hashes of the ADR-041 amendment of #303; `plugin_composition_hash` depends on the host's bundled
-  Plugins and cannot be recomputed by a client.
+  Plugins and cannot be recomputed by a client. This `provenance.digest` is what
+  `createDecisionPreview` binds as `scenario_room.digest`.
 - `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
-  its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Until #461
-  installs an EPF1, every Gateway resource reports `unavailable`.
+  its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Every
+  Gateway resource reports `unavailable`, except a Decision Preview, which reports the EPF1 it was
+  admitted under. In production no preview can be admitted until #1364 or #461 installs an EPF1.
 - A request body is `application/json` (`content-type: application/json`; any other type is
   `415 invalid-request`).
 - A success body is `application/json`; every failure, including unknown paths (`404`), unserved
@@ -176,6 +178,90 @@ Principal's grant must cover, and the operations need the grants `preference.cre
   deterministic CBOR array `[origin, principal_id, subject_entity_id, mode_profile_id,
   mode_profile_digest, binding_epoch, digest]`: text, ULIDs and lower-case hex digests, and an
   unsigned `binding_epoch`. The golden examples carry recomputed values.
+
+## Decision Previews
+
+`POST /v1/decision-previews` (`createDecisionPreview`) and
+`GET /v1/decision-previews/{preview_id}` (`getDecisionPreview`) are served (#305, ADR-140), each
+under its own grant: `decision-preview.create` (resource `decision-preview`) and
+`decision-preview.read` (resource `decision-preview.status`). A preview is the
+`pigloros.match-score.v1` Recommendation of the acting entity's own Preference and OptionSpec
+revisions, bound to one exact Scenario Room revision and one installed EPF1. Every proposal is
+inert, and nothing reaches the real world.
+
+- **Admission order.** A malformed body, a missing or malformed `Idempotency-Key`, a malformed
+  ULID, a `schema_version` that is any number other than the integer 1 (`400
+  unsupported-version`; one that is no number is `400 invalid-request`), an oversized body (`413`)
+  and another content type (`415`) are answered before the authority decision. After the
+  decision the Principal takes one of four in-flight slots (`principal_concurrent_operations`);
+  a fifth concurrent request, an exact retry included, is a retryable `429` without
+  `Retry-After`. The claim of the key is then looked up: the same key with another request is
+  `409 idempotency-conflict`. A fresh request passes, in order, the profile gate (a `profile_id`
+  outside the bound mode's servable set of rule 3, or without an installed EPF1, is
+  `409 incompatible-profile`; until #1364 and #461 install one, every fresh request stops here),
+  the room (the revision must exist and its `provenance.digest` must be `scenario_room.digest`),
+  the bindings (the Preference and the OptionSpec must be the acting entity's, unerased, with the
+  named digests, and the acting entity a `persona` participant of the room) and the room's
+  consent. Every room and binding refusal is the same `404 not-found-or-unavailable`, also
+  towards the subject of an erased revision. The consent check comes after them, so a `403`
+  reveals no more than a `202` would.
+- **Commit.** One store command re-runs the claim lookup and the room and binding checks,
+  applies the per-minute quota (`principal_admissions_per_minute`: the 33rd new claim of a
+  Principal in a fixed one-minute window is a retryable `429` with `Retry-After` until the window
+  closes; exact retries and refused requests are not counted) and the store ceiling, then
+  appends a `preview.request.v1` claim and its `preview.result.v1` result to the host-owned
+  `decision-previews` Timeline. The preview ID is the claim Event's ID. With the single Local
+  Principal both quotas are in effect host-wide.
+- **Idempotency.** An exact retry (the same key and request) re-checks the room's consent (a
+  revoked one is `403 revoked`, recorded as a denial, and nothing is appended), finishes an
+  attempt the host interrupted between its two appends, and answers the original `202` receipt
+  bytes, also after a restart. "The same bytes" holds whenever a retry is answered `202`; a retry
+  can still be refused by the authority, the consent, a bound or an unavailable host. When the
+  result append fails after the claim committed, the claim stays: a host that cannot answer
+  (erasure containment unavailable, a stale execution-mode binding) is a retryable
+  `503 temporarily-unavailable`, and any other store failure is `500 internal-safe-failure`;
+  either way an exact retry with the same key finishes the preview.
+- **Receipt.** `request_id` and `operation_id` are both the preview ID, `operation_url` is
+  `/v1/decision-previews/{preview_id}`, `idempotency_key_digest` is BLAKE3 of the key bytes, and
+  `bound_inputs` is exactly `scenario_room`, `preference`, `option_spec` (the request's
+  digests), `execution_profile` (the raw EPF1 digest) and `mode_profile` (the GMP1 digest of the
+  binding the claim committed under).
+- **Timeline.** `decision-previews` is a host Timeline: its identity is derived, it is opened by
+  the first admission, and every client route answers for it exactly as for an unknown Timeline;
+  it does not count against the root-Timeline ceiling. Each preview uses two Events, so a store
+  holds at most `decision_previews_per_store` (5,000) previews; a fresh request beyond that is a
+  permanent `429 resource-limit-exceeded` (`retryable: false`). The first preview of a store with
+  an active erasure request on a Gateway without a Local erasure composition is a non-retryable
+  `503`.
+- **Read.** A preview is answered only to the Principal and actor that admitted it; any other
+  caller and an unknown ID get the same `404`. The room's consent is re-checked on every read.
+  `state` is `admitted` (no result yet, `generation` 1), `committed`, `failed` or `degraded`
+  (`generation` 2). `committed` names the `preview.result.v1` Event (its `next_cursor` is null:
+  no client reads the Timeline); `failure.code` is `input-deleted` when an input was erased
+  before an interrupted attempt was finished. `uncertainty` is `unavailable` and `calibration`
+  is `unavailable` with reason `no-resolved-predictions`: no result claims calibration.
+- **Degradation.** The result Event records no score, winner or margin, so a read recomputes the
+  Recommendation from the bound revisions. Once a Preference or OptionSpec revision of a
+  computed preview is erased, the preview is `degraded`: `recommendation` is
+  `{"status": "withheld"}` and `availability` withholds `/recommendation` with reason `deleted`
+  (state `partial`); `committed` and the input refs stay. A `failed` preview stays `failed` and
+  `available`. Degradation writes no Event, so `generation` does not change.
+- **Match Score.** An OptionSpec tag matches a Preference dimension when the two are
+  byte-identical. An option with `n` matched tags whose weights sum to `S` scores 0 when `n` is
+  0, else `sign(S) * floor((2|S| + n) / (2n))` micro-units (the mean, rounded half away from
+  zero); unmatched tags do not dilute it, and `lean_hint_micro` and `coordinates` are not used.
+  When no option matches, the Recommendation is `insufficient-evidence`. Otherwise `scores` lists
+  every option in authored order, `margin_micro` is the largest score minus the second-largest,
+  `toss_up` is `margin_micro < 20000`, and `option_key` is the unique best option, or null for a
+  Toss-up. The function is frozen: any change to an output is a new function ID.
+- **Provenance.** `provenance.digest` (`host-derived`) is BLAKE3 of
+  `PiglorOS.GatewayDecisionPreviewProvenance.v1`, a 0x00 byte and the deterministic CBOR array
+  `["host-derived", principal_id, actor_entity_id, preview_id, claim_payload_digest,
+  result_payload_digest | null, mode_profile_id, mode_profile_digest, binding_epoch]`: IDs as
+  ULID text, digests as lower-case hex and the epoch as an unsigned integer. The payload digests
+  are BLAKE3 of the claim and result Event payloads, so the digest changes once, when the result
+  commits. `mode_profile` is the binding the claim's commit recorded. The golden examples carry
+  recomputed values.
 
 ## Erasure
 
@@ -242,7 +328,8 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
 The rules below are normative for the Gateway and for every supported client of v1 (ADR-136
 follow-up F2, #1407). A *managed representation* is any response body of a protected loopback
 operation: a Timeline's Events, a Session, a consent, a Scenario Room, Preference or OptionSpec
-revision, an erasure receipt or projection, and every problem.
+revision, a Decision Preview or its admission receipt, an erasure receipt or projection, and every
+problem.
 
 1. **The Gateway marks every answer `no-store`.** Every response of every operation, problems
    included, carries `Cache-Control: no-store` (the required `CacheControl` response header of
@@ -267,9 +354,9 @@ revision, an erasure receipt or projection, and every problem.
    never strengthens).
 4. **Withheld members.** A representation that mixes erased and kept members reports each
    erased member in `availability.withheld` as `{member, reason: "deleted"}`, with
-   `availability.state` `partial`, or `unavailable` when nothing is left to show. No served
-   representation mixes them today: every erased resource is wholly refused as in rule 3, so a
-   served `availability` withholds nothing.
+   `availability.state` `partial`, or `unavailable` when nothing is left to show. A `degraded`
+   Decision Preview withholds `/recommendation` with reason `deleted` and state `partial`; every
+   other erased resource is wholly refused as in rule 3, so its `availability` withholds nothing.
 5. **`Clear-Site-Data` is not sent.** The `Clear-Site-Data` response header (W3C) is a browser
    mechanism and only a precedent for rule 3: the Gateway never sends it, and a client must not
    wait for it.
@@ -318,8 +405,8 @@ a denial is `503 temporarily-unavailable` instead.
 
 A mutation that is retry-safe carries an `Idempotency-Key` header of 1 to 128 visible ASCII
 characters (schema `idempotency-key`); every Draft mutation requires one, and of the served
-routes `POST /v1/timelines/{timeline_id}/actions`, `POST /v1/me/consent-revocations` and
-`POST /v1/me/erasures` do. A
+routes `POST /v1/timelines/{timeline_id}/actions`, `POST /v1/me/consent-revocations`,
+`POST /v1/me/erasures` and `POST /v1/decision-previews` do. A
 consent revocation is monotonic: revoking a revoked consent returns its original revocation
 (`200`) whatever its key, and the revocation Event records the key (with the Principal and the
 acting entity), so reusing it for another consent is `409 idempotency-conflict`, also after a
@@ -375,7 +462,8 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    | `live-local-v1` | 409 | 409 always (not servable) | Local: #461 |
    | `live-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #461 installs its EPF1 |
 
-   The positive Draft examples that bind a profile show the answer once that profile is served.
+   The positive examples that bind a profile, including the served Decision Preview examples,
+   show the answer once its EPF1 is installed.
 4. **Unknown members are handled as each schema declares.** An open request object (no
    `additionalProperties: false`) ignores unknown members; a closed one rejects them. A
    schema-less value such as `EventView.payload` is preserved verbatim. Response schemas are
@@ -414,7 +502,7 @@ contract. `servers` and `info.version` are not frozen: a client must not hard-co
 URL, and the description's revision label is not part of the wire contract. The golden examples
 `unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
 `unsupported-version-legacy-event-type`, `scenario-room-unsupported-schema-version`,
-`draft-decision-preview-incompatible-profile`, `draft-decision-preview-profile-not-installed`,
+`decision-preview-incompatible-profile`, `decision-preview-profile-not-installed`,
 `draft-replay-incompatible-profile`, `preference-unsupported-schema-version` and
 `compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
 

@@ -33,8 +33,8 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   `consent.revoke` and binds one consent, provisioned through the production `provision_on_host`
   path, that governs Timeline creation; an exchange that captures `consent` fills the `{consent}`
   slot of later request bodies with the first `consent_ref` its Session lists. The
-  `authorized-rooms` composition (#303) may create, derive and read Scenario Rooms and revoke its
-  consent, records the
+  `authorized-rooms` composition (#303) may create, derive and read Scenario Rooms, create and
+  read Decision Previews (#305) and revoke its consent, records the
   fixture governance record and binds one export-permitted consent; an exchange that captures
   `room` fills the `{room}` slot of later paths with the room `id`.
 - The `authorized-erasure` compositions (#1449) grant only `erasure.request` and

@@ -274,6 +274,22 @@ impl GatewayOperationV1 {
     /// `POST /v1/me/consent-revocations`: revoke one of the Principal's own
     /// consents (#309).
     pub const REVOKE_CONSENT: Self = Self::new("consent.revoke", "consent", "revoke", "operation");
+    /// `POST /v1/decision-previews`: admit one Decision Preview (ADR-140, #305).
+    pub const CREATE_DECISION_PREVIEW: Self = Self::new(
+        "decision-preview.create",
+        "decision-preview",
+        "create",
+        "operation",
+    );
+    /// `GET /v1/decision-previews/{preview_id}`: observe one Decision Preview
+    /// (ADR-140, #305). Its own resource, so a grant of either preview
+    /// operation never authorizes the other.
+    pub const READ_DECISION_PREVIEW: Self = Self::new(
+        "decision-preview.read",
+        "decision-preview.status",
+        "read",
+        "read",
+    );
     /// `POST /v1/me/erasures`: request the erasure of the acting
     /// subject's own data (ADR-136 §3, #1449).
     pub const REQUEST_ERASURE: Self =
@@ -351,6 +367,8 @@ impl GatewayOperationV1 {
     /// name order.
     pub const ALL: &[Self] = &[
         Self::REVOKE_CONSENT,
+        Self::CREATE_DECISION_PREVIEW,
+        Self::READ_DECISION_PREVIEW,
         Self::READ_ERASURE,
         Self::REQUEST_ERASURE,
         Self::NETWORK,

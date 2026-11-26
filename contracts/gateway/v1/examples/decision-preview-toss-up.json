@@ -1,0 +1,95 @@
+{
+  "name": "decision-preview-toss-up",
+  "operation_id": "getDecisionPreview",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0004"
+    },
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:decision-preview",
+      "id": "01JC0GATEWAYW90PREV1EW0004",
+      "generation": 2,
+      "provenance": {
+        "digest": "8d27bdfa1d1b317939fae4517ff7908a3da2f3620616f96c2e965706e15ccb0f",
+        "origin": "host-derived"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "installed",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "state": "committed",
+      "inputs": {
+        "scenario_room": {
+          "id": "01JC0GATEWAYW9R00M00000001",
+          "revision": 2,
+          "digest": "fd6e6cb67f418f827eed51918ee73b195a95d0e478a85da75eb99db0145288ab"
+        },
+        "preference": {
+          "id": "01JC0GATEWAYW9PREF0000003A",
+          "revision": 1,
+          "digest": "46bb5a8324cb60951f5a60b22bfcc89ba229a65bb32a3b468cb9742dfb579ea2"
+        },
+        "option_spec": {
+          "id": "01JC0GATEWAYW9QPT10N00003A",
+          "revision": 1,
+          "digest": "5427632415a392aac902f0e5e7de712a10c80d6609942acff13a335b6cde143f"
+        }
+      },
+      "factual_timeline_id": null,
+      "recommendation": {
+        "status": "computed",
+        "option_key": null,
+        "toss_up": true,
+        "margin_micro": 0,
+        "scores": [
+          {
+            "option_key": "coast",
+            "match_score_micro": 400000
+          },
+          {
+            "option_key": "lake",
+            "match_score_micro": 400000
+          }
+        ]
+      },
+      "committed": {
+        "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "timeline_id": "4SKQW3XVN6B14SKZ8NNKJCHJ6G",
+        "event_id": "01JC0GATEWAYW90RES00000004",
+        "seq": 2,
+        "event_schema_id": "preview.result.v1",
+        "next_cursor": null
+      },
+      "failure": null,
+      "uncertainty": {
+        "status": "unavailable"
+      },
+      "calibration": {
+        "status": "unavailable",
+        "reason": "no-resolved-predictions"
+      },
+      "proposals": "inert",
+      "actuation": "none"
+    }
+  }
+}

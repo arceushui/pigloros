@@ -209,7 +209,9 @@ pub(crate) fn canonical_entity(text: &str) -> Option<EntityId> {
         .map(EntityId::from_ulid)
 }
 
-fn seed(text: &str) -> Option<[u8; 32]> {
+/// The 32 bytes of 64 lower-case hex digits, such as a scheduler seed or a
+/// digest; any other text is `None`.
+pub(crate) fn digest_bytes(text: &str) -> Option<[u8; 32]> {
     let mut out = [0; 32];
     let decoded = text.len() == 64
         && text
@@ -255,7 +257,7 @@ impl WireInputV1 {
             .collect::<Option<Vec<_>>>();
         let refs =
             canonical_entity(&self.governance_ref).zip(canonical_entity(&self.privacy_export_ref));
-        seed(&self.scheduler_seed)
+        digest_bytes(&self.scheduler_seed)
             .zip(refs)
             .zip(participants.zip(initial_conditions))
             .map(
