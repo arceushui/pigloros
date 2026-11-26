@@ -9,7 +9,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -26,9 +26,9 @@ const NETWORK_WAIT: Duration = Duration::from_millis(300);
 /// The highest process ID the foreign-signal probe tries.
 pub const LAST_PROBED_PID: u32 = 4096;
 /// A documentation address (RFC 5737) nothing may answer at.
-const UNDECLARED_TCP: &str = "192.0.2.1:9";
+const UNDECLARED_TCP: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 9);
 /// The loopback stub resolver address.
-const STUB_RESOLVER: &str = "127.0.0.53:53";
+const STUB_RESOLVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 53)), 53);
 /// The system bus socket.
 const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
 
@@ -116,20 +116,17 @@ pub fn connect_unix(path: &Path) -> Attempt {
     UnixStream::connect(path).map(drop)
 }
 
-/// Send one datagram to `address` and wait for any reply.
+/// Send one datagram to `address` from an IPv4 socket and wait for any reply.
+///
+/// An IPv6 address cannot be reached from that socket, which is also a denial.
 ///
 /// # Errors
 /// Fails when the operation is denied, which is the expected answer.
 pub fn udp_exchange(address: &SocketAddr) -> Attempt {
-    let bind: SocketAddr = if address.is_ipv4() {
-        ([0, 0, 0, 0], 0).into()
-    } else {
-        ([0_u16; 8], 0).into()
-    };
-    let socket = UdpSocket::bind(bind)?;
-    socket.set_read_timeout(Some(NETWORK_WAIT))?;
-    socket.send_to(b"probe", address)?;
-    socket.recv_from(&mut [0_u8; 16]).map(drop)
+    UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .and_then(|socket| socket.set_read_timeout(Some(NETWORK_WAIT)).map(|()| socket))
+        .and_then(|socket| socket.send_to(b"probe", address).map(|_| socket))
+        .and_then(|socket| socket.recv_from(&mut [0_u8; 16]).map(drop))
 }
 
 /// Whether a process other than this one can be signalled with signal 0.
@@ -172,16 +169,11 @@ pub fn read_only_root_write(root: &Path) -> Vec<Attempt> {
 /// The attempts of the network-escape fixture.
 #[must_use]
 pub fn network_escape() -> Vec<Attempt> {
-    let tcp: Result<SocketAddr, _> = UNDECLARED_TCP.parse();
-    let resolver: Result<SocketAddr, _> = STUB_RESOLVER.parse();
-    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
     vec![
         create_socket(AddressFamily::INET, SocketType::RAW),
         create_socket(AddressFamily::PACKET, SocketType::RAW),
-        tcp.map_err(|_| invalid()).and_then(|a| connect_tcp(&a)),
-        resolver
-            .map_err(|_| invalid())
-            .and_then(|a| udp_exchange(&a)),
+        connect_tcp(&UNDECLARED_TCP),
+        udp_exchange(&STUB_RESOLVER),
         connect_unix(Path::new(SYSTEM_BUS)),
     ]
 }

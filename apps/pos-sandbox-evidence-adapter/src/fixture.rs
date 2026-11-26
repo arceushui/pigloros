@@ -228,13 +228,13 @@ pub fn fill_work_area(area: &Path, bytes: u64) {
 /// Keep `tasks` threads alive together for [`TASK_LIFETIME`]; stop starting
 /// more at the first refusal.
 pub fn exhaust_tasks(tasks: u64) {
-    let mut started = Vec::new();
-    for _ in 0..tasks {
-        match std::thread::Builder::new().spawn(|| std::thread::sleep(TASK_LIFETIME)) {
-            Ok(handle) => started.push(handle),
-            Err(_) => break,
-        }
-    }
+    let started: Vec<_> = (0..tasks)
+        .map_while(|_| {
+            std::thread::Builder::new()
+                .spawn(|| std::thread::sleep(TASK_LIFETIME))
+                .ok()
+        })
+        .collect();
     for handle in started {
         drop(handle.join());
     }

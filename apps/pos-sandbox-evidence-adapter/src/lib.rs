@@ -22,7 +22,7 @@
 pub mod fixture;
 pub mod probe;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
@@ -79,13 +79,20 @@ impl Mode {
     /// The mode the arguments select: `<mode-id>` or `<mode-id> <bound>`,
     /// the bound a nonzero decimal exactly for the fixtures that take one.
     fn parse(arguments: &[OsString]) -> Option<Self> {
-        let (name, bound) = match arguments {
-            [name] => (name, None),
-            [name, bound] => (name, Some(bound.to_str()?.parse::<u64>().ok()?)),
-            _ => return None,
-        };
-        let (_, mode) = MODES.iter().find(|(row, _)| name.to_str() == Some(*row))?;
-        match (mode, bound) {
+        split_arguments(arguments).and_then(|(name, bound)| Self::select(name, bound))
+    }
+
+    /// The table row `name` names, with the parsed `bound` where it takes one.
+    fn select(name: &OsStr, bound: Option<u64>) -> Option<Self> {
+        MODES
+            .iter()
+            .find(|(row, _)| name.to_str() == Some(*row))
+            .and_then(|(_, mode)| mode.with_bound(bound))
+    }
+
+    /// This mode with the argument-vector bound: the honest mode takes none.
+    fn with_bound(self, bound: Option<u64>) -> Option<Self> {
+        match (self, bound) {
             (Self::Honest, None) => Some(Self::Honest),
             (Self::Fixture(fixture), _) => fixture.with_bound(bound).map(Self::Fixture),
             (Self::Honest, Some(_)) => None,
@@ -93,37 +100,47 @@ impl Mode {
     }
 }
 
-/// Why the adapter wrote no observation.
+/// The mode id and the optional bound of an argument vector of one or two
+/// arguments. The bound must be UTF-8 decimal digits that fit a `u64`.
+fn split_arguments(arguments: &[OsString]) -> Option<(&OsStr, Option<u64>)> {
+    match arguments {
+        [name] => Some((name.as_os_str(), None)),
+        [name, bound] => parse_bound(bound).map(|bound| (name.as_os_str(), Some(bound))),
+        _ => None,
+    }
+}
+
+fn parse_bound(bound: &OsStr) -> Option<u64> {
+    bound.to_str().and_then(|text| text.parse().ok())
+}
+
+/// Why the adapter wrote no observation. The discriminant is the process exit
+/// code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[repr(u8)]
 pub enum AdapterRunError {
     /// The arguments are not exactly one known mode.
     #[error("usage: pos-sandbox-evidence-adapter MODE [BOUND]")]
-    Usage,
+    Usage = 64,
     /// The EAI1 attempt stream does not decode.
     #[error("the EAI1 attempt stream is invalid")]
-    Wire,
+    Wire = 2,
     /// The EAO1 stream could not be written.
     #[error("the EAO1 observation stream could not be written")]
-    Output,
+    Output = 4,
     /// A probe fixture's forbidden operation succeeded.
     #[error("a forbidden operation was not denied")]
-    Escaped,
+    Escaped = 3,
     /// The crash fixture ended the run.
     #[error("the adapter crashed on purpose")]
-    Crashed,
+    Crashed = 70,
 }
 
 impl AdapterRunError {
     /// The process exit code of the failure.
     #[must_use]
     pub const fn code(self) -> u8 {
-        match self {
-            Self::Usage => 64,
-            Self::Wire => 2,
-            Self::Output => 4,
-            Self::Escaped => 3,
-            Self::Crashed => 70,
-        }
+        self as u8
     }
 }
 
@@ -148,27 +165,54 @@ pub fn run(
     mut writer: impl Write,
 ) -> Result<(), AdapterRunError> {
     let arguments: Vec<OsString> = arguments.into_iter().collect();
-    let mode = Mode::parse(&arguments).ok_or(AdapterRunError::Usage)?;
-    let attempt = read_attempt(reader).or(Err(AdapterRunError::Wire))?;
-    let after = match mode {
-        Mode::Honest => After::Report,
-        Mode::Fixture(fixture) => apply(fixture, &mut writer)?,
-    };
-    match after {
+    Mode::parse(&arguments)
+        .ok_or(AdapterRunError::Usage)
+        .and_then(|mode| {
+            read_attempt(reader)
+                .or(Err(AdapterRunError::Wire))
+                .map(|attempt| (mode, attempt))
+        })
+        .and_then(|(mode, attempt)| conclude(mode, &attempt, &mut writer))
+}
+
+/// Apply the mode's effect, then report honestly unless the fixture wrote the
+/// whole of the output itself.
+fn conclude(
+    mode: Mode,
+    attempt: &CaseAttempt,
+    writer: &mut impl Write,
+) -> Result<(), AdapterRunError> {
+    effect(mode, writer).and_then(|after| match after {
         After::Written => Ok(()),
-        After::Report => {
-            // One buffer, one `write_all`: an encoding or validation failure
-            // writes nothing, and a valid stream is never written in pieces by
-            // this function.
-            let mut stream = Vec::new();
-            write_observation(&mut stream, &observe(mode, &attempt))
-                .or(Err(AdapterRunError::Output))?;
+        After::Report => report(mode, attempt, writer),
+    })
+}
+
+/// The mode's effect: none for the honest mode, the fixture's otherwise.
+fn effect(mode: Mode, writer: &mut impl Write) -> Result<After, AdapterRunError> {
+    match mode {
+        Mode::Honest => Ok(After::Report),
+        Mode::Fixture(fixture) => apply(fixture, writer),
+    }
+}
+
+/// Write the observation `mode` reports for `attempt`.
+fn report(
+    mode: Mode,
+    attempt: &CaseAttempt,
+    writer: &mut impl Write,
+) -> Result<(), AdapterRunError> {
+    // One buffer, one `write_all`: an encoding or validation failure writes
+    // nothing, and a valid stream is never written in pieces by this function.
+    let mut stream = Vec::new();
+    write_observation(&mut stream, &observe(mode, attempt))
+        .or(Err(AdapterRunError::Output))
+        .and_then(|()| {
             writer
                 .write_all(&stream)
                 .and_then(|()| writer.flush())
                 .or(Err(AdapterRunError::Output))
-        }
-    }
+        })
 }
 
 /// The observation `mode` reports for `attempt`.

@@ -288,9 +288,17 @@ fn the_mode_arguments_are_one_id_and_an_optional_decimal_bound() -> TestResult {
         assert_eq!(result, Err(AdapterRunError::Usage), "{bad:?}");
         assert!(output.is_empty());
     }
-    let non_utf8 = [OsString::from_vec(vec![0xff, 0xfe])];
+    let non_utf8_name = [OsString::from_vec(vec![0xff, 0xfe])];
     assert_eq!(
-        run(non_utf8, encoded()?.as_slice(), Vec::new()),
+        run(non_utf8_name, encoded()?.as_slice(), Vec::new()),
+        Err(AdapterRunError::Usage)
+    );
+    let non_utf8_bound = [
+        OsString::from("memory-exhaustion"),
+        OsString::from_vec(vec![0xff, 0xfe]),
+    ];
+    assert_eq!(
+        run(non_utf8_bound, encoded()?.as_slice(), Vec::new()),
         Err(AdapterRunError::Usage)
     );
     Ok(())
