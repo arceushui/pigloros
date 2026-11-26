@@ -69,7 +69,8 @@ impl ProviderConformanceCase {
     /// The cases that act on a running attempt (cancel, revoke, broker crash)
     /// run the idle mode for twice the watchdog. The watchdog therefore fires
     /// first: the case's act must land within it, or the attempt ends with the
-    /// watchdog's terminal code (6) and the case fails.
+    /// watchdog's terminal code (6, `Watchdog` in the closed SAU1 event order of
+    /// ADR-069 section 10) and the case fails.
     #[must_use]
     pub const fn adapter_plan(self) -> AdapterPlan {
         match self {
