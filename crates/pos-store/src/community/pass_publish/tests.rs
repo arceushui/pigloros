@@ -2,19 +2,20 @@
 //! successor CSI1 and the writer compares, over a real initialized domain.
 
 use pos_core::community_lifecycle::{
-    community_prepared_input_set_digest_v1, CommunityArtifactOperationV1,
-    CommunityArtifactPurposeV1, CommunityCopyInventoryV1, CommunityDurableProfileV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityMetadataPolicyV1,
+    community_prepared_input_set_digest_v1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
+    CommunityArtifactPurposeV1, CommunityCopyHolderV1, CommunityCopyInventoryV1,
+    CommunityCopyStateV1, CommunityDurableProfileV1, CommunityLifecycleErrorV1 as Error,
+    CommunityMemberSlotsV1, CommunityMetadataEnvelopeV1, CommunityMetadataPolicyV1,
     CommunityMetadataSchemaV1, CommunityNativeNodeReferenceV1, CommunityPassKeyV1,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityReservationRequestInputV1,
-    CommunityReservationRequestV1, CommunityReservationV1,
+    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityRecordKindsV1,
+    CommunityReservationRequestInputV1, CommunityReservationRequestV1, CommunityReservationV1,
 };
 use pos_core::store::EventStore;
 use pos_core::{AuthorityTrustRootSealV1, Hash};
 use zeroize::Zeroizing;
 
 use super::super::pass_install::{CommunityHorizonPolicyV1, CommunityOwnerHorizonsV1};
-use super::super::pass_record::CommunityPassMemberDigestsV1;
+use super::super::pass_record::{CommunityPassMemberDigestsV1, CommunityPassStatusV1};
 use super::super::pass_state::CommunityRetainedObservationV1;
 use super::super::pass_writer::{
     community_reserve_selection_v1, CommunityObservationCutV1, CommunityReserveInputV1,
@@ -22,6 +23,7 @@ use super::super::pass_writer::{
 };
 use super::super::private_hash::scope_set_digest;
 use super::super::sealer::SealedMetadataV1;
+use super::super::vault::VaultKeyV1;
 use super::{CommunityQuarantineContextV1, CommunityReservePublicationV1, MemoryCommunityDomainV1};
 use crate::community::community_roster_quarantine_keys_v1;
 use crate::community::CommunityDomainBindingV1;
@@ -59,12 +61,30 @@ struct Case<'a> {
     head: Hash,
 }
 
+/// A bootstrapped domain and the CDP1 over `rows` on its catalogue.
+fn bootstrapped<'a>(
+    roster: &Roster,
+    rows: &'a [CommunityProfileMemberV1<'a>],
+) -> Fallible<(Bootstrapped, CommunityDurableProfileV1<'a>)> {
+    let domain = Bootstrapped::new(&SEAL, roster, true, true)?;
+    let profile = profile_until(rows, HORIZON, hash(1), domain.world.catalogue)?;
+    Ok((domain, profile))
+}
+
+/// Initialize [`target`] under `profile`; its committed head.
+fn initialized(
+    domain: &mut Bootstrapped,
+    roster: &Roster,
+    profile: &CommunityDurableProfileV1<'_>,
+) -> Fallible<Hash> {
+    let receipt = initialize_target(&SEAL, domain, roster, profile)??;
+    initial_head(&receipt)
+}
+
 impl<'a> Case<'a> {
     fn new(roster: &Roster, rows: &'a [CommunityProfileMemberV1<'a>]) -> Fallible<Self> {
-        let mut domain = Bootstrapped::new(&SEAL, roster, true, true)?;
-        let profile = profile_until(rows, HORIZON, hash(1), domain.world.catalogue)?;
-        let receipt = initialize_target(&SEAL, &mut domain, roster, &profile)??;
-        let head = initial_head(&receipt)?;
+        let (mut domain, profile) = bootstrapped(roster, rows)?;
+        let head = initialized(&mut domain, roster, &profile)?;
         let policy = CommunityMetadataPolicyV1::new(*domain.policy.as_input())?;
         let mut case = Self {
             domain,
@@ -165,7 +185,6 @@ impl<'a> Case<'a> {
                 metadata_key: METADATA,
                 failure_cohort_key: FAILURE,
                 scope_set_digest: hash(90),
-                scope_cover_digest: hash(91),
             },
         })
     }
@@ -243,6 +262,48 @@ fn snapshot(
     )
 }
 
+/// The two keys' intents: the metadata key has parent CPK1, no slots, the
+/// metadata horizon and the Reserve's metadata `write` request digest; the
+/// failure cohort key has the pass scope set, the due members' slots and the
+/// CRI1's request digest, and also allows kind 8 for its CAR1 proofs.
+fn check_key_intents(
+    vault: &VaultKeyV1,
+    failure: &VaultKeyV1,
+    pass_key: CommunityPassKeyV1,
+    generation: [u8; 16],
+) -> TestResult {
+    let metadata = vault.intent().as_input();
+    assert!(
+        metadata.allowed_record_kinds
+            == CommunityRecordKindsV1::empty().with(CommunityArtifactKindV1::LifecycleControl)
+    );
+    assert!(metadata.parent_operation == CommunityArtifactOperationV1::Pass(pass_key));
+    assert!(metadata.purpose == CommunityArtifactPurposeV1::LifecycleControl);
+    assert!(metadata.member_slots == CommunityMemberSlotsV1::empty());
+    assert_eq!(metadata.scope_set_digest, scope_set_digest(&[0x80]));
+    assert_eq!(metadata.evidence_not_after_micros, HORIZON);
+    assert_eq!(metadata.authority_request_digest, WRITE);
+    assert_eq!(
+        (metadata.timeline, metadata.generation),
+        (target(), generation)
+    );
+
+    let cohort = failure.intent().as_input();
+    assert!(cohort.parent_operation == CommunityArtifactOperationV1::Pass(pass_key));
+    assert!(cohort.purpose == CommunityArtifactPurposeV1::LifecycleControl);
+    assert!(cohort.member_slots == CommunityMemberSlotsV1::new(&[0, 1])?);
+    assert_eq!(cohort.scope_set_digest, hash(90));
+    assert_eq!(cohort.authority_request_digest, AUTHORITY);
+    assert_eq!((cohort.timeline, cohort.generation), (target(), generation));
+    assert!(
+        cohort.allowed_record_kinds
+            == CommunityRecordKindsV1::empty()
+                .with(CommunityArtifactKindV1::LifecycleControl)
+                .with(CommunityArtifactKindV1::ClassificationProof)
+    );
+    Ok(())
+}
+
 /// The Reserve publishes its keys, its CRI1, CPR1 and CCI1s, the successor
 /// CSI1 and its pass state in one commit, and advances the inventory
 /// generation once.
@@ -306,11 +367,32 @@ fn a_reserve_publishes_its_keys_records_selection_and_state() -> TestResult {
         reservation.to_canonical_cbor().as_slice()
     );
     let failure = domain.keys.get(&FAILURE).ok_or("failure key")?;
+    let schemas = [
+        CommunityMetadataSchemaV1::Cri1,
+        CommunityMetadataSchemaV1::Cpr1,
+        CommunityMetadataSchemaV1::Cci1,
+        CommunityMetadataSchemaV1::Cci1,
+    ];
+    for (record, schema) in committed.records.iter().zip(schemas) {
+        let framed = CommunityMetadataEnvelopeV1::from_canonical_cbor(&record.envelope)?;
+        assert!(framed.schema() == schema);
+    }
+    let selection = CommunityMetadataEnvelopeV1::from_canonical_cbor(&sealed.envelope)?;
+    assert!(selection.schema() == CommunityMetadataSchemaV1::Csi1);
+    let pass_key = CommunityPassKeyV1::new(target(), generation, pass)?;
     for (index, key, scope) in [
         (2, vault, scope_set_digest(&[0x80])),
         (3, failure, hash(90)),
     ] {
         let copy = CommunityCopyInventoryV1::from_canonical_cbor(&open(index)?)?;
+        let fields = copy.as_input();
+        assert_eq!(fields.revision, 1);
+        assert_eq!(fields.predecessor, None);
+        assert!(fields.parent_operation == CommunityArtifactOperationV1::Pass(pass_key));
+        assert!(fields.purpose == CommunityArtifactPurposeV1::LifecycleControl);
+        assert_eq!(fields.state, CommunityCopyStateV1::Owned);
+        assert_eq!(fields.holder, CommunityCopyHolderV1::KeyVault);
+        assert_eq!((fields.timeline, fields.generation), (target(), generation));
         assert_eq!(copy.as_input().holder_digest, key.intent().digest());
         assert_eq!(copy.as_input().scope_set_digest, scope);
         assert_eq!(
@@ -319,29 +401,7 @@ fn a_reserve_publishes_its_keys_records_selection_and_state() -> TestResult {
         );
     }
 
-    // The metadata key: parent CPK1, no slots, the metadata horizon and the
-    // Reserve's metadata `write` request digest.
-    let metadata = vault.intent().as_input();
-    let pass_key = CommunityPassKeyV1::new(target(), generation, pass)?;
-    assert!(metadata.parent_operation == CommunityArtifactOperationV1::Pass(pass_key));
-    assert!(metadata.purpose == CommunityArtifactPurposeV1::LifecycleControl);
-    assert!(metadata.member_slots == CommunityMemberSlotsV1::empty());
-    assert_eq!(metadata.scope_set_digest, scope_set_digest(&[0x80]));
-    assert_eq!(metadata.evidence_not_after_micros, HORIZON);
-    assert_eq!(metadata.authority_request_digest, WRITE);
-    assert_eq!(
-        (metadata.timeline, metadata.generation),
-        (target(), generation)
-    );
-
-    // The failure cohort key: the pass scope set, the due members' slots and
-    // the CRI1's request digest.
-    let cohort = failure.intent().as_input();
-    assert!(cohort.parent_operation == CommunityArtifactOperationV1::Pass(pass_key));
-    assert!(cohort.purpose == CommunityArtifactPurposeV1::LifecycleControl);
-    assert!(cohort.member_slots == CommunityMemberSlotsV1::new(&[0, 1])?);
-    assert_eq!(cohort.scope_set_digest, hash(90));
-    assert_eq!(cohort.authority_request_digest, AUTHORITY);
+    check_key_intents(vault, failure, pass_key, generation)?;
     assert_eq!(anchor.0, target());
     Ok(())
 }
@@ -519,7 +579,7 @@ fn refusals() -> [(Tamper, Error); 12] {
         ),
         (
             |_, staged| {
-                staged.failure_scope.0 = Hash::zero();
+                staged.failure_scope = Hash::zero();
                 Ok(())
             },
             Error::InvalidBinding,
@@ -645,5 +705,84 @@ fn the_writer_compares_the_inventory_generation_and_the_selection() -> TestResul
         .selection
         .address;
     assert!(domain.check_reserve_publication(&staged, &prepared).is_ok());
+    Ok(())
+}
+
+/// A reused host-allocated key ID would overwrite a live key and the
+/// records of the pass it sealed: either ID in the vault already refuses
+/// (`Conflict`), and the failed publication changes nothing.
+#[test]
+fn a_reused_key_id_refuses_without_overwriting() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    for (metadata, failure) in [([0x63; 16], FAILURE), (METADATA, [0x64; 16])] {
+        let mut case = Case::new(&roster, &rows)?;
+        let staged = case.stage(OPERATION)?;
+        let publication = publication(&case.profile, &case.policy);
+        case.domain
+            .world
+            .domain
+            .publish_reserved_pass(&SEAL, staged, publication)?;
+        // The first pass resolves, so only the key IDs can refuse the next.
+        let domain = &mut case.domain.world.domain;
+        assert!(domain.set_pass_status(target(), OPERATION, CommunityPassStatusV1::Aborted));
+        domain.pending_reservations.clear();
+        let mut input = case.input(SECOND)?;
+        input.pass.metadata_key = metadata;
+        input.pass.failure_cohort_key = failure;
+        let staged = case.domain.world.domain.stage_reserve(input)?;
+        let before = snapshot(&case.domain.world.domain);
+        assert_eq!(
+            case.domain
+                .world
+                .domain
+                .publish_reserved_pass(&SEAL, staged, publication)
+                .err(),
+            Some(Error::Conflict)
+        );
+        assert_eq!(snapshot(&case.domain.world.domain), before);
+        assert!(case
+            .domain
+            .world
+            .domain
+            .original_reserve(&SEAL, target(), OPERATION)
+            .is_ok());
+    }
+    Ok(())
+}
+
+/// A replay of a published Reserve is `Conflict` and a second unresolved
+/// pass `PassUnresolved`, both through the publication, with no key added.
+#[test]
+fn a_replay_or_a_second_unresolved_pass_refuses_the_publication() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let first = case.stage(OPERATION)?;
+    let replay = case.stage(OPERATION)?;
+    let mut other = case.input(SECOND)?;
+    other.pass.metadata_key = [0x63; 16];
+    other.pass.failure_cohort_key = [0x64; 16];
+    let second = case.domain.world.domain.stage_reserve(other)?;
+    let publication = publication(&case.profile, &case.policy);
+    case.domain
+        .world
+        .domain
+        .publish_reserved_pass(&SEAL, first, publication)?;
+    let domain = &mut case.domain.world.domain;
+    let before = snapshot(domain);
+    assert_eq!(
+        domain
+            .publish_reserved_pass(&SEAL, replay, publication)
+            .err(),
+        Some(Error::Conflict)
+    );
+    assert_eq!(
+        domain
+            .publish_reserved_pass(&SEAL, second, publication)
+            .err(),
+        Some(Error::PassUnresolved)
+    );
+    assert_eq!(snapshot(domain), before);
     Ok(())
 }

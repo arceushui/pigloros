@@ -197,8 +197,6 @@ pub struct CommunityReservePassFactsV1 {
     /// the due members' CIR1 scope rows (R11.1(2), R11.4(2)): the failure
     /// cohort key's scope set. The pipeline fills it from the plan.
     pub scope_set_digest: Hash,
-    /// The pass CSB1 digest, the cover of every pass cohort (R11.4(1)).
-    pub scope_cover_digest: Hash,
 }
 
 /// A Reserve that passed every writer re-check and awaits its apply.
@@ -211,8 +209,8 @@ pub struct CommunityStagedReserveV1 {
     pub(super) pass_ordinal: u64,
     /// The CRI1 fields the pass was reserved over.
     pub(super) request: CommunityReservationRequestInputV1,
-    /// The failure cohort's scope set digest and cover digest.
-    pub(super) failure_scope: (Hash, Hash),
+    /// The failure cohort key's scope set digest.
+    pub(super) failure_scope: Hash,
 }
 
 /// One Commit's writer inputs (R10.3(6), R11.3, R13.1(4)).
@@ -337,7 +335,7 @@ impl MemoryCommunityDomainV1 {
             native_ordinal: ordinals.0,
             pass_ordinal: ordinals.1,
             request: input.request,
-            failure_scope: (facts.scope_set_digest, facts.scope_cover_digest),
+            failure_scope: facts.scope_set_digest,
         })
     }
 

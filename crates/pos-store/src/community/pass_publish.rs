@@ -248,14 +248,20 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// The writer's compares before anything is published: the apply's own
-    /// refusals, and the inventory generation and CSI1 the call read still
-    /// being current (G5).
+    /// refusals, two fresh key IDs (`Conflict`), and the inventory generation
+    /// and CSI1 the call read still being current (G5).
+    ///
+    /// The G5 compare cannot fire through [`Self::publish_reserved_pass`],
+    /// which holds `&mut self` from the read to the commit; it guards a
+    /// future caller that stages and commits in separate guarded steps, and
+    /// is tested by a direct call.
     fn check_reserve_publication(
         &self,
         staged: &CommunityStagedReserveV1,
         prepared: &PreparedReserveV1,
     ) -> Result<(), Error> {
         self.check_apply_reserve(staged)?;
+        self.check_fresh_keys(prepared)?;
         let current = self
             .selection
             .as_ref()
@@ -271,6 +277,19 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::EvidenceUnavailable);
         }
         Ok(())
+    }
+
+    /// Neither key's protection ID is in the vault already: a reused
+    /// host-allocated ID would overwrite a live key, and with it an earlier
+    /// pass's records (`Conflict`).
+    fn check_fresh_keys(&self, prepared: &PreparedReserveV1) -> Result<(), Error> {
+        let ids = [&prepared.metadata, &prepared.failure]
+            .map(|key| key.intent().as_input().protection_operation_id);
+        if ids.iter().any(|id| self.keys.contains_key(id)) {
+            Err(Error::Conflict)
+        } else {
+            Ok(())
+        }
     }
 
     /// The atomic commit: the keys stay open, the successor CSI1 is the
@@ -382,8 +401,10 @@ fn provision_failure_key(
 /// the failure horizon (R15.2) and the due members' slots (owner decision
 /// on #560, 2026-11-26).
 ///
-/// The record kind the cohort protects is `LifecycleControl`, with the
-/// `ClassificationProof` every cohort's CAR1 envelopes need.
+/// R15.1(3) allows kind 6 (`LifecycleControl`) only. The key also allows
+/// kind 8 (`ClassificationProof`), which the protector and the extractor
+/// require of every cohort key for its CAR1 proof envelopes (erratum
+/// candidate).
 fn failure_cohort(
     staged: &CommunityStagedReserveV1,
     policy: CommunityHorizonPolicyV1,
@@ -401,8 +422,10 @@ fn failure_cohort(
             timeline: pass_key.timeline(),
             generation: pass_key.generation(),
             purpose: CommunityArtifactPurposeV1::LifecycleControl,
-            scope_set_digest: staged.failure_scope.0,
-            scope_cover_digest: staged.failure_scope.1,
+            scope_set_digest: staged.failure_scope,
+            // The pass CSB1 digest covers the records this key protects when
+            // an Abort protects them; the Reserve protects none with it.
+            scope_cover_digest: Hash::zero(),
             evidence_not_after_micros: policy
                 .retention
                 .quarantine_not_after_micros
