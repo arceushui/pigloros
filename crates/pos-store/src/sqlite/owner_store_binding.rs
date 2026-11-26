@@ -824,20 +824,13 @@ mod tests {
 
     /// A complete bound store whose journal mode is `DELETE`, not WAL.
     fn installed_delete_journal() -> TestResult<Fixture> {
-        let directory = private_directory()?;
-        {
-            let path = directory.path().join(MAIN);
-            let mut store = SqliteStore::open(path.to_str().ok_or("path")?)?;
-            store.bind_empty_store_mode(
-                GatewayModeBindingHostV1::new().authorize_bind(profile()?),
-            )?;
-        }
-        Connection::open(directory.path().join(MAIN))?.query_row(
+        let fixture = installed(true)?;
+        Connection::open(fixture.path(""))?.query_row(
             "PRAGMA journal_mode = DELETE",
             [],
             |row| row.get::<_, String>(0),
         )?;
-        install(directory)
+        Ok(fixture)
     }
 
     fn journal_mode(fixture: &Fixture) -> TestResult<String> {
