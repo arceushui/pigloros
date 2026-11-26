@@ -153,6 +153,7 @@ impl CommunityArtifactProtectorV1 {
     /// # Errors
     /// Returns `StorageUnavailable` when the OS CSPRNG fails and the CCI1
     /// refusal for an intent it cannot describe.
+    #[cfg(target_os = "linux")]
     pub(super) fn from_retained_key(
         key: VaultKeyV1,
         scope_cover_digest: Hash,
@@ -181,6 +182,7 @@ impl CommunityArtifactProtectorV1 {
     }
 
     /// The suboperation's key, once its records are protected.
+    #[cfg(target_os = "linux")]
     pub(super) fn into_key(self) -> VaultKeyV1 {
         self.key
     }
