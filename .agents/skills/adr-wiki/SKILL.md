@@ -61,6 +61,12 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
    distinguish section-level feedback from approval of the complete page. An
    earlier or partial approval does not approve a later amendment.
 
+   An authorized status-only publication is the exception: an approval receipt
+   may bind the reviewed candidate revision and complete decision body, followed
+   by a version-guarded change of its status to `Accepted`. Verify that status
+   metadata is the only change and record both the reviewed and stored versions
+   with the receipt. Any decision-text change requires a fresh review.
+
 8. **Pending amendments control page status.** If an accepted ADR gains an
    unapproved amendment, mark the page `Under Review` and identify which base
    decisions remain accepted. Restore `Accepted` only after the amended
@@ -88,6 +94,17 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
     structure, and complete text. A successful response alone is not evidence
     that Redmine stored the intended ADR.
 
+13. **Guard the reviewed base at publication.** Where the provider supports an
+    expected-version field, include the reviewed version with the intended body.
+    A conflict requires a fresh read and reconciliation, not an overwrite. Keep
+    the submitted version, stored revision, and approval receipt distinct.
+
+14. **Account for server transformations explicitly.** Compare the complete
+    canonical text with the submitted text, including observed generated footer
+    or formatting changes. Bound and document known transformations; never
+    silently trim arbitrary differences to claim exact identity. Keep the full
+    architectural evidence with its canonical decision record.
+
 ## Pre-flight
 
 - [ ] The page is parented under `ADR` and uses Markdown.
@@ -95,3 +112,5 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
 - [ ] The exact reviewed revision and approval scope are explicit.
 - [ ] Tables have contiguous structural rows.
 - [ ] The canonical page was read back after the final write.
+- [ ] Supported revision preconditions protected the reviewed base; any server
+      transformations are identified and the complete stored body is verified.
