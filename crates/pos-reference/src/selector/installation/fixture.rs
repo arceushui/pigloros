@@ -26,6 +26,7 @@ use crate::evaluator_protocol::{
     encode, EvaluationRequest, ProtocolError, RequiredProviderCapability, SandboxRequirement,
 };
 use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole, SandboxArchitecture};
+use crate::selector_test_support::{GUEST_MEMORY_BYTES, GUEST_OUTPUT_BYTES, GUEST_STORAGE_BYTES};
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -462,9 +463,12 @@ const FIXTURE_LIMITS: LimitTable = [
 
 /// The limits of an attempt that must really run in the #444 evidence guest: memory 128 MiB, no
 /// swap, 256 tasks, one CPU, a 120 s watchdog, 1024 descriptors, 16 MiB files, 1 MiB output and
-/// a 16 MiB work area. The other limits keep the unit-test fixture's values.
+/// a 16 MiB work area. The other limits keep the unit-test fixture's values. Memory, output and
+/// work bytes come from the constants the guest corpus budgets use, so the two cannot drift. Swap
+/// 0 is a literal zero ceiling that systemd enforces exactly (`is_unenforceable` refuses a zero
+/// only for limits 0, 2, 3 and 4), and admission accepts it (only limit 4 may not be zero).
 pub(crate) const GUEST_LIMITS: LimitTable = [
-    134_217_728,
+    GUEST_MEMORY_BYTES,
     0,
     256,
     1_000_000,
@@ -472,8 +476,8 @@ pub(crate) const GUEST_LIMITS: LimitTable = [
     1_024,
     16_777_216,
     2_000,
-    1_048_576,
-    16_777_216,
+    GUEST_OUTPUT_BYTES,
+    GUEST_STORAGE_BYTES,
     2_000,
     2_000,
     2_000,
