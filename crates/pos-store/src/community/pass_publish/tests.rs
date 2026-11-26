@@ -751,35 +751,78 @@ fn a_reused_key_id_refuses_without_overwriting() -> TestResult {
     Ok(())
 }
 
-/// A replay of a published Reserve is `Conflict` and a second unresolved
-/// pass `PassUnresolved`, both through the publication, with no key added.
+/// A second identity's Reserve, with key IDs of its own.
+fn second_input(case: &Case<'_>) -> Fallible<CommunityReserveInputV1> {
+    let mut other = case.input(SECOND)?;
+    other.pass.metadata_key = [0x63; 16];
+    other.pass.failure_cohort_key = [0x64; 16];
+    Ok(other)
+}
+
+/// Tokens staged before another Reserve published are stale. Through
+/// `publish_reserved_pass` the CSI1 successor refuses them first, because
+/// `prepare_reserve_records` runs before the writer's compares and their
+/// ordinals are no longer the next ones (`InvalidBinding`); the snapshot
+/// stays unchanged.
 #[test]
-fn a_replay_or_a_second_unresolved_pass_refuses_the_publication() -> TestResult {
+fn a_stale_token_is_refused_by_the_successor_before_the_compares() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let mut case = Case::new(&roster, &rows)?;
     let first = case.stage(OPERATION)?;
     let replay = case.stage(OPERATION)?;
-    let mut other = case.input(SECOND)?;
-    other.pass.metadata_key = [0x63; 16];
-    other.pass.failure_cohort_key = [0x64; 16];
-    let second = case.domain.world.domain.stage_reserve(other)?;
-    let publication = publication(&case.profile, &case.policy);
-    case.domain
+    let second = case
+        .domain
         .world
         .domain
-        .publish_reserved_pass(&SEAL, first, publication)?;
+        .stage_reserve(second_input(&case)?)?;
+    let publication = publication(&case.profile, &case.policy);
     let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, first, publication)?;
+    let before = snapshot(domain);
+    for stale in [replay, second] {
+        assert_eq!(
+            domain
+                .publish_reserved_pass(&SEAL, stale, publication)
+                .err(),
+            Some(Error::InvalidBinding)
+        );
+        assert_eq!(snapshot(domain), before);
+    }
+    Ok(())
+}
+
+/// The writer's own compares, over records prepared before the first
+/// Reserve published: a recorded identity is `Conflict` and a second
+/// unresolved pass of T is `PassUnresolved`. A fresh stage refuses both
+/// earlier, so only a stale token reaches them.
+#[test]
+fn the_writer_refuses_a_replay_and_a_second_unresolved_pass() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let first = case.stage(OPERATION)?;
+    let replay = case.stage(OPERATION)?;
+    let second = case
+        .domain
+        .world
+        .domain
+        .stage_reserve(second_input(&case)?)?;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    let replay_records = domain.prepare_reserve_records(&SEAL, &replay, publication)?;
+    let second_records = domain.prepare_reserve_records(&SEAL, &second, publication)?;
+    domain.publish_reserved_pass(&SEAL, first, publication)?;
     let before = snapshot(domain);
     assert_eq!(
         domain
-            .publish_reserved_pass(&SEAL, replay, publication)
+            .check_reserve_publication(&replay, &replay_records)
             .err(),
         Some(Error::Conflict)
     );
     assert_eq!(
         domain
-            .publish_reserved_pass(&SEAL, second, publication)
+            .check_reserve_publication(&second, &second_records)
             .err(),
         Some(Error::PassUnresolved)
     );
