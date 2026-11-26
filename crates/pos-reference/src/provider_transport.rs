@@ -24,8 +24,8 @@ use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFla
 use crate::control_framing::{self, ControlFrameError};
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxProvider, AuthenticatedSandboxProviderResult, PayloadDescriptor,
-    PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
-    SelectorGrantCommitment,
+    PayloadDirection, PayloadStreamValidator, ReconciliationEvidenceFields, SandboxAdmissionError,
+    SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderErrorCode, SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap, CommittedInstallationUpdate,
@@ -33,11 +33,76 @@ use crate::selector::installation::authority::{
 use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
 
+mod control;
+#[cfg(feature = "test-support")]
+pub mod guest;
+
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_AUDIT_RECORDS: usize = 256;
 const MAX_AUDIT_BYTES: usize = CONTROL_LIMIT;
 const ROOT_UID: u32 = 0;
+
+/// The closed class of an authenticated SPE1 answering SCQ1 or SRQ1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderControlRefusal {
+    /// SPE1 `11`: the provider's response was still pending.
+    Pending11,
+    /// SPE1 `12`: the control pool or the attempt's request ledger is full.
+    Busy12,
+    /// SPE1 `14`: the attempt cannot be proved clean now.
+    CleanupFailed14,
+    /// SPE1 `15`: the attempt and grant pair is unknown.
+    UnknownAttempt15,
+    /// SPE1 `16`: the request ID was reused with other bytes.
+    RequestIdReuse16,
+    /// Any other authenticated code.
+    Other,
+}
+
+impl ProviderControlRefusal {
+    /// Whether the same attempt may be asked again with a new request ID.
+    pub(crate) const fn is_retryable(self) -> bool {
+        matches!(self, Self::Pending11 | Self::Busy12 | Self::CleanupFailed14)
+    }
+
+    const fn from_code(code: SandboxProviderErrorCode) -> Self {
+        match code {
+            SandboxProviderErrorCode::SandboxUnavailable => Self::Pending11,
+            SandboxProviderErrorCode::AdmissionBusy => Self::Busy12,
+            SandboxProviderErrorCode::CleanupFailed => Self::CleanupFailed14,
+            SandboxProviderErrorCode::UnknownAttempt => Self::UnknownAttempt15,
+            SandboxProviderErrorCode::RequestIdentityConflict => Self::RequestIdReuse16,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Why one cancel or reconcile exchange yielded no authenticated success.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ProviderControlError {
+    /// The provider could not be reached or framed an answer incorrectly.
+    #[error("provider control exchange failed: {0}")]
+    Boundary(SelectorBoundaryError),
+    /// The provider answered with an authenticated SPE1.
+    #[error("provider refused the control request: {0:?}")]
+    Refused(ProviderControlRefusal),
+    /// The answer failed authentication or contradicted the selector.
+    #[error("provider control answer was rejected: {0}")]
+    Evidence(SandboxAdmissionError),
+}
+
+impl From<SelectorBoundaryError> for ProviderControlError {
+    fn from(error: SelectorBoundaryError) -> Self {
+        Self::Boundary(error)
+    }
+}
+
+impl From<SandboxAdmissionError> for ProviderControlError {
+    fn from(error: SandboxAdmissionError) -> Self {
+        Self::Evidence(error)
+    }
+}
 
 /// Rewindable staged payload used across authenticated provider retries.
 pub(crate) trait ReadSeek: Read + Seek {}
@@ -110,8 +175,12 @@ struct ConnectedInstallationUpdate {
 /// Complete provider evidence authenticated against an admitted selector provider.
 #[derive(Debug)]
 pub(crate) struct AuthenticatedProviderExecution {
-    frames: AuthenticatedProviderFrames,
+    frames: Box<AuthenticatedProviderFrames>,
     agr1_digest: [u8; 32],
+    /// The self-digest of the authenticated terminal SPY1.
+    spy1_digest: [u8; 32],
+    /// The self-digest of the last SAU1 of the authenticated chain.
+    final_sau1_digest: [u8; 32],
     output: Option<StagedProviderOutput>,
 }
 
@@ -163,12 +232,15 @@ pub(crate) trait ProviderRequestAdmission {
 
     /// Release the pre-entry fence after request bytes and write EOF are sent.
     fn entered(&mut self);
+
+    /// The transport authenticated the AGR1 of this attempt.
+    fn granted(&mut self, _agr1_digest: [u8; 32]) {}
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct UnfencedProviderRequest;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ProviderRequestAdmission for UnfencedProviderRequest {
     fn begin(&mut self) -> Result<(), ProviderTransportError> {
         Ok(())
@@ -188,13 +260,15 @@ impl AuthenticatedProviderExecution {
         output: Option<(tempfile::NamedTempFile, PayloadDescriptor)>,
     ) -> Self {
         Self {
-            frames: AuthenticatedProviderFrames::new(
+            frames: Box::new(AuthenticatedProviderFrames::new(
                 grant_frame,
                 receipt_frame,
                 result_frame,
                 audit_frames,
-            ),
+            )),
             agr1_digest: [7; 32],
+            spy1_digest: [8; 32],
+            final_sau1_digest: [9; 32],
             output: output.map(|(file, descriptor)| StagedProviderOutput::new(file, descriptor)),
         }
     }
@@ -203,6 +277,22 @@ impl AuthenticatedProviderExecution {
     #[must_use]
     pub(crate) const fn agr1_digest(&self) -> [u8; 32] {
         self.agr1_digest
+    }
+
+    /// The digests the selector recomputes the reconciliation tuple from
+    /// (ADR-069 R15 §3.5): this grant, the terminal SPY1 and the last SAU1.
+    /// All three were captured when their records were authenticated.
+    #[must_use]
+    pub(crate) const fn accepted_evidence(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> ReconciliationEvidenceFields {
+        ReconciliationEvidenceFields {
+            attempt_id,
+            agr1_digest: self.agr1_digest,
+            terminal_spy1_digest: self.spy1_digest,
+            final_sau1_digest: self.final_sau1_digest,
+        }
     }
 
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
@@ -237,8 +327,7 @@ impl AuthenticatedProviderExecution {
     /// # Errors
     /// Returns a closed I/O failure when staging cannot be rewound or read, or when `compose`
     /// rejects the descriptor or output stream.
-    #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_verified_output<T>(
         &mut self,
         compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
@@ -664,39 +753,52 @@ impl ProviderTransport {
                 Deadline::new(timeout).map(|deadline| (request, bytes, deadline))
             })
             .and_then(|(request, bytes, deadline)| {
-                connect_before_deadline(&self.execute_endpoint, &deadline)
-                    .map(|connected| (request, bytes, deadline, connected))
+                self.exchange_on_execute_socket(&bytes, &deadline, |_| Ok(()))
+                    .map(|exchanged| (request, exchanged))
             })
-            .and_then(|(request, bytes, deadline, mut connected)| {
-                write_frame(&mut connected.stream, &bytes, &deadline)
+            .and_then(|(request, (response, process))| {
+                admitted
+                    .authenticate_describe_response(&response, &request)
+                    .map_err(artifact_invalid)
+                    .map(|()| process)
+            })
+            .and_then(|process| self.bind_admitted_process(process))
+    }
+
+    /// One request frame, write EOF, one response frame and read EOF on the
+    /// execute socket. `check` sees the connected provider process before any
+    /// byte is written.
+    fn exchange_on_execute_socket(
+        &self,
+        request: &[u8],
+        deadline: &Deadline,
+        check: impl FnOnce(ProviderProcessIdentity) -> Result<(), SelectorBoundaryError>,
+    ) -> Result<(Vec<u8>, ProviderProcessIdentity), SelectorBoundaryError> {
+        connect_before_deadline(&self.execute_endpoint, deadline)
+            .and_then(|connected| check(connected.process).map(|()| connected))
+            .and_then(|mut connected| {
+                write_frame(&mut connected.stream, request, deadline)
                     .map_err(selector_unavailable)
-                    .map(|()| (request, deadline, connected))
+                    .map(|()| connected)
             })
-            .and_then(|(request, deadline, connected)| {
+            .and_then(|connected| {
                 connected
                     .stream
                     .shutdown(std::net::Shutdown::Write)
                     .map_err(selector_unavailable)
-                    .map(|()| (request, deadline, connected))
-            })
-            .and_then(|(request, deadline, mut connected)| {
-                read_frame(&mut connected.stream, &deadline)
-                    .map_err(selector_unavailable)
-                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
-                    .map(|response| (request, deadline, connected, response))
-            })
-            .and_then(|(request, deadline, mut connected, response)| {
-                ensure_eof(&mut connected.stream, &deadline)
-                    .map_err(selector_unavailable)
-                    .map(|()| (request, connected, response))
-            })
-            .and_then(|(request, connected, response)| {
-                admitted
-                    .authenticate_describe_response(&response, &request)
-                    .map_err(artifact_invalid)
                     .map(|()| connected)
             })
-            .and_then(|connected| self.bind_admitted_process(connected.process))
+            .and_then(|mut connected| {
+                read_frame(&mut connected.stream, deadline)
+                    .map_err(selector_unavailable)
+                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
+                    .map(|response| (response, connected))
+            })
+            .and_then(|(response, mut connected)| {
+                ensure_eof(&mut connected.stream, deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (response, connected.process))
+            })
     }
 
     /// Complete one committed live update over the exact admitted control process.
@@ -978,6 +1080,7 @@ impl ProviderTransport {
                             &first,
                         )
                         .and_then(|grant| {
+                            progress.admission.granted(grant.grant_digest());
                             write_input(&mut stream, request, input, deadline)
                                 .and_then(|()| {
                                     stream
@@ -1275,6 +1378,9 @@ fn read_admitted_response(
         .and_then(|state| ensure_eof(stream, deadline).map(|()| state))
         .and_then(
             |(grant, audit_bytes, receipt_bytes, receipt, file, chunks, result_bytes, result)| {
+                // The authenticated chain ends at the digest the signed SPR1
+                // names, so this is the last SAU1's self-digest.
+                let final_sau1 = receipt.sau1_digest;
                 admitted
                     .authenticate_audit_chain(&audit_bytes, &receipt, &result)
                     .map_err(receive_invalid)
@@ -1287,21 +1393,33 @@ fn read_admitted_response(
                             chunks,
                             result_bytes,
                             result,
+                            final_sau1,
                         )
                     })
             },
         )
         .and_then(
-            |(grant, audit_bytes, receipt_bytes, file, chunks, result_bytes, result)| {
+            |(
+                grant,
+                audit_bytes,
+                receipt_bytes,
+                file,
+                chunks,
+                result_bytes,
+                result,
+                final_sau1,
+            )| {
                 stage_output(file, chunks, request, &result).map(|output| {
                     AuthenticatedProviderTerminal::Execution(AuthenticatedProviderExecution {
-                        frames: AuthenticatedProviderFrames::new(
+                        frames: Box::new(AuthenticatedProviderFrames::new(
                             grant_bytes,
                             receipt_bytes,
                             result_bytes,
                             audit_bytes,
-                        ),
+                        )),
                         agr1_digest: grant.grant_digest(),
+                        spy1_digest: result.result_digest(),
+                        final_sau1_digest: final_sau1,
                         output,
                     })
                 })
@@ -2772,6 +2890,32 @@ mod tests {
             })?
             .ok_or("authenticated output missing")?;
         assert_eq!(output, b"output");
+        // The digests the selector recomputes the reconciliation tuple from
+        // are the authenticated records' own self-digests.
+        let grant = fixture.provider.authenticate_selector_grant(
+            &fixture.agr1,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
+        let accepted = execution.accepted_evidence([5; 16]);
+        assert_eq!(accepted.attempt_id, [5; 16]);
+        assert_eq!(accepted.agr1_digest, grant.grant_digest());
+        assert_eq!(
+            accepted.terminal_spy1_digest,
+            crate::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+                &fixture.spy1
+            )?
+            .result_digest()
+        );
+        let last_sau1 = fixture.sau1.last().ok_or("no SAU1")?;
+        let Value::Array(wrapper) = ciborium::from_reader::<Value, _>(last_sau1.as_slice())? else {
+            return Err("SAU1 wrapper is not an array".into());
+        };
+        let Some(Value::Bytes(digest)) = wrapper.get(1) else {
+            return Err("SAU1 digest missing".into());
+        };
+        assert_eq!(accepted.final_sau1_digest.as_slice(), digest.as_slice());
+        assert_ne!(accepted.final_sau1_digest, [0; 32]);
         provider.join().map_err(|_| "provider thread panicked")??;
         Ok(())
     }
