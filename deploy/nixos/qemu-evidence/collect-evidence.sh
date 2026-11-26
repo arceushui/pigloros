@@ -225,6 +225,23 @@ start_runtime() { # BINARY
 # Result with it, as soon as it stops. The stager holds the staged
 # installation until its control FIFO closes. Part (c) and the execute
 # evidence run between start and stop.
+# The selector's side of one SPX1 exchange with the started runtime, run as the same binary that
+# staged the installation. Its report is the client's own observation (the signed outcome, the
+# SPR1 ordinals, digests); the attempt unit's lines come from PID 1's journal, the only source
+# of the unit's Result as systemd reports it ("Deactivated successfully" is Result=success).
+# Their absence is judged by the checker, never here.
+execute_case() { # DIR EXPORT_DIRECTORY
+  local main_pid status=0
+  main_pid="$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")"
+  timeout 240 pos-sandboxd-conformance execute "$2" "${main_pid}" \
+    >"$1/execute-report" 2>"$1/execute-stderr" || status=$?
+  printf '%s\n' "${status}" >"$1/execute-status"
+  journalctl --sync
+  journalctl --boot --no-pager --output=short-monotonic _PID=1 \
+    | { grep -F 'Deactivated successfully' || true; } \
+    | { grep -vF "${RUNTIME_UNIT}.service" || true; } >"$1/attempt-journal"
+}
+
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   local dir="daemon/$1" fifo="${STAGE_FIFO}" exports control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
@@ -272,6 +289,7 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
     runtime_credentials >"${dir}/runtime-credentials"
     readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
     find "${RUNTIME_ROOT}" -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"
+    execute_case "${dir}" "${exports}"
     systemctl stop "${RUNTIME_UNIT}.service" || stop=$?
     # PID 1's stop lines may not have reached the journal yet.
     journalctl --sync
