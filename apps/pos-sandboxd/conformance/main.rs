@@ -2,7 +2,7 @@
 //! [ADAPTER_ARGUMENT...]`: the #444
 //! QEMU evidence guest's driver (feature `test-support`, never deployed).
 //!
-//! This file only wires [`pos_sandboxd::packaged_conformance::run`] to the
+//! This file only wires [`pos_sandboxd::packaged_conformance::run_mode`] to the
 //! process: its arguments, standard input and output, and the library's
 //! production `describe` and `release` of a held root. It has no branch of
 //! its own.
@@ -11,7 +11,7 @@
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-use pos_sandboxd::packaged_conformance::{describe, exit_status, release, run, runtime};
+use pos_sandboxd::packaged_conformance::{describe, exit_status, release, run_mode, runtime};
 
 #[cfg(all(
     target_os = "linux",
@@ -21,7 +21,7 @@ fn main() -> std::process::ExitCode {
     let arguments = std::env::args_os().skip(1).collect();
     exit_status(
         runtime().and_then(|runtime| {
-            runtime.block_on(run(
+            runtime.block_on(run_mode(
                 arguments,
                 std::io::stdin(),
                 &mut std::io::stdout(),
