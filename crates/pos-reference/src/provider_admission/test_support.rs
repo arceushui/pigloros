@@ -89,7 +89,13 @@ pub struct StagedProvider<'a> {
 /// bytes, 9 `/work` bytes). `watchdog_ms` and `budget` are the selected
 /// case's watchdog and deterministic budget, in `ResourceUsage` order (memory,
 /// CPU fuel, host calls, events, output, storage, steps, simulation time). An
-/// attempt's effective limit is the least of the three (ADR-069 section 6).
+/// attempt's effective limit is the least of the three (ADR-069 section 8).
+///
+/// The case's `watchdog_ms` is also the selector client's deadline for the
+/// whole exchange, mount included (`GuestProviderClient::commitment`), while
+/// the provider's own watchdog (limit 4) runs from the unit's activation. So a
+/// short effective watchdog is set in the two limit 4 caps, and `watchdog_ms`
+/// stays long enough for a cold image mount.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StagedLimits {
     /// The BHC1 hard caps.
@@ -112,9 +118,18 @@ impl StagedLimits {
         budget: [100; 8],
     };
 
-    /// The default limits with the five limits a conformance case probes set
-    /// in the broker caps, the launch policy and the case itself, so that
-    /// each is the attempt's effective limit.
+    /// The selector client's exchange deadline of a probing case.
+    ///
+    /// It covers a cold image mount (about 70 s under TCG), the attempt's own
+    /// watchdog and its termination, in milliseconds.
+    pub const EXCHANGE_MS: u64 = 300_000;
+
+    /// The default limits with the five probed limits set to their ceilings.
+    ///
+    /// Each is set in the broker caps, the launch policy and the case, so
+    /// that it is the attempt's effective limit. `watchdog_ms` is the
+    /// effective attempt watchdog (limit 4); the case's own watchdog, the
+    /// client's exchange deadline, is [`Self::EXCHANGE_MS`].
     #[must_use]
     pub const fn probing(
         memory_bytes: u64,
@@ -136,7 +151,7 @@ impl StagedLimits {
         Self {
             broker: limits,
             launch: limits,
-            watchdog_ms,
+            watchdog_ms: Self::EXCHANGE_MS,
             budget,
         }
     }

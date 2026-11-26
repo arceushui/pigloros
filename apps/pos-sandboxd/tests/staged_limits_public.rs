@@ -24,7 +24,7 @@ use pos_conformance::{
 use pos_reference::provider_admission::test_support::{
     StagedImage, StagedInstallation, StagedLimits, StagedProvider,
 };
-use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
+use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxExecuteRequest};
 use pos_sandboxd::{StagingLedger, StagingLimits};
 
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
@@ -154,7 +154,16 @@ fn the_probed_ceilings_are_the_effective_limits_and_the_default_is_unchanged() -
     expected[8] = OUTPUT_CEILING_BYTES;
     expected[9] = WORK_CEILING_BYTES;
     assert_eq!(limited, expected);
-    assert_ne!(limited_request, default_request);
+    // The limits reached the request: the case's EVR1, the administrator
+    // policy (which names the broker caps) and the launch policy differ, while
+    // the image and the provider manifest do not.
+    let default_authority = SandboxExecuteRequest::from_canonical_cbor(&default_request)?.authority;
+    let limited_authority = SandboxExecuteRequest::from_canonical_cbor(&limited_request)?.authority;
+    assert_ne!(limited_authority.evr1_digest, default_authority.evr1_digest);
+    assert_ne!(limited_authority.apt1_digest, default_authority.apt1_digest);
+    assert_ne!(limited_authority.lps1_digest, default_authority.lps1_digest);
+    assert_eq!(limited_authority.sim1_digest, default_authority.sim1_digest);
+    assert_eq!(limited_authority.spm1_digest, default_authority.spm1_digest);
     Ok(())
 }
 
@@ -167,7 +176,8 @@ fn the_probing_limits_set_exactly_the_five_probed_limits() {
     }
     assert_eq!(probing.broker, limits);
     assert_eq!(probing.launch, limits);
-    assert_eq!(probing.watchdog_ms, 5);
+    // The effective watchdog is in the caps; the case's own is the exchange's.
+    assert_eq!(probing.watchdog_ms, StagedLimits::EXCHANGE_MS);
     assert_eq!(probing.budget, [7, 100, 100, 100, 4, 3, 100, 100]);
     assert_eq!(StagedLimits::DEFAULT.watchdog_ms, 1_000);
     assert_eq!(StagedLimits::DEFAULT.budget, [100; 8]);
