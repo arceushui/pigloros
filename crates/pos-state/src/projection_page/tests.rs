@@ -111,7 +111,7 @@ fn golden_events() -> Vec<Event> {
 }
 
 fn page_limit(entries: usize) -> ProjectionPageLimitV1 {
-    ProjectionPageLimitV1::projection_page_limit_v1(entries)
+    ProjectionPageLimitV1::from_entry_count_v1(entries)
         .unwrap_or_else(|| std::panic::resume_unwind(Box::new("page limit out of range")))
 }
 
@@ -202,10 +202,10 @@ fn the_state_digest_binds_every_field() {
 
 #[test]
 fn the_page_limit_is_one_to_one_hundred() {
-    assert_eq!(ProjectionPageLimitV1::projection_page_limit_v1(0), None);
+    assert_eq!(ProjectionPageLimitV1::from_entry_count_v1(0), None);
     assert_eq!(page_limit(1).projection_page_entries_v1(), 1);
     assert_eq!(page_limit(100).projection_page_entries_v1(), 100);
-    assert_eq!(ProjectionPageLimitV1::projection_page_limit_v1(101), None);
+    assert_eq!(ProjectionPageLimitV1::from_entry_count_v1(101), None);
 }
 
 #[test]

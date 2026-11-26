@@ -60,7 +60,7 @@ fn world_action(actor: EntityId, seq: u64) -> Event {
 }
 
 fn world_page(events: &[Event], at_seq: u64) -> ProjectionPageV1 {
-    let limit = ProjectionPageLimitV1::projection_page_limit_v1(100)
+    let limit = ProjectionPageLimitV1::from_entry_count_v1(100)
         .unwrap_or_else(|| std::panic::resume_unwind(Box::new("page limit")));
     let cut = Seq::from_u64(at_seq);
     fold_projection_page_v1(Box::new(WorldReducer), events, cut, None, limit)

@@ -107,7 +107,7 @@ pub struct ProjectionPageLimitV1(usize);
 impl ProjectionPageLimitV1 {
     /// The limit `entries`, or `None` outside 1 to [`MAX_PROJECTION_PAGE_ENTRIES_V1`].
     #[must_use]
-    pub const fn projection_page_limit_v1(entries: usize) -> Option<Self> {
+    pub const fn from_entry_count_v1(entries: usize) -> Option<Self> {
         if entries == 0 || entries > MAX_PROJECTION_PAGE_ENTRIES_V1 {
             None
         } else {
