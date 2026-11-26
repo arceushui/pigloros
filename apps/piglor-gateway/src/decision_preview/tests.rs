@@ -601,6 +601,19 @@ async fn a_preview_fails_closed_without_a_decision_a_host_or_an_executor() -> Te
     Ok(())
 }
 
+/// ADR-140 D1: the release port installs no EPF1 for any profile.
+#[test]
+fn the_release_port_installs_no_epf1() {
+    for profile_id in [
+        "deterministic-local-v1",
+        "live-local-v1",
+        "live-air-gapped-v1",
+        "",
+    ] {
+        assert_eq!(NoInstalledProfilesV1.installed_epf1(profile_id), None);
+    }
+}
+
 #[test]
 fn the_generation_counts_the_preview_events() {
     assert_eq!(DecisionPreviewStateV1::Admitted.generation(), 1);

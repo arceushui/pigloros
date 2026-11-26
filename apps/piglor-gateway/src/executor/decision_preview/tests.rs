@@ -847,7 +847,7 @@ fn undecodable_inputs_are_the_internal_arm() -> TestResult {
 }
 
 /// A stored claim naming a revision the store does not hold, or another
-/// digest, or a payload that does not re-encode, or a commit binding other
+/// digest (of a present or an erased revision), or a payload that does not re-encode, or a commit binding other
 /// than its own: each is the internal-failure arm and appends nothing.
 #[test]
 fn every_stored_inconsistency_is_the_internal_arm() -> TestResult {
@@ -868,7 +868,21 @@ fn every_stored_inconsistency_is_the_internal_arm() -> TestResult {
         },
         ..request.clone()
     };
-    for (key, claimed) in [("missing", &missing), ("mismatched", &mismatched)] {
+    // An erased input whose tombstone digest is not the one the claim names.
+    let erased = preference(&mut host, actor()?, &[("city", 1)])?;
+    erase(&mut host, GatewayRevisionKindV1::Preference, &erased)?;
+    let erased_mismatched = PreviewRequestV1 {
+        preference: PreviewRevisionRefV1 {
+            digest: [9; 32],
+            ..erased
+        },
+        ..request.clone()
+    };
+    for (key, claimed) in [
+        ("missing", &missing),
+        ("mismatched", &mismatched),
+        ("erased-mismatched", &erased_mismatched),
+    ] {
         let preview_id = interrupted(&mut host, claimed, key, consent, None)?;
         assert_eq!(
             refusal(finish_retry(&mut host, claimed, key, 64)?),
@@ -1392,7 +1406,10 @@ fn the_provenance_record_is_deterministic_cbor() -> TestResult {
     ok(finish_retry(&mut host, &request, "k-1", 64)?)?;
     let committed = ok(read(&mut host, preview_id)?)?;
     let stored = events(&mut host)?;
-    let digest = |payload: &CanonicalBytes| payload_digest(payload.as_slice());
+    // The expected digests come from BLAKE3 directly, not from the function
+    // under test.
+    let digest =
+        |payload: &CanonicalBytes| blake3::hash(payload.as_slice()).to_hex().to_string();
     for (preview, result) in [
         (&admitted, None),
         (&committed, Some(digest(&stored[1].payload))),
