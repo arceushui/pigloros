@@ -490,18 +490,18 @@ fn the_original_reserve_reads_back_its_cri1_and_cpr1() -> TestResult {
     let publication = publication(&case.profile, &case.policy);
     let domain = &mut case.domain.world.domain;
     assert_eq!(
-        domain.original_reserve(&SEAL, target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION).err(),
         Some(Error::EvidenceUnavailable)
     );
     domain.publish_reserved_pass(&SEAL, staged, publication)?;
-    let original = domain.original_reserve(&SEAL, target(), OPERATION)?;
+    let original = domain.original_reserve(target(), OPERATION)?;
     assert_eq!(original.request(), request.as_slice());
     assert_eq!(original.reservation(), reservation.as_slice());
     assert_ne!(original.request(), original.reservation());
 
     // Another identity of T was not reserved here.
     assert_eq!(
-        domain.original_reserve(&SEAL, target(), SECOND).err(),
+        domain.original_reserve(target(), SECOND).err(),
         Some(Error::EvidenceUnavailable)
     );
     // A record that no longer opens, a missing record and a missing key
@@ -509,24 +509,24 @@ fn the_original_reserve_reads_back_its_cri1_and_cpr1() -> TestResult {
     for index in [0, 1] {
         flip(domain, index)?;
         assert_eq!(
-            domain.original_reserve(&SEAL, target(), OPERATION).err(),
+            domain.original_reserve(target(), OPERATION).err(),
             Some(Error::EvidenceUnavailable)
         );
         flip(domain, index)?;
     }
-    assert!(domain.original_reserve(&SEAL, target(), OPERATION).is_ok());
+    assert!(domain.original_reserve(target(), OPERATION).is_ok());
     let record = domain
         .reserve_publications
         .get_mut(&(target(), OPERATION))
         .ok_or("publication")?;
     record.records.truncate(1);
     assert_eq!(
-        domain.original_reserve(&SEAL, target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION).err(),
         Some(Error::EvidenceUnavailable)
     );
     domain.keys.remove(&METADATA);
     assert_eq!(
-        domain.original_reserve(&SEAL, target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION).err(),
         Some(Error::EvidenceUnavailable)
     );
     Ok(())
@@ -747,7 +747,7 @@ fn a_reused_key_id_refuses_without_overwriting() -> TestResult {
             .domain
             .world
             .domain
-            .original_reserve(&SEAL, target(), OPERATION)
+            .original_reserve(target(), OPERATION)
             .is_ok());
     }
     Ok(())
@@ -829,5 +829,25 @@ fn the_writer_refuses_a_replay_and_a_second_unresolved_pass() -> TestResult {
         Some(Error::PassUnresolved)
     );
     assert_eq!(snapshot(domain), before);
+    Ok(())
+}
+
+/// The two fresh keys must differ from each other as well as from the
+/// vault: a metadata key and a failure cohort key of one ID would overwrite
+/// each other at the commit (`Conflict`).
+#[test]
+fn two_keys_of_one_id_refuse() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let case = Case::new(&roster, &rows)?;
+    let mut staged = case.stage(OPERATION)?;
+    staged.record.reserved.failure_cohort_key = staged.record.reserved.metadata_key;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &case.domain.world.domain;
+    let prepared = domain.prepare_reserve_records(&SEAL, &staged, publication)?;
+    assert_eq!(
+        domain.check_fresh_keys(&prepared).err(),
+        Some(Error::Conflict)
+    );
     Ok(())
 }

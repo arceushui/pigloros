@@ -177,7 +177,6 @@ impl MemoryCommunityDomainV1 {
     /// for a record that no longer opens under its key.
     pub fn original_reserve(
         &self,
-        _seal: &'static AuthorityTrustRootSealV1,
         timeline: TimelineId,
         reservation_operation_id: [u8; 16],
     ) -> Result<CommunityOriginalReserveV1, Error> {
@@ -288,13 +287,13 @@ impl MemoryCommunityDomainV1 {
         Ok(())
     }
 
-    /// Neither key's protection ID is in the vault already: a reused
-    /// host-allocated ID would overwrite a live key, and with it an earlier
-    /// pass's records (`Conflict`).
+    /// The two keys' protection IDs differ and neither is in the vault
+    /// already: a reused host-allocated ID would overwrite a live key, and
+    /// with it an earlier pass's records (`Conflict`).
     fn check_fresh_keys(&self, prepared: &PreparedReserveV1) -> Result<(), Error> {
         let ids = [&prepared.metadata, &prepared.failure]
             .map(|key| key.intent().as_input().protection_operation_id);
-        if ids.iter().any(|id| self.keys.contains_key(id)) {
+        if ids[0] == ids[1] || ids.iter().any(|id| self.keys.contains_key(id)) {
             Err(Error::Conflict)
         } else {
             Ok(())
