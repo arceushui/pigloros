@@ -151,6 +151,8 @@ mod composition_fallback_registry_rows;
 mod composition_fallback_registry_schema;
 mod counterfactual_store;
 mod erasure_admissions;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod erasure_fence_rows;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -2344,7 +2346,10 @@ impl SqliteStore {
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
-                        .and_then(|()| self.prepare_counterfactual_schema())
+                        .and_then(|()| self.prepare_counterfactual_schema())?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_erasure_fence_rows_schema()?;
+                    Ok(())
                 }
             })
     }
