@@ -228,8 +228,8 @@ fn the_batch_is_exactly_the_cfo1_and_its_listed_cfi1s() -> TestResult {
 }
 
 /// Every record is a CFO1 or CFI1 of the batch's pass under the pass cover:
-/// another pass, no pass, another cover and a record that is not a failure
-/// record each give 3.
+/// another pass, no pass, another cover and a pre-execution CFO1 each give 3, and a
+/// record that is not a failure record is the codec's refusal.
 #[test]
 fn every_record_is_of_the_pass_under_its_cover() -> TestResult {
     let mut key = protector(CommunityArtifactPurposeV1::LifecycleControl, COVER)?;
@@ -251,12 +251,16 @@ fn every_record_is_of_the_pass_under_its_cover() -> TestResult {
     let pre_execution = protect(&mut key, &outcome(None, &[])?, &[])?;
     let foreign = protect(&mut key, &invocation(Some(elsewhere), 1)?.0, &[])?;
     let text = protect(&mut key, b"not a failure record", &[])?;
-    for record in [&pre_execution, &foreign, &text] {
+    for record in [&pre_execution, &foreign] {
         assert_eq!(
             prepare(&key, &[record], good()?).err(),
             Some(Error::InvalidBinding)
         );
     }
+    assert_eq!(
+        prepare(&key, &[&text], good()?).err(),
+        Some(Error::InvalidEncoding)
+    );
     let mut state = state_protector()?;
     let content = state.protect(
         Kind::StateContent,
