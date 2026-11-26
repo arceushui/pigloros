@@ -1,0 +1,95 @@
+{
+  "name": "decision-preview-committed",
+  "operation_id": "getDecisionPreview",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:decision-preview",
+      "id": "01JC0GATEWAYW90PREV1EW0001",
+      "generation": 2,
+      "provenance": {
+        "digest": "be5e700b8fed84430a7e1a2d322fe430409354ef40f6c3b721da7aafd4dfeaa9",
+        "origin": "host-derived"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "installed",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "state": "committed",
+      "inputs": {
+        "scenario_room": {
+          "id": "01JC0GATEWAYW9R00M00000001",
+          "revision": 2,
+          "digest": "fd6e6cb67f418f827eed51918ee73b195a95d0e478a85da75eb99db0145288ab"
+        },
+        "preference": {
+          "id": "01JC0GATEWAYW9PREF0000002A",
+          "revision": 1,
+          "digest": "783cea660bc4ce412fd10485f31be662bb9521343368b6b32bed2cee8b56f0b8"
+        },
+        "option_spec": {
+          "id": "01JC0GATEWAYW9QPT10N00002A",
+          "revision": 1,
+          "digest": "64041535a2bf7be712372924efbd41bfb590d6f96c4f6770f08eaa213d4657be"
+        }
+      },
+      "factual_timeline_id": null,
+      "recommendation": {
+        "status": "computed",
+        "option_key": "coast",
+        "toss_up": false,
+        "margin_micro": 950000,
+        "scores": [
+          {
+            "option_key": "coast",
+            "match_score_micro": 650000
+          },
+          {
+            "option_key": "city",
+            "match_score_micro": -300000
+          }
+        ]
+      },
+      "committed": {
+        "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "timeline_id": "4SKQW3XVN6B14SKZ8NNKJCHJ6G",
+        "event_id": "01JC0GATEWAYW90RES00000001",
+        "seq": 2,
+        "event_schema_id": "preview.result.v1",
+        "next_cursor": null
+      },
+      "failure": null,
+      "uncertainty": {
+        "status": "unavailable"
+      },
+      "calibration": {
+        "status": "unavailable",
+        "reason": "no-resolved-predictions"
+      },
+      "proposals": "inert",
+      "actuation": "none"
+    }
+  }
+}
