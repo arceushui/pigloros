@@ -9,7 +9,7 @@
 //! The ceilings are the conformance suite's own: no provider crate defines a
 //! fixed limit set (the effective limit of an attempt is the minimum of the
 //! broker caps, the launch policy and the attempt's own budget, ADR-069
-//! section 4), so the guest binding builds each attempt with the ceiling named
+//! section 8), so the guest binding builds each attempt with the ceiling named
 //! here. `pos-conformance` has no provider dependency, so the values are
 //! constants of this crate and a test asserts every bound is above its ceiling.
 
@@ -22,7 +22,12 @@ pub const MEMORY_CEILING_BYTES: u64 = 64 << 20;
 /// The attempt task ceiling (ELM1 limit 2, `pids.max`; a broker and launch cap).
 pub const TASK_CEILING: u64 = 64;
 /// The attempt watchdog in milliseconds (ELM1 limit 4).
-pub const WATCHDOG_CEILING_MS: u64 = 5_000;
+///
+/// It runs from the unit's activation, after the image mount, and covers the
+/// steps up to the adapter's release (ADR-069 R9 section 4.6.5), which are
+/// slow under TCG. The selector client's whole-exchange deadline is separate
+/// and much longer.
+pub const WATCHDOG_CEILING_MS: u64 = 30_000;
 /// The attempt output ceiling in bytes (ELM1 limit 8).
 pub const OUTPUT_CEILING_BYTES: u64 = 1 << 20;
 /// The `/work` capacity in bytes (ELM1 limit 9).
@@ -62,8 +67,9 @@ impl ProviderConformanceCase {
     /// The adapter mode and bound the case runs.
     ///
     /// The cases that act on a running attempt (cancel, revoke, broker crash)
-    /// run the idle mode for twice the watchdog, so only the case's own act
-    /// ends the attempt before the watchdog would.
+    /// run the idle mode for twice the watchdog. The watchdog therefore fires
+    /// first: the case's act must land within it, or the attempt ends with the
+    /// watchdog's terminal code (6) and the case fails.
     #[must_use]
     pub const fn adapter_plan(self) -> AdapterPlan {
         match self {

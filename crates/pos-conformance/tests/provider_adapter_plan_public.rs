@@ -32,7 +32,7 @@ fn every_case_has_exactly_this_argument_vector() {
             Case::MemoryExhaustion,
             words(&["memory-exhaustion", "134217728"]),
         ),
-        (Case::WatchdogExpiry, words(&["watchdog-expiry", "10000"])),
+        (Case::WatchdogExpiry, words(&["watchdog-expiry", "60000"])),
         (
             Case::OversizedOutput,
             words(&["oversized-output", "2097152"]),
@@ -74,7 +74,7 @@ fn the_ceilings_are_fixed_and_the_overshoot_is_a_real_excess() {
     assert_eq!(OVERSHOOT, 2);
     assert_eq!(MEMORY_CEILING_BYTES, 64 << 20);
     assert_eq!(TASK_CEILING, 64);
-    assert_eq!(WATCHDOG_CEILING_MS, 5_000);
+    assert_eq!(WATCHDOG_CEILING_MS, 30_000);
     assert_eq!(OUTPUT_CEILING_BYTES, 1 << 20);
     assert_eq!(WORK_CEILING_BYTES, 16 << 20);
 }
