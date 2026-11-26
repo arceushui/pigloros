@@ -189,6 +189,26 @@ impl GuestProviderClient {
         )
     }
 
+    /// [`Self::execute_when_open`] reported as text: the lines of [`GuestExecution::report`], or
+    /// the one `execute` line of an exchange that produced no execution.
+    ///
+    /// # Errors
+    /// [`GuestReportError`] when an execution's signed records cannot be reported.
+    pub fn execute_report(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        grant: &GuestCommitment,
+        job: &GuestExecuteJob<'_>,
+        input: &mut (impl Read + Seek),
+        clock: &impl GuestClock,
+        window: Duration,
+    ) -> Result<Vec<String>, GuestReportError> {
+        match self.execute_when_open(admitted, grant, job, input, clock, window) {
+            Ok(mut execution) => execution.report(),
+            Err(error) => Ok(vec![failure_line(error)]),
+        }
+    }
+
     /// Send one SCQ1 and authenticate its SCY1.
     ///
     /// # Errors
@@ -405,7 +425,8 @@ impl GuestExecution {
         self.0.sau1_frames()
     }
 
-    /// The guest evidence of this execution, one `NAME<TAB>VALUE` line each.
+    /// The guest evidence of this execution: `execute executed`, then one `NAME<TAB>VALUE` line
+    /// each.
     ///
     /// These are the selector's own observations: the SPY1 outcome and SAU1 event codes, whether
     /// SPR1 names a `ReadyV1` and a `ReleaseV1`, the RQE1, KOE1 and TME1 digests SPR1 carries, the
@@ -420,7 +441,8 @@ impl GuestExecution {
             SandboxProviderResult::from_canonical_cbor(self.spy1_bytes()).map_err(unreportable)?;
         let receipt =
             SandboxProviderReceipt::from_canonical_cbor(self.spr1_bytes()).map_err(unreportable)?;
-        let mut lines = outcome_lines(&result, &receipt);
+        let mut lines = vec!["execute\texecuted".to_owned()];
+        lines.extend(outcome_lines(&result, &receipt));
         lines.extend(raw_lines(self));
         lines.extend(self.output_line()?);
         Ok(lines)
@@ -448,6 +470,15 @@ impl GuestExecution {
         compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
     ) -> Result<Option<T>, SelectorBoundaryError> {
         self.0.with_verified_output(compose)
+    }
+}
+
+/// The report line of an exchange that produced no execution.
+fn failure_line(error: GuestWaitError) -> String {
+    match error {
+        GuestWaitError::Refused(Some(code)) => format!("execute\trefused\t{code:?}"),
+        GuestWaitError::Refused(None) => "execute\trefused\tundecodable".to_owned(),
+        GuestWaitError::Execute(error) => format!("execute\tfailed\t{error}"),
     }
 }
 

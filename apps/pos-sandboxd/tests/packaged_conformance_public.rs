@@ -17,9 +17,14 @@ use std::{
     fs,
     io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
@@ -204,19 +209,35 @@ impl io::Read for BrokenControl {
 struct ObservingControl {
     seen: Arc<Mutex<Option<PathBuf>>>,
     /// The execute mode's arguments, run once while the installation is held,
-    /// and whether it ended in the selector's own setup error.
+    /// and its report, or the error it ended in.
     execute: Vec<OsString>,
-    executed: Arc<Mutex<Option<bool>>>,
+    executed: Arc<Mutex<Option<String>>>,
 }
+
+/// Where SIC1 names the provider's execute socket.
+const EXECUTE_SOCKET: &str = "/run/pigloros/provider-execute.sock";
 
 impl ObservingControl {
     /// Run the execute mode on its own runtime and thread. Its provider is
-    /// this test process, which listens on no socket, so the exchange must
-    /// end as a setup error after the installation was admitted.
+    /// this test process, whose listener accepts and closes every connection:
+    /// the exchange runs through admission, the commitment, the client and
+    /// its report, and ends before an AGR1.
     fn execute(&self) -> io::Result<()> {
         let arguments = self.execute.clone();
-        let ended = std::thread::scope(|scope| {
-            scope
+        fs::create_dir_all("/run/pigloros")?;
+        fs::set_permissions("/run/pigloros", fs::Permissions::from_mode(0o755))?;
+        let listener = UnixListener::bind(EXECUTE_SOCKET)?;
+        fs::set_permissions(EXECUTE_SOCKET, fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        let done = AtomicBool::new(false);
+        let ran = std::thread::scope(|scope| {
+            let acceptor = scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    drop(listener.accept());
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            let ran = scope
                 .spawn(|| {
                     let mut report = Vec::new();
                     let outcome = runtime().and_then(|runtime| {
@@ -228,15 +249,22 @@ impl ObservingControl {
                             release,
                         ))
                     });
-                    matches!(outcome, Err(ConformanceError::Execute(_))) && report.is_empty()
+                    outcome.map_or_else(
+                        |error| format!("error: {error}"),
+                        |()| String::from_utf8_lossy(&report).into_owned(),
+                    )
                 })
-                .join()
+                .join();
+            done.store(true, Ordering::Relaxed);
+            drop(acceptor.join());
+            ran
         })
         .map_err(|_| io::Error::other("the execute thread panicked"))?;
+        fs::remove_file(EXECUTE_SOCKET)?;
         *self
             .executed
             .lock()
-            .map_err(|_| io::Error::other("poisoned"))? = Some(ended);
+            .map_err(|_| io::Error::other("poisoned"))? = Some(ran);
         Ok(())
     }
 }
@@ -332,14 +360,17 @@ async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResul
     assert!(!Path::new("/var/lib/pigloros").exists());
 
     // The stager exported the selector's side of the staged execution, each
-    // file private, and the execute mode read it and ended in its own setup
-    // error because this process serves no provider socket.
+    // file private, and the execute mode read it and ran its whole exchange
+    // against a provider socket that closes every connection.
     for name in ["spx1", "evaluation", "input"] {
         let metadata = fs::metadata(scratch.path().join("export").join(name))?;
         assert!(metadata.len() > 0, "{name}");
         assert_eq!(metadata.permissions().mode() & 0o7777, 0o600, "{name}");
     }
-    assert_eq!(*executed.lock().map_err(|_| "poisoned")?, Some(true));
+    assert_eq!(
+        executed.lock().map_err(|_| "poisoned")?.as_deref(),
+        Some("execute\tfailed\tprovider execution failed before admission\n")
+    );
     Ok(())
 }
 

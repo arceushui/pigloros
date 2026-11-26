@@ -655,6 +655,7 @@ fn an_execution_is_reported_as_the_selector_observed_it() -> TestResult {
         }
     };
     let mut expected = vec![
+        "execute\texecuted".to_owned(),
         format!("outcome\t{:?}", result.outcome),
         format!(
             "events\t{}",
@@ -817,7 +818,7 @@ fn a_provider_that_is_still_starting_is_asked_again_until_it_executes() -> TestR
         spx1: &fixture.spx1,
     };
     let clock = FakeClock::default();
-    let execution = served.client.execute_when_open(
+    let lines = served.client.execute_report(
         &fixture.provider,
         &commitment,
         &job,
@@ -825,7 +826,61 @@ fn a_provider_that_is_still_starting_is_asked_again_until_it_executes() -> TestR
         &clock,
         Duration::from_mins(2),
     )?;
-    assert_eq!(execution.agr1_bytes(), fixture.agr1);
+    assert_eq!(lines.first().map(String::as_str), Some("execute\texecuted"));
+    assert!(lines.contains(&format!("raw\tagr1\t{}", digest_hex(&fixture.agr1))));
     assert_eq!(*clock.pauses.borrow(), vec![OPEN_RETRY_INTERVAL; 2]);
     join(served)
+}
+
+#[test]
+fn a_refused_exchange_is_reported_as_one_outcome_line() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let error = fixture.spe1.clone();
+    let served = serve(move |listener| {
+        let mut stream = accept(&listener)?;
+        let deadline = deadline()?;
+        read_attempt(&mut stream, &deadline)?;
+        send(&mut stream, &error, &deadline)?;
+        finish(&stream)
+    })?;
+    let mut input = std::io::Cursor::new(b"input".to_vec());
+    let grant = GuestCommitment {
+        commitment: fixture.commitment.clone(),
+        watchdog: Duration::from_secs(5),
+    };
+    let job = GuestExecuteJob {
+        evaluation: &fixture.evaluation,
+        spx1: &fixture.spx1,
+    };
+    let lines = served.client.execute_report(
+        &fixture.provider,
+        &grant,
+        &job,
+        &mut input,
+        &FakeClock::default(),
+        Duration::from_mins(2),
+    )?;
+    assert_eq!(lines, ["execute\trefused\tPayloadTransferTimeout"]);
+    join(served)
+}
+
+#[test]
+fn a_failed_exchange_has_one_line_per_class() {
+    let lines = [
+        (
+            GuestWaitError::Refused(Some(SandboxProviderErrorCode::SandboxUnavailable)),
+            "execute\trefused\tSandboxUnavailable",
+        ),
+        (
+            GuestWaitError::Refused(None),
+            "execute\trefused\tundecodable",
+        ),
+        (
+            GuestWaitError::Execute(GuestExecuteError::BeforeAdmission),
+            "execute\tfailed\tprovider execution failed before admission",
+        ),
+    ];
+    for (error, line) in lines {
+        assert_eq!(failure_line(error), line);
+    }
 }
