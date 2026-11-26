@@ -288,16 +288,9 @@ impl MemoryCommunityDomainV1 {
         input: CommunityReserveInputV1,
     ) -> Result<CommunityStagedReserveV1, Error> {
         let bound = input.minted.as_ref().map_or(0, |minted| minted.rows);
-        if bound > input.pass_rows {
-            return Err(Error::InvalidBinding);
-        }
-        let cri1 = check_binding(&input)?;
         let key = (input.timeline, input.reservation_operation_id);
-        let horizons = self.check_identity(&input, key)?;
-        let state = self
-            .pass_states
-            .get(&input.timeline)
-            .ok_or(Error::EvidenceUnavailable)?;
+        let (cri1, horizons) = self.check_identity(&input, key)?;
+        let state = self.state_for(&input)?;
         self.recheck_reserve(&input, state, horizons)?;
         // The Reserve allocates its native producer ordinal and its pass
         // ordinal in its own transaction (annex §4). Nothing is burned here.
@@ -334,6 +327,21 @@ impl MemoryCommunityDomainV1 {
             native_ordinal: ordinals.0,
             pass_ordinal: ordinals.1,
         })
+    }
+
+    /// T's pass state (`EvidenceUnavailable` with none), which T must have
+    /// been initialized under the profile the request names
+    /// (`InvalidBinding`).
+    fn state_for(&self, input: &CommunityReserveInputV1) -> Result<&CommunityPassStateV1, Error> {
+        let state = self
+            .pass_states
+            .get(&input.timeline)
+            .ok_or(Error::EvidenceUnavailable)?;
+        if state.profile_digest == input.request.profile_digest {
+            Ok(state)
+        } else {
+            Err(Error::InvalidBinding)
+        }
     }
 
     /// The CPR1 of a Reserve and the ordinals it allocated: the next native
@@ -433,10 +441,6 @@ impl MemoryCommunityDomainV1 {
         state: &CommunityPassStateV1,
         writer: WriterHorizonsV1,
     ) -> Result<(), Error> {
-        // T was initialized under the profile the request names.
-        if state.profile_digest != input.request.profile_digest {
-            return Err(Error::InvalidBinding);
-        }
         // The Logical Head and chain compare comes first, with the
         // authority re-check (R10.7 step 5j: 12), for the cut a minted
         // observation observed and for the cut a reused one observed. A call
@@ -538,16 +542,18 @@ impl MemoryCommunityDomainV1 {
         })
     }
 
-    /// The installed horizons the request must fit (`InvalidBinding`), then
-    /// the identity and T checks that R10.7 steps 4a and 4c put before 5j: a
-    /// recorded identity, resolved or not, is a replay (`Conflict`, R8.1(7))
-    /// and an unresolved pass of T is `PassUnresolved`. It returns the
-    /// horizons the Reserve is judged by.
+    /// The request's binding to the call and the installed horizons it must
+    /// fit (`InvalidBinding`), then the identity and T checks that R10.7
+    /// steps 4a and 4c put before 5j: a recorded identity, resolved or not,
+    /// is a replay (`Conflict`, R8.1(7)) and an unresolved pass of T is
+    /// `PassUnresolved`. It returns the validated CRI1 and the horizons the
+    /// Reserve is judged by.
     fn check_identity(
         &self,
         input: &CommunityReserveInputV1,
         key: (TimelineId, [u8; 16]),
-    ) -> Result<WriterHorizonsV1, Error> {
+    ) -> Result<(CommunityReservationRequestV1, WriterHorizonsV1), Error> {
+        let cri1 = check_binding(input)?;
         let horizons = self.horizons_for(input)?;
         if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
             return Err(Error::Conflict);
@@ -555,7 +561,7 @@ impl MemoryCommunityDomainV1 {
         if self.unresolved_pass(input.timeline).is_some() {
             return Err(Error::PassUnresolved);
         }
-        Ok(horizons)
+        Ok((cri1, horizons))
     }
 
     /// R13.1(4) at the writer: every actor of T's scope still fits the
@@ -796,8 +802,8 @@ impl MemoryCommunityDomainV1 {
 /// (R8.1(7), R15.3(2), R15.5).
 ///
 /// One member digest row per due member, ascending by roster index,
-/// `n_due + 1` trace rows, `F_p` of two targets each, and two distinct key
-/// IDs. An invalid CRI1 (a zero digest or identity, a requested horizon
+/// `n_due + 1` trace rows, `F_p` of two targets each, two distinct key IDs,
+/// and no more minted rows than pass rows. An invalid CRI1 (a zero digest or identity, a requested horizon
 /// outside `1..=i64::MAX`) is 3: a `run_pass` refusal never gives 2
 /// (R10.4(2)).
 fn check_binding(input: &CommunityReserveInputV1) -> Result<CommunityReservationRequestV1, Error> {
@@ -824,6 +830,10 @@ fn check_binding(input: &CommunityReserveInputV1) -> Result<CommunityReservation
         || facts.trace_rows != due + 1
         || input.failure_reserve != facts.trace_rows.saturating_mul(2)
         || facts.metadata_key == facts.failure_cohort_key
+        || input
+            .minted
+            .as_ref()
+            .is_some_and(|minted| minted.rows > input.pass_rows)
         || !names_the_members(input)
     {
         Err(Error::InvalidBinding)
