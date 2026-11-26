@@ -193,16 +193,26 @@ pub struct CommunityReservePassFactsV1 {
     pub metadata_key: [u8; 16],
     /// The protection ID of the failure cohort key (R15.1(3)).
     pub failure_cohort_key: [u8; 16],
+    /// `H("ScopeSet", rows)` of the pass scope set `S_pass`, the union of
+    /// the due members' CIR1 scope rows (R11.1(2), R11.4(2)): the failure
+    /// cohort key's scope set. The pipeline fills it from the plan.
+    pub scope_set_digest: Hash,
+    /// The pass CSB1 digest, the cover of every pass cohort (R11.4(1)).
+    pub scope_cover_digest: Hash,
 }
 
 /// A Reserve that passed every writer re-check and awaits its apply.
 pub struct CommunityStagedReserveV1 {
-    key: (TimelineId, [u8; 16]),
+    pub(super) key: (TimelineId, [u8; 16]),
     entry: CommunityPendingReservationV1,
     minted: Option<CommunityMintedObservationV1>,
-    record: CommunityPassRecordV1,
-    native_ordinal: u64,
-    pass_ordinal: u64,
+    pub(super) record: CommunityPassRecordV1,
+    pub(super) native_ordinal: u64,
+    pub(super) pass_ordinal: u64,
+    /// The CRI1 fields the pass was reserved over.
+    pub(super) request: CommunityReservationRequestInputV1,
+    /// The failure cohort's scope set digest and cover digest.
+    pub(super) failure_scope: (Hash, Hash),
 }
 
 /// One Commit's writer inputs (R10.3(6), R11.3, R13.1(4)).
@@ -326,6 +336,8 @@ impl MemoryCommunityDomainV1 {
             minted: input.minted,
             native_ordinal: ordinals.0,
             pass_ordinal: ordinals.1,
+            request: input.request,
+            failure_scope: (facts.scope_set_digest, facts.scope_cover_digest),
         })
     }
 
@@ -624,7 +636,7 @@ impl MemoryCommunityDomainV1 {
 
     /// Publish a checked Reserve: its ordinals, the burn its materialization
     /// consumes, the entry, the record and the pass state.
-    fn publish_reserve(&mut self, staged: CommunityStagedReserveV1) {
+    pub(super) fn publish_reserve(&mut self, staged: CommunityStagedReserveV1) {
         let (timeline, _) = staged.key;
         self.native_producer_ordinal = staged.native_ordinal;
         if staged.minted.is_some() {
@@ -641,7 +653,10 @@ impl MemoryCommunityDomainV1 {
 
     /// The cheap re-validation of an apply: the identity checks, then the
     /// ordinals staged are still the next ones (`Conflict`).
-    fn check_apply_reserve(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
+    pub(super) fn check_apply_reserve(
+        &self,
+        staged: &CommunityStagedReserveV1,
+    ) -> Result<(), Error> {
         self.check_apply_identity(staged.key)?;
         self.check_ordinals(staged)
     }

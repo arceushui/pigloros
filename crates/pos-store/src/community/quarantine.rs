@@ -600,7 +600,7 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// The validated CMA1 anchor and the current CSI1 with its address.
-    fn read_selection(
+    pub(super) fn read_selection(
         &self,
         context: CommunityQuarantineContextV1<'_>,
     ) -> Result<SelectionReadV1, Error> {

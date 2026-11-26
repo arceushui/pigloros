@@ -22,6 +22,8 @@ mod observation;
 mod pass_install;
 mod pass_planner;
 #[cfg(target_os = "linux")]
+mod pass_publish;
+#[cfg(target_os = "linux")]
 mod pass_record;
 #[cfg(target_os = "linux")]
 mod pass_seal;
@@ -81,6 +83,8 @@ pub use pass_planner::{
     CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
     CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
 };
+#[cfg(target_os = "linux")]
+pub use pass_publish::{CommunityOriginalReserveV1, CommunityReservePublicationV1};
 #[cfg(target_os = "linux")]
 pub use pass_record::{
     CommunityPassCountsV1, CommunityPassMemberDigestsV1, CommunityPassStatusV1,
