@@ -144,9 +144,18 @@ impl MemoryCommunityDomainV1 {
     /// `EvidenceUnavailable` for a missing selection, key policy or pass
     /// state and for an inventory generation or CSI1 that moved since the
     /// call read them, `StaleGeneration` and `ContextClosed` as
-    /// [`community_reserve_selection_v1`] gives them, `Conflict` and
-    /// `PassUnresolved` as [`Self::apply_reserve`] gives them, and
-    /// `CapacityExhausted` when a key cannot seal. The domain is unchanged.
+    /// [`community_reserve_selection_v1`] gives them, `Conflict` for a key ID
+    /// already in the vault and, as the apply's checks give them, `Conflict`
+    /// and `PassUnresolved`, and `CapacityExhausted` when a key cannot seal.
+    /// The domain is unchanged.
+    ///
+    /// The order matters: the CSI1 successor is built first, so a token
+    /// staged before another Reserve published has stale ordinals and is
+    /// refused with `InvalidBinding` there, before the apply's compares. A
+    /// fresh token never reaches them either, because `stage_reserve`
+    /// refuses a recorded identity and a second unresolved pass itself; they
+    /// are the writer's backstop, reached directly through
+    /// `check_reserve_publication`.
     pub fn publish_reserved_pass(
         &mut self,
         seal: &'static AuthorityTrustRootSealV1,

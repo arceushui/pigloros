@@ -682,7 +682,9 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// The ordinals staged are still the next ones: another burn or pass in
-    /// between makes the token stale (`Conflict`).
+    /// between makes the token stale (`Conflict`). Through
+    /// `publish_reserved_pass` the CSI1 successor refuses such a token first,
+    /// with `InvalidBinding`, so this compare serves `apply_reserve`.
     fn check_ordinals(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
         let next_pass = self
             .pass_states
