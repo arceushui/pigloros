@@ -96,6 +96,7 @@ jobs:
     outputs:
       rust: ${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || steps.full.outputs.rust }}
       owner_windows: ${{ steps.owner_windows.outputs.owner_windows }}
+      owner_uhid: ${{ steps.owner_uhid.outputs.owner_uhid }}
       rust_packages: ${{ steps.rust_packages.outputs.rust_packages }}
       rust_doc_packages: ${{ steps.rust_packages.outputs.rust_doc_packages }}
     steps:
@@ -180,6 +181,34 @@ jobs:
           printf 'Rust packages: %s\nDoctest packages: %s\n' "${packages}" "${doc_packages}"
           printf 'rust_packages=%s\n' "${packages}" >> "$GITHUB_OUTPUT"
           printf 'rust_doc_packages=%s\n' "${doc_packages}" >> "$GITHUB_OUTPUT"
+      # The Linux owner U-tier (ADR-110 E20, Redmine #1476) is scoped the same
+      # way as the native Windows lane below: only an explicit 'false' from
+      # successful detection, with no truncated or renamed files, skips it.
+      - name: Resolve the owner U-tier scope
+        id: owner_uhid
+        env:
+          DETECTED: ${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.owner_uhid || '' }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scope=true
+          if [[ "${DETECTED}" = false ]]; then
+            if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then
+              echo '::warning::The changed-file list may be truncated; running the owner U-tier.'
+            elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo '::warning::The pull request number is unavailable; running the owner U-tier.'
+            elif ! renamed="$(gh api --method GET --paginate -f per_page=100 \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
+              --jq '.[] | select(.status == "renamed") | .filename')"; then
+              echo '::warning::Renamed files could not be listed; running the owner U-tier.'
+            elif [[ -n "${renamed}" ]]; then
+              echo 'A renamed file may move a lane input; running the owner U-tier.'
+            else
+              scope=false
+            fi
+          fi
+          printf 'owner_uhid=%s\n' "${scope}" >> "$GITHUB_OUTPUT"
       # Only an explicit 'false' from successful detection skips the native
       # Windows owner lane. paths-filter emits nothing for a key the base
       # revision's filter file lacks, and failed detection, non-pull-request
@@ -890,6 +919,18 @@ jobs:
     permissions:
       contents: read
 
+  # The Linux owner U-tier (ADR-110 E20 LG, Redmine #1476) runs a kernel uhid
+  # virtual FIDO device on a hosted runner, beside every other stage. Only
+  # cargo-crap (which merges its LCOV) and ci-gate depend on it. Pull requests
+  # run it only for Linux-owner changes; every other event always runs it.
+  owner-ctap-uhid:
+    name: owner-ctap-uhid
+    needs: [ci_change_scope]
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' && needs.ci_change_scope.outputs.owner_uhid == 'true' }}
+    uses: ./.github/workflows/owner-ctap-uhid.yml
+    permissions:
+      contents: read
+
   clippy:
     name: clippy
     needs: *preflight-stage-needs
@@ -1148,11 +1189,12 @@ jobs:
       - ci_change_scope
       - coverage
       - owner-bridge-windows
+      - owner-ctap-uhid
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
     # The native lane must succeed unless the trusted scope explicitly left it
     # out of this pull request.
-    if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.owner-ctap-uhid.result == 'success' || (needs.ci_change_scope.outputs.owner_uhid == 'false' && needs.owner-ctap-uhid.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     # Budget: the pre-steps (full-history checkout, install-action, LCOV
     # downloads), the resolver step's 45-minute bound on waiting for main's
@@ -1197,6 +1239,25 @@ jobs:
       - name: Use Linux coverage without the unmeasured native shim
         if: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' }}
         run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
+      # The owner U-tier observes the same pos-owner-ctap sources the Linux run
+      # does, so its executed-line counts are added to those records.
+      - name: Download owner U-tier LCOV
+        if: ${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: owner-uhid-lcov-${{ github.sha }}
+          path: ${{ runner.temp }}/owner-uhid-lcov
+      - name: Add owner U-tier coverage to this checkout's LCOV
+        if: ${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}
+        run: |
+          python scripts/merge_owner_uhid_lcov.py \
+            --linux "${{ runner.temp }}/cargo-crap-coverage.lcov" \
+            --uhid "${{ runner.temp }}/owner-uhid-lcov/owner-uhid.lcov" \
+            --receipt "${{ runner.temp }}/owner-uhid-lcov/owner-uhid-lcov-receipt.json" \
+            --workspace "${{ github.workspace }}" \
+            --checkout "${{ github.sha }}" \
+            --output "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov"
+          mv "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       # Polls up to 30 minutes while main's ci.yml run for the trusted base is
@@ -2374,6 +2435,7 @@ jobs:
       - mutation-checks
       - asan-gate
       - owner-bridge-windows
+      - owner-ctap-uhid
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -2390,6 +2452,8 @@ jobs:
           ASAN_RESULT: ${{ needs.asan-gate.result }}
           OWNER_WINDOWS_SCOPE: ${{ needs.ci_change_scope.outputs.owner_windows }}
           OWNER_WINDOWS_RESULT: ${{ needs.owner-bridge-windows.result }}
+          OWNER_UHID_SCOPE: ${{ needs.ci_change_scope.outputs.owner_uhid }}
+          OWNER_UHID_RESULT: ${{ needs.owner-ctap-uhid.result }}
         run: |
           set -euo pipefail
           failed=0
@@ -2436,6 +2500,18 @@ jobs:
           fi
           if [[ "${OWNER_WINDOWS_RESULT}" != "${expected_owner_windows}" ]]; then
             echo "OWNER_WINDOWS_RESULT=${OWNER_WINDOWS_RESULT}" >&2
+            failed=1
+          fi
+
+          # Every non-pull-request event runs the Linux owner U-tier; a pull
+          # request runs it for Rust-affecting Linux-owner changes.
+          expected_owner_uhid=skipped
+          if [[ "${EVENT_NAME}" != pull_request \
+            || ( "${RUST_SCOPE_RESULT}" = true && "${OWNER_UHID_SCOPE}" != false ) ]]; then
+            expected_owner_uhid=success
+          fi
+          if [[ "${OWNER_UHID_RESULT}" != "${expected_owner_uhid}" ]]; then
+            echo "OWNER_UHID_RESULT=${OWNER_UHID_RESULT}" >&2
             failed=1
           fi
 

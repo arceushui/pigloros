@@ -34,6 +34,8 @@ SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ !cancelled() && needs.coverage.result == 'success' && "
     "(needs.owner-bridge-windows.result == 'success' || "
     "(needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && "
+    "(needs.owner-ctap-uhid.result == 'success' || "
+    "(needs.ci_change_scope.outputs.owner_uhid == 'false' && needs.owner-ctap-uhid.result == 'skipped')) && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
@@ -49,6 +51,19 @@ SHIM_ALLOW_ENV = {
     ),
 }
 SHIM_ALLOW_ARG = '${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"} '
+# The owner U-tier (ADR-110 E20, Redmine #1476) ran unless the trusted scope
+# explicitly said 'false'; an empty or unknown scope fails closed to the merge.
+UHID_MEASURED = "${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}"
+UHID_MERGE_COMMAND = (
+    "python scripts/merge_owner_uhid_lcov.py \\\n"
+    '  --linux "${{ runner.temp }}/cargo-crap-coverage.lcov" \\\n'
+    '  --uhid "${{ runner.temp }}/owner-uhid-lcov/owner-uhid.lcov" \\\n'
+    '  --receipt "${{ runner.temp }}/owner-uhid-lcov/owner-uhid-lcov-receipt.json" \\\n'
+    '  --workspace "${{ github.workspace }}" \\\n'
+    '  --checkout "${{ github.sha }}" \\\n'
+    '  --output "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov"\n'
+    'mv "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"\n'
+)
 LINUX_ONLY_COVERAGE_COMMAND = (
     'cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"'
 )
@@ -517,8 +532,8 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage", "owner-bridge-windows"],
-        "cargo-crap must wait for hosted coverage and the native lane",
+        job.get("needs") == ["ci_change_scope", "coverage", "owner-bridge-windows", "owner-ctap-uhid"],
+        "cargo-crap must wait for hosted coverage, the native lane and the owner U-tier",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
@@ -528,11 +543,12 @@ def check_workflow(
     require(job.get("timeout-minutes") == 70, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
-    require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
+    require(len(steps) == 18, "cargo-crap must contain the exact trusted step sequence")
     require([step.get("name") for step in steps] == [
         None, None, "Install cargo-crap", "Download hosted LCOV", "Download hosted native LCOV",
         "Bind native and Linux coverage to this checkout",
         "Use Linux coverage without the unmeasured native shim",
+        "Download owner U-tier LCOV", "Add owner U-tier coverage to this checkout's LCOV",
         "Reject repository cargo-crap configuration",
         "Resolve trusted cargo-crap baseline", "Download trusted base baseline",
         "Drop the unmeasured native shim from the trusted baseline",
@@ -580,6 +596,14 @@ def check_workflow(
         "name": "Use Linux coverage without the unmeasured native shim", "if": NATIVE_SKIPPED,
         "run": LINUX_ONLY_COVERAGE_COMMAND,
     }, "cargo-crap may score Linux LCOV alone only when the native lane is out of scope")
+    require(named_step(steps, "Download owner U-tier LCOV") == {
+        "name": "Download owner U-tier LCOV", "if": UHID_MEASURED, "uses": DOWNLOAD_ACTION,
+        "with": {"name": "owner-uhid-lcov-${{ github.sha }}", "path": "${{ runner.temp }}/owner-uhid-lcov"},
+    }, "cargo-crap must download the owner U-tier LCOV for this checkout")
+    require(named_step(steps, "Add owner U-tier coverage to this checkout's LCOV") == {
+        "name": "Add owner U-tier coverage to this checkout's LCOV", "if": UHID_MEASURED,
+        "run": UHID_MERGE_COMMAND,
+    }, "cargo-crap must add the actual owner U-tier counters before scoring")
     require(named_step(steps, "Drop the unmeasured native shim from the trusted baseline") == {
         "name": "Drop the unmeasured native shim from the trusted baseline",
         "if": "${{ steps.baseline.outputs.run-id != '' && "

@@ -1654,7 +1654,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
                     owner = "success" if event != "pull_request" or rust == "true" else "skipped"
                     env.update(EVENT_NAME=event, RUST_SCOPE_RESULT=rust, OWNER_WINDOWS_SCOPE="true",
-                               MUTATION_RESULT=mutation, OWNER_WINDOWS_RESULT=owner,
+                               OWNER_UHID_SCOPE="true", MUTATION_RESULT=mutation,
+                               OWNER_WINDOWS_RESULT=owner, OWNER_UHID_RESULT=owner,
                                CARGO_CRAP_RESULT=result)
                     completed = subprocess.run(["bash", "-c", step["run"]], env=env,
                                                capture_output=True, check=False)
