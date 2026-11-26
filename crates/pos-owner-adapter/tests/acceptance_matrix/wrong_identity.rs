@@ -1,6 +1,9 @@
 #![cfg(any(test, feature = "test-support"))]
 //! A wrong owner, subject, epoch or RP ID is refused, at unlock before any
 //! ceremony and at enrollment before anything is staged (ADR-091, ADR-097 §5).
+//!
+//! The wrong-RP case is exercised at unlock only: the codec fixes the RP at
+//! enrollment, and the page-reply `rpIdHash` case is covered at bridge level.
 
 use std::fs;
 
@@ -77,8 +80,9 @@ fn wrap_fixture(rp_id: &str) -> TestResult<Vec<u8>> {
     Ok(wrap.to_bytes())
 }
 
-/// An enrolled pair, with `SUBJECT`'s wrap and binding and the bytes of both
-/// subjects' bindings read before the case changes anything.
+/// An enrolled pair holding `SUBJECT`'s wrap and binding bytes.
+///
+/// Both are read before the case changes anything.
 struct Case {
     fixture: Fixture,
     wrap: Vec<u8>,
