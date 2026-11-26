@@ -1041,7 +1041,7 @@ class AsanCiPolicyTests(unittest.TestCase):
             ('if [[ "${CARGO_PACKAGES}" != --workspace ]]; then\n  nextest_args+=',
              "if true; then\n  nextest_args+="),
             ('if [[ "${conformance}" == true ]]; then', "if false; then"),
-            ("conformance=true\n", "conformance=false\n"),
+            ('conformance="${ASAN_CONFORMANCE}"\n', 'conformance="false"\n'),
             ("    run_asan_partition -E 'not package(pos-conformance)' \\\n      --partition slice:2/2",
              "    run_conformance_partition -E 'not package(pos-conformance)' \\\n      --partition slice:2/2"),
         ):
@@ -1053,7 +1053,9 @@ class AsanCiPolicyTests(unittest.TestCase):
 
                 self.assert_rejected(change)
 
-    def run_shard(self, shard: str, packages: str) -> tuple[list[list[str]], str]:
+    def run_shard(
+        self, shard: str, packages: str, *, conformance: bool
+    ) -> tuple[list[list[str]], str]:
         """Run the exact shard command with recording cargo and python stubs."""
         command = CHECKER.EXPECTED_COMMAND.replace(
             'test -x "/usr/bin/llvm-symbolizer-18"\n', "", 1
@@ -1080,6 +1082,7 @@ class AsanCiPolicyTests(unittest.TestCase):
                     GITHUB_WORKSPACE=str(root),
                     ASAN_SHARD=shard,
                     CARGO_PACKAGES=packages,
+                    ASAN_CONFORMANCE="true" if conformance else "false",
                 ),
                 capture_output=True,
                 text=True,
@@ -1100,20 +1103,24 @@ class AsanCiPolicyTests(unittest.TestCase):
         )
         for shard in (*conformance_only, "remainder-1", "remainder-2"):
             with self.subTest(shard=shard, scope="workspace"):
-                calls, _ = self.run_shard(shard, "--workspace")
+                calls, _ = self.run_shard(shard, "--workspace", conformance=True)
                 cargo = [call for call in calls if call[0] == "cargo" and "nextest" in call and "run" in call]
                 self.assertEqual(len(cargo), 1)
                 for call in cargo:
                     self.assertNotIn("--no-tests=pass", call)
                 self.assertEqual(calls[-1][0], "python")
             with self.subTest(shard=shard, scope="with conformance"):
-                calls, _ = self.run_shard(shard, "-p pos-core -p pos-conformance")
+                calls, _ = self.run_shard(
+                    shard, "-p pos-core -p pos-conformance", conformance=True
+                )
                 cargo = [call for call in calls if call[0] == "cargo" and "nextest" in call and "run" in call]
                 self.assertEqual(len(cargo), 1)
                 for call in cargo:
                     self.assertIn("--no-tests=pass", call)
             with self.subTest(shard=shard, scope="without conformance"):
-                calls, output = self.run_shard(shard, "-p pos-core -p pos-conformance-extra")
+                calls, output = self.run_shard(
+                    shard, "-p pos-core -p pos-conformance-extra", conformance=False
+                )
                 cargo = [call for call in calls if call[0] == "cargo" and "nextest" in call and "run" in call]
                 if shard in conformance_only:
                     self.assertEqual(cargo, [])
@@ -1123,6 +1130,13 @@ class AsanCiPolicyTests(unittest.TestCase):
                     self.assertIn("not package(pos-conformance)", cargo[0])
                     self.assertIn("--no-tests=pass", cargo[0])
                 self.assertEqual(calls[-1][0], "python")
+
+    def test_conformance_shard_uses_scope_job_result(self) -> None:
+        calls, output = self.run_shard(
+            "bundle-coverage", "-p pos-core -p pos-conformance", conformance=False
+        )
+        self.assertFalse(any(call[0] == "cargo" for call in calls))
+        self.assertIn("pos-conformance is not in the affected packages", output)
 
     @staticmethod
     def headroom_step(workflow: dict, job_name: str = "asan") -> dict:

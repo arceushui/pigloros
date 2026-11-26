@@ -31,6 +31,10 @@ SCOPED_PACKAGES = (
     "${{ github.event_name == 'pull_request' && "
     "needs.ci_change_scope.outputs.rust_packages || '--workspace' }}"
 )
+SCOPED_CONFORMANCE = (
+    "${{ github.event_name == 'pull_request' && "
+    "needs.ci_change_scope.outputs.conformance || 'true' }}"
+)
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
 archive_file="${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
@@ -49,12 +53,9 @@ nextest_args=(
   --no-output-indent
   --test-threads 2
 )
-conformance=true
+conformance="${ASAN_CONFORMANCE}"
 if [[ "${CARGO_PACKAGES}" != --workspace ]]; then
   nextest_args+=(--no-tests=pass)
-  if [[ " ${CARGO_PACKAGES} " != *" -p pos-conformance "* ]]; then
-    conformance=false
-  fi
 fi
 run_asan_partition() {
   ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
@@ -241,6 +242,7 @@ EXPECTED_STEP_ENV = {
         "print_suppressions=1"
     ),
     "CARGO_PACKAGES": SCOPED_PACKAGES,
+    "ASAN_CONFORMANCE": SCOPED_CONFORMANCE,
 }
 # The shards start once the complete standard set (which includes asan-build)
 # passes and run beside diff mutation testing; ci-gate requires both results.

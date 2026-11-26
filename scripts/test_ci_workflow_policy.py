@@ -2337,6 +2337,21 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(values, {"rust_packages": "-p c", "rust_doc_packages": "none",
                                   "conformance": "false"})
 
+    def test_package_scope_marks_only_the_exact_conformance_package(self) -> None:
+        for packages, expected in (
+            ("-p pos-conformance", "true"),
+            ("-p pos-conformance-extra", "false"),
+        ):
+            with self.subTest(packages=packages):
+                values, _, _ = self.resolve_package_scope(
+                    python_stub=(
+                        "printf 'rust_packages=" + packages
+                        + "\\nrust_doc_packages=none\\n'\n"
+                    )
+                )
+                self.assertEqual(values["rust_packages"], packages)
+                self.assertEqual(values["conformance"], expected)
+
     def test_package_scope_runs_the_workspace_whenever_unsure(self) -> None:
         for label, overrides in (
             ("push", {"event": "push"}),
