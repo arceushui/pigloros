@@ -615,10 +615,12 @@ fn refusals() -> [(Tamper, Error); 12] {
         ),
         (
             |_, staged| {
+                // The CPR1 refuses a horizon outside `1..=i64::MAX` as out of
+                // range, not as a bad binding.
                 staged.record.reserved.reservation.evidence_not_after_micros = 0;
                 Ok(())
             },
-            Error::InvalidBinding,
+            Error::BoundsExceeded,
         ),
         (|_, _| Ok(()), Error::InvalidBinding),
     ]
