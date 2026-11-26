@@ -772,3 +772,60 @@ fn a_client_for_the_admitted_provider_needs_the_socket_sic1_names() -> TestResul
     assert!(GuestProviderClient::for_admitted_provider(&admitted, own).is_err());
     Ok(())
 }
+
+#[test]
+fn a_provider_that_is_still_starting_is_asked_again_until_it_executes() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let starting = fixture.spe1_starting.clone();
+    let grant = fixture.agr1.clone();
+    let rest = fixture
+        .sau1
+        .iter()
+        .cloned()
+        .chain([
+            fixture.spr1.clone(),
+            fixture.output_chunk.clone(),
+            fixture.spy1.clone(),
+        ])
+        .collect::<Vec<_>>();
+    // Two refusals with code 11, then one complete execution, on three connections.
+    let served = serve(move |listener| {
+        for _ in 0..2 {
+            let mut stream = accept(&listener)?;
+            let deadline = deadline()?;
+            read_attempt(&mut stream, &deadline)?;
+            send(&mut stream, &starting, &deadline)?;
+            finish(&stream)?;
+        }
+        let mut stream = accept(&listener)?;
+        let deadline = deadline()?;
+        read_attempt(&mut stream, &deadline)?;
+        send(&mut stream, &grant, &deadline)?;
+        drain(&mut stream, &deadline)?;
+        for frame in rest {
+            send(&mut stream, &frame, &deadline)?;
+        }
+        finish(&stream)
+    })?;
+    let mut input = std::io::Cursor::new(b"input".to_vec());
+    let commitment = GuestCommitment {
+        commitment: fixture.commitment.clone(),
+        watchdog: Duration::from_secs(5),
+    };
+    let job = GuestExecuteJob {
+        evaluation: &fixture.evaluation,
+        spx1: &fixture.spx1,
+    };
+    let clock = FakeClock::default();
+    let execution = served.client.execute_when_open(
+        &fixture.provider,
+        &commitment,
+        &job,
+        &mut input,
+        &clock,
+        Duration::from_mins(2),
+    )?;
+    assert_eq!(execution.agr1_bytes(), fixture.agr1);
+    assert_eq!(*clock.pauses.borrow(), vec![OPEN_RETRY_INTERVAL; 2]);
+    join(served)
+}
