@@ -431,14 +431,14 @@ fn image_manifest(
     )
 }
 
-fn launch_policy(image_manifest: [u8; 32]) -> TestResult<Vec<u8>> {
+fn launch_policy(image_manifest: [u8; 32], limits: &LimitTable) -> TestResult<Vec<u8>> {
     let unsigned = Value::Array(vec![
         Value::Text("LPS1".to_owned()),
         integer(1),
         Value::Text("air-gapped".to_owned()),
         integer(1),
         digest(image_manifest),
-        Value::Array(selector_limit_values()),
+        Value::Array(limit_values(limits)),
         Value::Array(Vec::new()),
     ]);
     let encoded = encode(&unsigned)?;
@@ -451,21 +451,58 @@ fn launch_policy(image_manifest: [u8; 32]) -> TestResult<Vec<u8>> {
     ]))?)
 }
 
-fn selector_limit_values() -> Vec<Value> {
+/// One value per ELM1 limit ID 0 through 16, shared by the launch policy and the broker caps.
+pub(crate) type LimitTable = [u64; 17];
+
+/// The small limits of every unit-test fixture.
+const FIXTURE_LIMITS: LimitTable = [
+    2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 256,
+    2_000, 2_000, 2_000,
+];
+
+/// The limits of an attempt that must really run in the #444 evidence guest: memory 128 MiB, no
+/// swap, 256 tasks, one CPU, a 120 s watchdog, 1024 descriptors, 16 MiB files, 1 MiB output and
+/// a 16 MiB work area. The other limits keep the unit-test fixture's values.
+pub(crate) const GUEST_LIMITS: LimitTable = [
+    134_217_728,
+    0,
+    256,
+    1_000_000,
+    120_000,
+    1_024,
+    16_777_216,
+    2_000,
+    1_048_576,
+    16_777_216,
+    2_000,
+    2_000,
+    2_000,
+    256,
+    2_000,
+    2_000,
+    2_000,
+];
+
+fn limit_values(limits: &LimitTable) -> Vec<Value> {
     (0..17)
-        .map(|limit_id| {
-            let value = if limit_id == 13 { 256 } else { 2_000 };
-            Value::Array(vec![integer(limit_id), integer(value)])
-        })
+        .zip(limits)
+        .map(|(limit_id, value)| Value::Array(vec![integer(limit_id), integer(*value)]))
         .collect()
 }
 
-fn broker_hard_caps() -> Result<Vec<u8>, ProtocolError> {
+fn broker_hard_caps(limits: &LimitTable) -> Result<Vec<u8>, ProtocolError> {
     encode(&Value::Array(vec![
         Value::Text("BHC1".to_owned()),
         integer(1),
-        Value::Array(selector_limit_values()),
+        Value::Array(limit_values(limits)),
     ]))
+}
+
+/// The provider executable of a fixture installation and the limits it is admitted with.
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderFixture<'a> {
+    pub(crate) binary: &'a [u8],
+    pub(crate) limits: &'a LimitTable,
 }
 
 /// Expanded systemd-repart DDI and its independently described partitions.
@@ -580,13 +617,17 @@ pub(crate) fn admitted_state_with_arguments(
         signing,
         salt,
         arguments,
-        FIXTURE_PROVIDER_BINARY,
+        ProviderFixture {
+            binary: FIXTURE_PROVIDER_BINARY,
+            limits: &FIXTURE_LIMITS,
+        },
     )
 }
 
-/// [`admitted_state_with_arguments`] with `provider_binary` as the bytes of
+/// [`admitted_state_with_arguments`] with `provider.binary` as the bytes of
 /// the installed kind-11 provider executable, whose BLAKE3 digest the SPM1,
-/// PCR1 and APT1 records then bind.
+/// PCR1 and APT1 records then bind, and `provider.limits` as the launch policy's and the broker's
+/// limits.
 pub(crate) fn admitted_state_with_provider_binary(
     root_image: &[u8],
     executable: &[u8],
@@ -594,7 +635,7 @@ pub(crate) fn admitted_state_with_provider_binary(
     signing: &ImageSigning,
     salt: [u8; 32],
     arguments: &[String],
-    provider_binary: &[u8],
+    provider: ProviderFixture<'_>,
 ) -> TestResult<InstalledSelectorState> {
     let authority = provider_authority();
     let architecture = signing.architecture;
@@ -606,8 +647,8 @@ pub(crate) fn admitted_state_with_provider_binary(
         .map(str::to_owned)
         .to_vec();
     let features_digest = feature_digest(&features)?;
-    let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
-    let hard_caps = broker_hard_caps()?;
+    let provider_binary_digest = *blake3::hash(provider.binary).as_bytes();
+    let hard_caps = broker_hard_caps(provider.limits)?;
     let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
     let manifest = provider_manifest(
         &authority,
@@ -632,7 +673,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         &authority, root_image, executable, partitions, signing, salt, arguments,
     )?;
     let image_digest = signed_record_digest(&image)?;
-    let launch = launch_policy(image_digest)?;
+    let launch = launch_policy(image_digest, provider.limits)?;
     let launch_digest = signed_record_digest(&launch)?;
     let policy = provider_policy(
         &authority,
@@ -661,7 +702,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         (8, launch_digest, launch.as_slice()),
         (9, image_digest, image.as_slice()),
         (10, hard_caps_digest, hard_caps.as_slice()),
-        (11, provider_binary_digest, provider_binary),
+        (11, provider_binary_digest, provider.binary),
         (12, *blake3::hash(root_image).as_bytes(), root_image),
         (13, *blake3::hash(executable).as_bytes(), executable),
     ];

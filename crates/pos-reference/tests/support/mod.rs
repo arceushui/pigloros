@@ -880,6 +880,25 @@ pub fn air_gapped_corpus_with_watchdog_ms(watchdog_ms: u64) -> TestResult<Corpus
     })
 }
 
+/// The deterministic budget of a guest fixture: the counters that become ELM1 limits (memory,
+/// output and storage bytes) are real, the others keep the default.
+const GUEST_FIXTURE_BUDGETS: [[u64; 8]; 7] =
+    [[134_217_728, 100, 100, 100, 1_048_576, 16_777_216, 100, 100]; 7];
+
+/// Build an Air-Gapped corpus whose attempts can really run in a guest: one selected watchdog
+/// and budgets that are not ELM1 limits of a few bytes.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn air_gapped_guest_corpus(watchdog_ms: u64) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mode: 1,
+        watchdog_ms,
+        fixture_budgets: &GUEST_FIXTURE_BUDGETS,
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a complete corpus with one selected operational watchdog.
 ///
 /// # Errors

@@ -23,7 +23,8 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
     admitted_state, admitted_state_with_arguments, admitted_state_with_provider_binary,
-    ddi_fixture, materialize_state, provider_executable_path, ImageSigning, RUNTIME_KEY_SEED,
+    ddi_fixture, materialize_state, provider_executable_path, ImageSigning, ProviderFixture,
+    GUEST_LIMITS, RUNTIME_KEY_SEED,
 };
 use crate::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
@@ -130,8 +131,7 @@ impl StagedInstallation {
     pub fn stage_provider_execution(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
         let state = provider_state(provider)?;
         let mut staged = Self::create_parent()?;
-        let corpus =
-            crate::selector_test_support::air_gapped_corpus_with_watchdog_ms(GUEST_WATCHDOG_MS)?;
+        let corpus = crate::selector_test_support::air_gapped_guest_corpus(GUEST_WATCHDOG_MS)?;
         let admitted = staged.stage_execution_state(state, &corpus)?;
         staged.install_provider_files(&admitted, provider)?;
         Ok(staged)
@@ -494,7 +494,10 @@ fn provider_state(provider: &StagedProvider<'_>) -> Result<InstalledSelectorStat
         &signing,
         salt,
         provider.image.arguments,
-        &binary,
+        ProviderFixture {
+            binary: &binary,
+            limits: &GUEST_LIMITS,
+        },
     )
 }
 
