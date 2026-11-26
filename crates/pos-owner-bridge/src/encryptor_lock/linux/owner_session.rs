@@ -147,6 +147,11 @@ impl SubjectOwnerExclusiveGuard<'_> {
     pub fn owner_id(&self) -> &str {
         &self.owner_id
     }
+
+    /// Whether this guard holds `owner_id` in `lock`'s own lock table.
+    pub(super) fn holds(&self, lock: &SubjectEncryptorLock, owner_id: &str) -> bool {
+        std::ptr::eq(self.locks, &raw const lock.subject_owners) && self.owner_id == owner_id
+    }
 }
 
 impl Drop for SubjectOwnerSharedGuard<'_> {

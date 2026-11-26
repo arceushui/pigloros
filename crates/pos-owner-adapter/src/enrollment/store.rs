@@ -1,5 +1,6 @@
 #![cfg(any(test, feature = "test-support"))]
-//! The bound store's side of ADR-137 P3: steps 2, 3 and 6.
+//! The bound store's side of ADR-137 P3 (steps 2, 3 and 6) and of the P5
+//! deletion of a failed attempt.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,9 +25,10 @@ pub struct SubjectKeyRegistration {
 
 /// The store steps of enrollment, injected into the enrollment adapter.
 ///
-/// Each method is one shared-store transaction of ADR-137 P3. The adapter
-/// calls them in P3 order under the E16 lifetime lock and the subject owner's
-/// exclusive session lock; it never retries one. Only
+/// Each method is one shared-store transaction of ADR-137 P3 or P5. The
+/// adapter calls them in P3 order, then in P5 order after a definite
+/// failure, under the E16 lifetime lock and the subject owner's exclusive
+/// session lock; it never retries one. Only
 /// [`VolatileEnrollmentStore`] implements this trait until the protected
 /// store implementation lands (#1373).
 pub trait EnrollmentStore {
@@ -35,7 +37,9 @@ pub trait EnrollmentStore {
     /// In one read snapshot, refuse when B6 rows fence the subject's
     /// Timeline, then return the highest epoch or high-water entry that the
     /// bound store's registry holds for `owner_id` in any lifecycle state, or
-    /// zero when it holds none.
+    /// zero when it holds none. ADR-137 P5 reads it again before deleting a
+    /// failed attempt: it deletes only while the epoch is above this ceiling,
+    /// which proves the identity absent from P1.
     ///
     /// # Errors
     /// Returns the store's failure. A B6 fence or an unreadable or malformed
@@ -67,9 +71,24 @@ pub trait EnrollmentStore {
     /// identity under the ADR-065 rules, and delete the staging record.
     ///
     /// # Errors
-    /// Returns the store's failure. The staged artifacts then stay for
-    /// ADR-137 P5 recovery.
+    /// Returns the store's failure. The adapter cannot tell a definite
+    /// refusal from an unknown commit outcome, so it deletes nothing after
+    /// one: the staged artifacts and the record stay for ADR-137 P5 recovery
+    /// at the next owner start.
     fn register(&mut self, registration: &SubjectKeyRegistration) -> Result<(), OwnerError>;
+
+    /// The last step of ADR-137 P5 for one of this store's own attempts:
+    /// delete the P3a staging record.
+    ///
+    /// In one `BEGIN IMMEDIATE`, delete the record of `(owner_id, epoch)`. A
+    /// missing record is an idempotent success. The adapter calls this only
+    /// after P5 has deleted or deliberately kept the attempt's files and SNL1
+    /// row, so that a failure at any earlier step leaves the record for P5
+    /// recovery at the next owner start.
+    ///
+    /// # Errors
+    /// Returns the store's failure. The record then stays for P5 recovery.
+    fn delete_staging_record(&mut self, owner_id: &str, epoch: u64) -> Result<(), OwnerError>;
 }
 
 impl<S: EnrollmentStore + ?Sized> EnrollmentStore for &mut S {
@@ -91,6 +110,10 @@ impl<S: EnrollmentStore + ?Sized> EnrollmentStore for &mut S {
 
     fn register(&mut self, registration: &SubjectKeyRegistration) -> Result<(), OwnerError> {
         (**self).register(registration)
+    }
+
+    fn delete_staging_record(&mut self, owner_id: &str, epoch: u64) -> Result<(), OwnerError> {
+        (**self).delete_staging_record(owner_id, epoch)
     }
 }
 
@@ -186,6 +209,11 @@ impl EnrollmentStore for VolatileEnrollmentStore {
                 self.record_epoch(&registration.owner_id, registration.epoch);
                 self.registrations.push(registration.clone());
             })
+    }
+
+    fn delete_staging_record(&mut self, owner_id: &str, epoch: u64) -> Result<(), OwnerError> {
+        self.staging.remove(&(owner_id.to_owned(), epoch));
+        Ok(())
     }
 }
 
