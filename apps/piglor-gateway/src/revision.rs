@@ -251,7 +251,7 @@ pub(crate) fn canonical_ulid(value: &str) -> Option<Ulid> {
 }
 
 /// A revision number of 1 to 2^53 - 1.
-fn revision_number(value: u64) -> Option<NonZeroU64> {
+pub(crate) fn revision_number(value: u64) -> Option<NonZeroU64> {
     NonZeroU64::new(value).filter(|revision| revision.get() <= MAX_SAFE_INTEGER.unsigned_abs())
 }
 

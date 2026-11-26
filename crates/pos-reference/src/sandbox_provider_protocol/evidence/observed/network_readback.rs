@@ -17,7 +17,8 @@ use ciborium::value::Value;
 use super::super::{code, code_value, optional, optional_value, u32_in, Result};
 use super::NamespaceIdentity;
 use crate::sandbox_provider_protocol::codec::{
-    array, byte_string, bytes_value, require_canonical_order, text, text_value, uint, uint_value,
+    array, byte_string, bytes_value, encode, require_canonical_order, text, text_value, uint,
+    uint_value,
 };
 use crate::sandbox_provider_protocol::SandboxProviderProtocolError;
 
@@ -367,6 +368,28 @@ impl Slot {
 }
 
 impl LocalNetworkReadback {
+    /// The readback with every list in canonical encoding order (R9 §4.1
+    /// bytewise order, so text is length-first): the order the decoder
+    /// requires. Each chain's rules keep kernel evaluation order.
+    #[must_use]
+    pub fn canonicalized(mut self) -> Self {
+        // A value that cannot be encoded sorts first; the decoder then
+        // refuses the record, so it is never accepted.
+        self.inner_addresses
+            .sort_by_cached_key(|prefix| encode(&prefix.value()).ok());
+        self.host_addresses
+            .sort_by_cached_key(|prefix| encode(&prefix.value()).ok());
+        self.routes
+            .sort_by_cached_key(|route| encode(&route.value()).ok());
+        self.chains
+            .sort_by_cached_key(|chain| encode(&chain.value()).ok());
+        self.egress_allowed
+            .sort_by_cached_key(|endpoint| encode(&endpoint_value(*endpoint)).ok());
+        self.egress_masqueraded
+            .sort_by_cached_key(|endpoint| encode(&endpoint_value(*endpoint)).ok());
+        self
+    }
+
     pub(super) fn value(&self) -> Value {
         Value::Array(vec![
             self.namespace.value(),

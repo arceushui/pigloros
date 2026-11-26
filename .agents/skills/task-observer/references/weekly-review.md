@@ -178,6 +178,12 @@ Wait for the user to acknowledge before other work.
 
 ## Delivering updated skills
 
+For repository-maintained skills, use the repository workflow in
+`references/skill-authoring.md`: deliver the requested PR, without a separate
+installation bundle. Keep observations OPEN while that PR is pending and mark
+them ACTIONED when the change is merged or installed. The bundle-delivery steps
+below apply only when an installed-skill update or portable export is requested.
+
 Save each updated skill to
 `[workspace folder]/skill-updates/[date]/[skill-name]/` — the FULL skill
 directory (SKILL.md plus references/, scripts/, assets/ where present),
