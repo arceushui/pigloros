@@ -10,6 +10,7 @@ use crate::{BridgeError, UnavailableCode};
 
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod linux;
+pub mod state_dir;
 
 /// The platform distinction selected by ADR-110 E16.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
