@@ -140,6 +140,43 @@ fn an_owned_root_records_its_owner_at_creation() -> Result<(), Box<dyn Error + S
     Ok(())
 }
 
+/// ADR-141 P6: a root created under a given identity records that identity,
+/// its name and its owner. A second creation of the identity, or of a host
+/// root's, is refused and publishes no generation, so the sender stays
+/// current and the host ready, on both adapters.
+#[test]
+fn an_owned_root_is_created_once_under_its_identity() -> Result<(), Box<dyn Error + Send + Sync>> {
+    for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let id = pos_core::TimelineId::new();
+        let host_root = pos_core::TimelineId::new();
+        let owner = EntityId::new();
+        let mut commands = host.command_sender()?;
+        commands.open_root_timeline(host_root, "host-owned")?;
+        let created = commands.create_owned_root_with_id(id, "factual", owner)?;
+        assert_eq!((created.id(), created.meta.owner), (id, Some(owner)));
+        assert_eq!(created.meta.name.as_deref(), Some("factual"));
+        assert_eq!(created.meta.mode, pos_core::TimelineMode::Live);
+        assert!(created.meta.fork_point.is_none());
+        for recorded in [id, host_root] {
+            assert_eq!(
+                commands
+                    .create_owned_root_with_id(recorded, "again", EntityId::new())
+                    .map(drop),
+                Err(ErasureHostErrorV1::Conflict)
+            );
+        }
+        commands.create_timeline("after-refusals")?;
+        assert_eq!(commands.timeline(id)?, Some(created));
+        drop(commands);
+        assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    }
+    Ok(())
+}
+
 /// ADR-136 §4a: host-owned roots are outside a client root count, which
 /// still stops after `maximum + 1` client roots; an identity the store
 /// does not record changes nothing.
