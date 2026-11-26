@@ -347,16 +347,16 @@ pub use lifecycle::{
 #[cfg(target_os = "linux")]
 pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, FailClosedSetup,
-    HostServiceChannel, HostServiceStream, LocalNetworkPort, LocalProxyBindError,
-    NetworkRemovalFailure, RefusingConnector, RemoveNetwork, ServeError, ServedProxy, SetupClass,
-    SetupError,
+    HostServiceChannel, HostServiceStream, LocalNetworkPort, LocalProxyBindError, NetworkReadback,
+    NetworkRemovalFailure, ReadbackError, RefusingConnector, RemoveNetwork, ServeError,
+    ServedProxy, SetupClass, SetupError,
 };
 #[cfg(target_os = "linux")]
 pub use namespace_network::netlink;
 #[cfg(target_os = "linux")]
 pub use namespace_network::{
     decode_firewall_rule, encode_firewall_rule, establish_namespace, AttemptEgress,
-    AttemptNetworkError, EgressControl, EgressProbe, EgressProbeError, EstablishError,
+    AttemptNetworkError, EgressControl, EgressProbe, EgressProbeError, EgressSlice, EstablishError,
     EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
     FirewallRule, FirewallTableFamily, FirewallVerdict, ForwardingRecords, HostEgress,
     HostEgressError, InvalidEgressProbe, InvalidLinkName, IpPrefix, LinkKind, LinkName,
