@@ -109,6 +109,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/executor/scenario_room/tests.rs",
     "src/decision_preview/tests.rs",
     "src/executor/decision_preview/tests.rs",
+    "src/decision_preview/route/tests.rs",
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",

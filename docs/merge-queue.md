@@ -22,12 +22,12 @@ flowchart LR
 1. Open the pull request against `main` and let its CI run.
 2. The changes get an independent review, re-run after every later change.
    Agents working for the maintainer run that review themselves.
-3. Once the review is clean and CI is green, the maintainer — or an agent
-   acting on the maintainer's standing instruction — adds the
+3. Once the review is clean and CI is green, the maintainer or an agent
+   acting on an explicit request or standing authorization for this PR adds the
    **`ready-to-merge`** label. That label is the only
    way into the queue; `/trunk merge` comments are switched off (see
-   [Who can merge](#who-can-merge)). You may add it before CI finishes; Trunk
-   waits until GitHub reports the pull request as mergeable.
+   [Who can merge](#who-can-merge)). Wait for the required checks on the current
+   head before adding it; Trunk also checks GitHub's mergeability state.
 4. Wait. Trunk posts its status on the pull request and merges when the queue
    test passes.
 
@@ -39,18 +39,18 @@ Do **not**:
 - press GitHub's Merge button or call the merge API — the `main -> queue only`
   ruleset rejects it, and any merge outside the queue resets every queued
   test;
-- rebase, amend or force-push a pushed branch. When you push a fix, first
-  `git fetch origin` and `git merge origin/main` so the pull request's CI sees
-  the same `main` the queue tests against; otherwise update a branch only to
-  resolve a **merge conflict**, which the queue cannot do for you;
+- rebase, amend or force-push a pushed branch. Update a branch against `main`
+  or its parent only to resolve an actual **merge conflict**, which the queue
+  cannot resolve for you. Advancing `main` alone does not require an update;
 - cancel and re-submit a pull request whose test was reset — Trunk restarts it
   automatically and re-submitting moves it to the back of the queue.
 
 ## Who can merge
 
-Merging is a maintainer decision, not a CI check. Agents that add the label
-act on the maintainer's standing instruction through the maintainer's own
-account, so they add no collaborator or bot. Nothing in the repository's
+Merging is a maintainer decision, not a CI check. Agents add the label only when
+a direct request or explicit standing authorization covers the PR, independent
+review is clean, and required CI is green. They act through the maintainer's
+own account, so they add no collaborator or bot. Nothing in the repository's
 workflows approves or blocks a pull request for its author; the queue entry
 point is restricted instead:
 
