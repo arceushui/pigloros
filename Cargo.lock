@@ -3151,7 +3151,7 @@ dependencies = [
  "ed25519",
  "rand_core",
  "serde",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "signature",
  "subtle",
  "zeroize",
@@ -3964,7 +3964,7 @@ dependencies = [
  "hkdf",
  "hybrid-array",
  "rand_core",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "subtle",
  "x25519-dalek",
  "zeroize",
@@ -5496,7 +5496,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
- "sha2 0.11.1",
+ "sha2 0.11.2",
 ]
 
 [[package]]
@@ -5618,7 +5618,7 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5832,7 +5832,7 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
 ]
 
@@ -5848,7 +5848,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
  "ulid",
  "zeroize",
@@ -5873,7 +5873,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
  "ulid",
  "x25519-dalek",
@@ -5986,7 +5986,7 @@ dependencies = [
  "pos-crypto",
  "pos-owner-bridge",
  "pos-owner-bridge-codec",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "ulid",
  "zeroize",
 ]
@@ -6000,7 +6000,7 @@ dependencies = [
  "pos-crypto",
  "pos-owner-bridge-codec",
  "rustix 1.1.6",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
  "zeroize",
 ]
@@ -6012,7 +6012,7 @@ dependencies = [
  "base64",
  "httparse",
  "p256",
- "sha2 0.11.1",
+ "sha2 0.11.2",
 ]
 
 [[package]]
@@ -6022,7 +6022,7 @@ dependencies = [
  "pos-crypto",
  "pos-owner-bridge",
  "pos-owner-bridge-codec",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "webview2-com",
  "windows",
 ]
@@ -6037,7 +6037,8 @@ dependencies = [
  "p256",
  "pos-owner-bridge",
  "pos-owner-bridge-codec",
- "sha2 0.11.1",
+ "rustix 1.1.6",
+ "sha2 0.11.2",
  "unicode-normalization",
  "zeroize",
 ]
@@ -6098,7 +6099,7 @@ dependencies = [
  "pos-plugin-release",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
  "wit-parser 0.263.0",
 ]
@@ -6185,7 +6186,7 @@ dependencies = [
  "pos-plugin-content",
  "pos-plugin-release",
  "pos-store",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
 ]
 
@@ -6198,7 +6199,7 @@ dependencies = [
  "rustix 1.1.6",
  "rustls",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror 2.0.21",
  "ureq",
  "url",
@@ -6273,7 +6274,7 @@ dependencies = [
  "pos-runtime",
  "pos-store",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tempfile",
 ]
 
@@ -6320,7 +6321,7 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tempfile",
  "thiserror 2.0.21",
  "x509-cert",
@@ -6424,7 +6425,7 @@ dependencies = [
  "rusqlite",
  "rustix 1.1.6",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tempfile",
  "thiserror 2.0.21",
  "ulid",
@@ -7173,9 +7174,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.1"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
+checksum = "5b0e5c7d67bc53f435386b2130fdc900488c5703770f6d8a4633060e34288a27"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
@@ -9427,18 +9428,18 @@ checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.65"
+version = "0.8.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32bc8a75f879cd6fe53a6bedf3c28f0e1b914c77424fc2be9e2ec85d7d25aff5"
+checksum = "cba8a86aee14fc8cc6c208af60854b3d4ab7185a9a369a12c648faa2716ff42a"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.65"
+version = "0.8.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8bfd2644ea1681f60cf95029ff18aa8ad1cc3f7b8fe37286f8e473bb29f816b"
+checksum = "f89bca3b96ceb3cfcb4572790402f977442270d252b9a8504ebc258760c55f94"
 dependencies = [
  "proc-macro2",
  "quote",
