@@ -190,7 +190,8 @@ revisions, bound to one exact Scenario Room revision and one installed EPF1. Eve
 inert, and nothing reaches the real world.
 
 - **Admission order.** A malformed body, a missing or malformed `Idempotency-Key`, a malformed
-  ULID and a `schema_version` other than 1 (`400 unsupported-version`), an oversized body (`413`)
+  ULID, a `schema_version` that is any number other than the integer 1 (`400
+  unsupported-version`; one that is no number is `400 invalid-request`), an oversized body (`413`)
   and another content type (`415`) are answered before the authority decision. After the
   decision the Principal takes one of four in-flight slots (`principal_concurrent_operations`);
   a fifth concurrent request, an exact retry included, is a retryable `429` without
@@ -216,8 +217,10 @@ inert, and nothing reaches the real world.
   attempt the host interrupted between its two appends, and answers the original `202` receipt
   bytes, also after a restart. "The same bytes" holds whenever a retry is answered `202`; a retry
   can still be refused by the authority, the consent, a bound or an unavailable host. When the
-  result append fails after the claim committed, the request is answered `503`
-  (`temporarily-unavailable`, retryable) and a retry finishes the preview.
+  result append fails after the claim committed, the claim stays: a host that cannot answer
+  (erasure containment unavailable, a stale execution-mode binding) is a retryable
+  `503 temporarily-unavailable`, and any other store failure is `500 internal-safe-failure`;
+  either way an exact retry with the same key finishes the preview.
 - **Receipt.** `request_id` and `operation_id` are both the preview ID, `operation_url` is
   `/v1/decision-previews/{preview_id}`, `idempotency_key_digest` is BLAKE3 of the key bytes, and
   `bound_inputs` is exactly `scenario_room`, `preference`, `option_spec` (the request's

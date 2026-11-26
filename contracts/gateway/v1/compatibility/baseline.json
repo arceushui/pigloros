@@ -2818,7 +2818,7 @@
         "tags": [
           "decision-preview"
         ],
-        "description": "Admit one inert Decision Preview (#305, ADR-140) under the `decision-preview.create` grant: the `pigloros.match-score.v1` Recommendation of the acting entity's own Preference and OptionSpec revisions in an exact Scenario Room revision, under one installed EPF1. The order is: a malformed body, a missing or malformed `Idempotency-Key`, a malformed ULID and a `schema_version` other than 1 (`400`), an oversized body (`413`) and another content type (`415`) before the authority decision; then the decision; then the Principal's in-flight slot (`429`, four at a time, exact retries included); then the claim lookup: the same key with another request is `409 idempotency-conflict`, and an exact retry re-checks the bound room's consent, finishes an interrupted attempt and answers the original `202` receipt bytes. A fresh request then passes the profile gate (`409 incompatible-profile` for a profile outside the bound mode's servable set or without an installed EPF1; until #1364 and #461 install one, every fresh request stops here), the room (its `provenance.digest` must be `scenario_room.digest`), the bindings (`404`) and the room consent (`403`), and commits one `preview.request.v1` claim and its `preview.result.v1` result on the host-owned `decision-previews` Timeline in one store command, under the per-minute quota and the store ceiling (`429`). The `202` receipt names the preview: `request_id` = `operation_id` = the preview ID, the claim Event's ID. It never claims that anything committed: `getDecisionPreview` reports the state.",
+        "description": "Admit one inert Decision Preview (#305, ADR-140) under the `decision-preview.create` grant: the `pigloros.match-score.v1` Recommendation of the acting entity's own Preference and OptionSpec revisions in an exact Scenario Room revision, under one installed EPF1. The order is: a malformed body, a missing or malformed `Idempotency-Key`, a malformed ULID and a `schema_version` that is not the integer 1 (`400`: `unsupported-version` for any other number), an oversized body (`413`) and another content type (`415`) before the authority decision; then the decision; then the Principal's in-flight slot (`429`, four at a time, exact retries included); then the claim lookup: the same key with another request is `409 idempotency-conflict`, and an exact retry re-checks the bound room's consent, finishes an interrupted attempt and answers the original `202` receipt bytes. A fresh request then passes the profile gate (`409 incompatible-profile` for a profile outside the bound mode's servable set or without an installed EPF1; until #1364 and #461 install one, every fresh request stops here), the room (its `provenance.digest` must be `scenario_room.digest`), the bindings (`404`) and the room consent (`403`), and commits one `preview.request.v1` claim and its `preview.result.v1` result on the host-owned `decision-previews` Timeline in one store command, under the per-minute quota and the store ceiling (`429`). The `202` receipt names the preview: `request_id` = `operation_id` = the preview ID, the claim Event's ID. It never claims that anything committed: `getDecisionPreview` reports the state.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2860,7 +2860,7 @@
             }
           },
           "400": {
-            "description": "`invalid-request` (a malformed body or ULID, or a missing or malformed `Idempotency-Key`) or `unsupported-version` (a `schema_version` other than 1), before the authority decision.",
+            "description": "`invalid-request` (a malformed body or ULID, a `schema_version` that is not a number, or a missing or malformed `Idempotency-Key`) or `unsupported-version` (a `schema_version` that is any number other than the integer 1), before the authority decision.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -2986,7 +2986,7 @@
             }
           },
           "500": {
-            "description": "`internal-safe-failure`: the store is inconsistent; nothing is appended or recorded.",
+            "description": "`internal-safe-failure`: the store is inconsistent, in which case nothing is appended or recorded; or the result append failed after the claim committed for a reason other than an unavailable host, in which case the claim stays and an exact retry with the same key finishes the preview.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -3001,7 +3001,7 @@
             }
           },
           "503": {
-            "description": "`temporarily-unavailable`. Retryable: the host cannot vouch for its revocation state, record the denial evidence or reach its store, including a result append that failed after the claim committed (an exact retry finishes the preview). Not retryable: the first preview of a store with an active erasure request on a Gateway without a Local erasure composition.",
+            "description": "`temporarily-unavailable`. Retryable: the host cannot vouch for its revocation state, record the denial evidence or reach its store, including a result append that failed after the claim committed because the host could not answer (erasure containment unavailable, a stale execution-mode binding); the claim stays and an exact retry with the same key finishes the preview. Not retryable: the first preview of a store with an active erasure request on a Gateway without a Local erasure composition.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/CacheControl"
@@ -5335,7 +5335,7 @@
         "properties": {
           "schema_version": {
             "const": 1,
-            "description": "The schema version of the request; any other version is `400 unsupported-version`."
+            "description": "The schema version of the request; any other number is `400 unsupported-version`, and a value that is not a number is `400 invalid-request`."
           },
           "scenario_room": {
             "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"

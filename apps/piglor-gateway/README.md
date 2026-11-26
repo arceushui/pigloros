@@ -16,7 +16,9 @@ implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, a
 and revocation state. A host without a provisioned Local Principal answers every protected
 operation `401 unauthenticated`. Scenario Rooms (#303), Preferences and OptionSpecs (#304),
 Decision Previews (#305), consent revocation and erasure (#309, see [Consents](#consents)) are
-served; the other Wave 9 resource families (simulated actions, Projections, ensembles, Replays,
+served. Until an EPF1 is installed (#1364, #461) the release composition answers every fresh
+`createDecisionPreview` with `409 incompatible-profile`; exact retries and reads are still
+answered. The other Wave 9 resource families (simulated actions, Projections, ensembles, Replays,
 evidence and exports) are Draft operations of the contract that their owner tickets (#306 to
 #308) will serve. WebSocket streaming remains deferred.
 
