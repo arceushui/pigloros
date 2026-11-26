@@ -24,6 +24,16 @@
 //! until process exit: it keeps the `SQLite` write lock and blocks other
 //! processes' writers, which is the retention ADR-123 §6 intends.
 //!
+//! The caller's directory path must keep naming the retained directory while
+//! the handle lives: `SQLite` removes `-wal` and `-shm` by the path it
+//! remembered at open, so every guarded operation and the close require the
+//! interlock (taken through the retained descriptor) and then that the path
+//! still names that directory; otherwise the context is quarantined and the
+//! connection and claim are retained (ADR-123 §6). The open screens under an
+//! interlock on the path, then claims and opens under a second interlock
+//! taken through the screened directory object after a witness recheck, so the
+//! claim and the opened file are keyed on the screened identity.
+//!
 //! A failed diagnostic query (`sqlite_filestat` missing, over the length
 //! limit or malformed) always retains and quarantines, never a clean
 //! `Unavailable` with disposal: the connection's native owner is uncertain.
@@ -41,7 +51,7 @@
 
 use std::fmt;
 use std::mem::ManuallyDrop;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +86,16 @@ thread_local! {
     static PANIC_SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only seam: managed disposal panics before the connection closes.
     static PANIC_DISPOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only seam: runs once between the screening and the second interlock.
+    static AFTER_SCREEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_after_screen_hook() {
+    if let Some(hook) = AFTER_SCREEN.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 /// The qualified owner store: one managed native connection to an installed
@@ -86,6 +106,10 @@ thread_local! {
 pub struct QualifiedSqliteStoreV1 {
     context: Arc<OwnerStoreContextV1>,
     main_basename: String,
+    /// The directory path the caller opened. Every later interlock requires
+    /// it to still name the retained directory (ADR-123 §6): `SQLite` deletes
+    /// `-wal` and `-shm` by the names it remembered at open.
+    directory: PathBuf,
     file_id: SubjectStoreFileIdV1,
     native: ManuallyDrop<NativeOwnerV1>,
 }
@@ -209,14 +233,26 @@ impl QualifiedSqliteStoreV1 {
             .try_enter()
             .map_err(OwnerStoreBindingErrorV1::Admission)?;
         let outcome = if context.claim_native_slot() {
-            OwnerStoreFileInterlockV1::try_acquire(
-                &admitted,
-                test_database_directory,
-                main_basename,
-            )
-            .map_err(|_| StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
-            .and_then(|_interlock| setup(test_database_directory, main_basename, pre_screen_key))
-            .inspect_err(|step| step.release_refused_slot(&context))
+            screened(&admitted, test_database_directory, main_basename)
+                .and_then(|witnesses| {
+                    // The screened directory object, not the path, now keys
+                    // the interlock under which the claim and the open run.
+                    OwnerStoreFileInterlockV1::try_acquire(
+                        &admitted,
+                        &witnesses.retained_directory_path(),
+                        main_basename,
+                    )
+                    .map_err(|_| StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
+                    .and_then(|_interlock| {
+                        setup(
+                            witnesses,
+                            test_database_directory,
+                            main_basename,
+                            pre_screen_key,
+                        )
+                    })
+                })
+                .inspect_err(|step| step.release_refused_slot(&context))
         } else {
             Err(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
         };
@@ -224,6 +260,7 @@ impl QualifiedSqliteStoreV1 {
             file_id: native.witnesses.store_file_id(),
             context,
             main_basename: main_basename.to_owned(),
+            directory: test_database_directory.to_path_buf(),
             native: ManuallyDrop::new(native),
         })
     }
@@ -247,7 +284,8 @@ impl QualifiedSqliteStoreV1 {
     ///
     /// # Errors
     /// Returns `Admission` before any lower lock, `Unavailable` when the
-    /// interlock or the transaction is busy, and `Quarantined` when a witness
+    /// interlock or the transaction is busy, and `Quarantined` when the
+    /// opened directory path no longer names the retained directory, a witness
     /// changed, the native proof failed or the transaction could not finish.
     pub fn guarded<T, E>(
         &mut self,
@@ -266,6 +304,7 @@ impl QualifiedSqliteStoreV1 {
             &self.main_basename,
         )
         .map_err(|_| StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
+        .and_then(|interlock| require_namespace(interlock, &native.witnesses, &self.directory))
         .and_then(|_interlock| run_guarded(native, file_id, operation));
         conclude(admitted, outcome)
     }
@@ -292,6 +331,7 @@ impl QualifiedSqliteStoreV1 {
         };
         let Self {
             main_basename,
+            directory: original,
             native,
             ..
         } = self;
@@ -299,6 +339,7 @@ impl QualifiedSqliteStoreV1 {
         let key = native.witnesses.registry_key();
         let outcome = OwnerStoreFileInterlockV1::try_acquire(&admitted, &directory, &main_basename)
             .map_err(|_| StepV1::Retain)
+            .and_then(|interlock| require_namespace(interlock, &native.witnesses, &original))
             .and_then(|_interlock| {
                 close_native(native)
                     .then(|| {
@@ -309,6 +350,22 @@ impl QualifiedSqliteStoreV1 {
             });
         conclude(admitted, outcome).map_err(|_| OwnerStoreCloseErrorV1::Quarantined)
     }
+}
+
+/// Keep a held interlock only while the caller's directory path still names
+/// the retained directory. The interlock is taken through the retained
+/// descriptor, but `SQLite` addresses `-wal` and `-shm` by the remembered
+/// path, so after a swap its cleanup could delete another store's files:
+/// quarantine and keep the claim instead (ADR-123 §6).
+fn require_namespace<I>(
+    interlock: I,
+    witnesses: &OwnerStoreWitnessesV1,
+    original: &Path,
+) -> Result<I, StepV1> {
+    witnesses
+        .names_directory(original)
+        .then_some(interlock)
+        .ok_or(StepV1::Retain)
 }
 
 /// Dispose of the retained owner under the held interlock, which was taken
@@ -345,13 +402,38 @@ fn conclude<T>(
     }
 }
 
-/// Screen, provision, open and bind under the held interlock.
+/// Screen and provision under an interlock taken on the caller's path. That
+/// interlock is released on return: the open runs under a second one taken
+/// through the screened directory object, so no path swap between the two
+/// lookups can key the claim and the open on a different file.
+fn screened(
+    admitted: &OwnerStoreOperationV1<'_>,
+    directory: &Path,
+    main_basename: &str,
+) -> Result<OwnerStoreWitnessesV1, StepV1> {
+    OwnerStoreFileInterlockV1::try_acquire(admitted, directory, main_basename)
+        .ok()
+        .and_then(|_interlock| {
+            let witnesses = OwnerStoreWitnessesV1::screen(directory, main_basename);
+            #[cfg(test)]
+            run_after_screen_hook();
+            witnesses
+        })
+        .ok_or(StepV1::Refuse(OwnerStoreBindingErrorV1::Unavailable))
+}
+
+/// Open and bind under the held retained-directory interlock. The recheck
+/// proves the entries are still the screened ones now that the lock is held.
+/// `is_claimed` and the claim in `bind_native` are one atomic step only
+/// because that interlock is held across both.
 fn setup(
+    witnesses: OwnerStoreWitnessesV1,
     directory: &Path,
     main_basename: &str,
     pre_screen_key: SubjectStoreFileIdV1,
 ) -> Result<NativeOwnerV1, StepV1> {
-    OwnerStoreWitnessesV1::screen(directory, main_basename)
+    Some(witnesses)
+        .filter(OwnerStoreWitnessesV1::recheck)
         .filter(|witnesses| !is_claimed(witnesses.registry_key()))
         .and_then(|witnesses| {
             witnesses
@@ -395,6 +477,8 @@ fn bind_native(
 ) -> Result<NativeOwnerV1, StepV1> {
     let file_id = witnesses.store_file_id();
     let key = witnesses.registry_key();
+    // Atomic with the caller's `is_claimed` check only because the interlock
+    // is held across both steps.
     claim_identity(key);
     let bound = configure(&store.conn)
         .then_some(())
@@ -593,10 +677,11 @@ const fn retain<T>(value: T) -> ManuallyDrop<T> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::num::NonZeroU64;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::thread::LocalKey;
 
     use pos_core::{GatewayModeBindingHostV1, GatewayModeProfileRefV1};
@@ -1213,28 +1298,88 @@ mod tests {
         Ok(())
     }
 
+    /// Rename the fixture directory away and put a decoy directory with
+    /// non-empty `-wal` and `-shm` at its path. Returns the moved path.
+    fn swap_in_decoy(original: &Path) -> TestResult<PathBuf> {
+        let mut moved = original.to_path_buf().into_os_string();
+        moved.push("-moved");
+        let moved = PathBuf::from(moved);
+        std::fs::rename(original, &moved)?;
+        std::fs::create_dir(original)?;
+        std::fs::set_permissions(original, std::fs::Permissions::from_mode(0o700))?;
+        for name in [format!("{MAIN}-wal"), format!("{MAIN}-shm")] {
+            std::fs::write(original.join(name), b"decoy")?;
+        }
+        Ok(moved)
+    }
+
+    /// Assert the decoy files survived and the real store's files stayed in
+    /// the renamed directory, then put the real directory back.
+    fn assert_untouched_and_restore(original: &Path, moved: &Path) -> TestResult {
+        for name in [format!("{MAIN}-wal"), format!("{MAIN}-shm")] {
+            assert_eq!(std::fs::read(original.join(&name))?, b"decoy");
+            assert!(moved.join(&name).exists());
+        }
+        assert!(moved.join(MAIN).exists());
+        std::fs::remove_dir_all(original)?;
+        std::fs::rename(moved, original)?;
+        Ok(())
+    }
+
     #[test]
-    fn guarded_and_close_operate_on_the_retained_directory_after_a_path_swap() -> TestResult {
+    fn guarded_after_a_path_swap_quarantines_and_leaves_the_decoy_untouched() -> TestResult {
         let fixture = installed(true)?;
         let mut store = fixture.open()?;
         let original = fixture.directory.path().to_path_buf();
-        let mut moved = original.clone().into_os_string();
-        moved.push("-moved");
-        let moved = PathBuf::from(moved);
-        std::fs::rename(&original, &moved)?;
-        std::fs::create_dir(&original)?;
-        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700))?;
-        let operated = store.guarded(|binding| {
-            binding
-                .store()
-                .conn
-                .execute_batch("CREATE TABLE swapped_probe (value INTEGER)")
+        let moved = swap_in_decoy(&original)?;
+        let operated = store.guarded(|_| Ok::<(), ()>(()));
+        assert_eq!(operated.err(), Some(OwnerStoreBindingErrorV1::Quarantined));
+        assert_eq!(store.guarded(|_| Ok::<(), ()>(())).err(), Some(QUARANTINED));
+        assert_untouched_and_restore(&original, &moved)?;
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn close_after_a_path_swap_quarantines_and_leaves_the_decoy_untouched() -> TestResult {
+        let fixture = installed(true)?;
+        let store = fixture.open()?;
+        let original = fixture.directory.path().to_path_buf();
+        let moved = swap_in_decoy(&original)?;
+        let closed_after_swap = store.close();
+        assert!(matches!(
+            closed_after_swap.err(),
+            Some(OwnerStoreCloseErrorV1::Quarantined)
+        ));
+        assert_untouched_and_restore(&original, &moved)?;
+        assert_eq!(
+            fixture.open_fresh_context().err(),
+            Some(OwnerStoreBindingErrorV1::Unavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_path_swap_between_screening_and_the_open_is_refused_without_a_claim() -> TestResult {
+        let fixture = installed(true)?;
+        let original = fixture.directory.path().to_path_buf();
+        let swapped = Rc::new(RefCell::new(None));
+        let hook_swapped = Rc::clone(&swapped);
+        let hook_original = original.clone();
+        AFTER_SCREEN.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                *hook_swapped.borrow_mut() = swap_in_decoy(&hook_original).ok();
+            }));
         });
-        let closed_clean = store.close().map_err(|error| error.to_string());
+        let refused = fixture.open();
+        let moved = swapped.borrow_mut().take().ok_or("hook did not run")?;
         std::fs::remove_dir_all(&original)?;
         std::fs::rename(&moved, &original)?;
-        assert!(matches!(operated, Ok(Ok(()))));
-        assert_eq!(closed_clean, Ok(()));
+        assert_eq!(refused.err(), Some(OwnerStoreBindingErrorV1::Unavailable));
+        closed(fixture.open()?)?;
         Ok(())
     }
 
