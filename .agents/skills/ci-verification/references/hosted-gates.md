@@ -46,7 +46,7 @@ authorization and repository policy.
 
 - **Keep workflow changes minimal and executable.** Remove whitespace-only churn, use the repository’s naming conventions, and verify folded shell commands, quoting, environment transport, path filters, timeouts, cancellation behavior, and aggregators on the actual runner. Performance improvements should be measured; do not hide architectural debt with larger timeouts.
 
-- **Check formatting on the changed files themselves.** `cargo fmt --all` covers Cargo's discovered target graph, which can omit a changed Rust fixture or integration target that repository-wide Trunk checks format directly. Run the repository formatter and the pinned rustfmt check on every changed Rust file before pushing; keep the hosted formatter authoritative.
+- **Check formatting on the changed files themselves in hosted CI.** `cargo fmt --all` covers Cargo's discovered target graph, which can omit a changed Rust fixture or integration target that repository-wide Trunk checks format directly. Verify the hosted formatter checks every changed Rust file on the exact head. Preserve required local hooks, but do not run a manual local Cargo formatter; keep the hosted formatter authoritative.
 
 - **Distinguish formatter findings from formatter execution failures.** A whole-repository Trunk rustfmt batch can reach its 1,200-second limit with no stdout, stderr, or formatting finding even when the dedicated `fmt` gate passes on the same commit. Treat that as a tool-execution failure, not evidence that source needs reformatting: re-run the exact failed job once on a fresh runner before editing; if it times out again, isolate or split its file batch and inspect the tool/cache state instead of making speculative source changes.
 

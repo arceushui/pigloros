@@ -9,7 +9,7 @@ authorization and repository policy.
 
 - **Follow the configured ADR transition flow.** Keep ADRs in `Proposed → Under Review → Accepted / Rejected` as configured; if a transition is unavailable, record the blocker rather than changing trackers or statuses to bypass it.
 
-- **Advance tracker artifacts only through their configured lifecycle.** A commit, an Accepted ADR, or a passing CI run does not by itself resolve an implementation ticket. For the configured Redmine flow, Feature/Bug/Task completion uses Resolved (status 3), ADR completion uses Proposed → Under Review → Accepted (status 9), and Closed (status 5) is reserved for rejected or superseded work. Keep ADR acceptance, implementation authorization, evidence readiness, and product acceptance separate.
+- **Advance tracker artifacts only through their configured lifecycle.** A commit, an Accepted ADR, or a passing CI run does not by itself resolve an implementation ticket. Feature/Bug/Task completion uses the configured `Resolved` state; ADR approval uses `Proposed → Under Review → Accepted`; rejected or superseded records use their configured terminal states. Read current metadata and allowed transitions for status IDs at the time of each operation. Treat `Closed` as administrative finalization only when the configured flow requires it. Keep ADR acceptance, implementation authorization, evidence readiness, and product acceptance separate.
 
 - **Keep authority states separate.** ADR status, implementation authorization, ticket status, evidence readiness, and product acceptance are different facts. An Accepted ADR records a decision; it does not start implementation.
 

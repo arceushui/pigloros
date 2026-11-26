@@ -1,6 +1,6 @@
 ---
 name: ci-verification
-description: Verify PiglorOS hosted gates, investigate GitHub Actions failures, and change workflow scheduling or evidence production without weakening checks. Use for CI, mutation, sanitizer, cache, or workflow work; use rust-quality-gates for local Rust validation.
+description: Verify PiglorOS hosted gates, investigate GitHub Actions failures, and change workflow scheduling or evidence production without weakening checks. Use for CI, mutation, sanitizer, cache, or workflow work; use rust-quality-gates for Rust quality gates.
 ---
 
 # CI Verification

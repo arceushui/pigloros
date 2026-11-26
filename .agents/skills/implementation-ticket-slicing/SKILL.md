@@ -11,7 +11,7 @@ Use this skill whenever an implementation ticket belongs to an epic or a larger 
 
 Before proposing or implementing a ticket:
 
-0. For a Redmine ticket, invoke `start-work` first. Identify the ticket, set it to In Progress, and record the work in journal notes.
+0. If the user authorized starting, resuming, or implementing an identified Redmine ticket, invoke `start-work` first. For read-only planning or review, do not mutate ticket status; follow `start-work` to identify the provider and ticket.
 1. Read the repository context, project overview, applicable ADRs/specifications, and the relevant existing tests.
 2. Inspect the actual code paths, public seams, callers, persistence/schema boundaries, and nearby history. Do not split work from the ticket prose alone.
 3. Map the change surface: files, modules, interfaces, tests, migrations, and dependency edges. Identify whether the work is a vertical behavior slice or a mechanical wide refactor.
