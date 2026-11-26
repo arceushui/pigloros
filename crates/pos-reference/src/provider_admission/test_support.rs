@@ -31,6 +31,11 @@ use crate::selector::installation::{
 
 const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
 
+/// The watchdog of the case [`StagedInstallation::stage_provider_execution`] stages. The case's
+/// watchdog bounds the selector's whole exchange, and a cold image mount under TCG takes about
+/// 70 s, so the corpus default of 1 s would end every guest exchange before admission.
+const GUEST_WATCHDOG_MS: u64 = 120_000;
+
 /// A caller-built SIM1 DDI and the DER certificate whose key signed its root hash.
 ///
 /// [`StagedInstallation::stage_image`] reads the partitions, the verity salt
@@ -125,7 +130,9 @@ impl StagedInstallation {
     pub fn stage_provider_execution(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
         let state = provider_state(provider)?;
         let mut staged = Self::create_parent()?;
-        let admitted = staged.stage_execution_state(state)?;
+        let corpus =
+            crate::selector_test_support::air_gapped_corpus_with_watchdog_ms(GUEST_WATCHDOG_MS)?;
+        let admitted = staged.stage_execution_state(state, &corpus)?;
         staged.install_provider_files(&admitted, provider)?;
         Ok(staged)
     }
@@ -208,7 +215,8 @@ impl StagedInstallation {
     /// Refuses an existing fixed installation and invalid fixture material.
     pub fn stage_execution() -> Result<Self, Box<dyn Error>> {
         let mut staged = Self::create_parent()?;
-        staged.stage_execution_state(admitted_state()?)?;
+        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        staged.stage_execution_state(admitted_state()?, &corpus)?;
         Ok(staged)
     }
 
@@ -217,10 +225,10 @@ impl StagedInstallation {
     fn stage_execution_state(
         &mut self,
         state: InstalledSelectorState,
+        corpus: &crate::selector_test_support::Corpus,
     ) -> Result<AdmittedSelectorProvider, Box<dyn Error>> {
-        let corpus = crate::selector_test_support::air_gapped_corpus()?;
         let (evaluation, state) =
-            crate::selector::installation::fixture::execution_state(state, &corpus)?;
+            crate::selector::installation::fixture::execution_state(state, corpus)?;
         let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
         let resolved = admitted
             .bootstrap()

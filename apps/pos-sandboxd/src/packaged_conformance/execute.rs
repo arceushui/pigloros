@@ -10,10 +10,10 @@
 //! provider that is still opening answers SPE1 `11`; the exchange is asked
 //! again for [`EXECUTE_WINDOW`] on the monotonic clock.
 //!
-//! The report is `execute` and its outcome, then one `NAME<TAB>VALUE` line of
-//! evidence per observation the selector made (`GuestExecution::report`).
-//! A provider that does not execute is an outcome, not an error: the guest
-//! checker judges every line.
+//! The report is `execute executed` and one `NAME<TAB>VALUE` line of evidence per
+//! observation the selector made, or one `execute` line for an exchange that
+//! produced no execution (`GuestProviderClient::execute_report`). That is an
+//! outcome, not an error: the guest checker judges every line.
 
 use std::ffi::OsString;
 use std::fmt::Display;
@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pos_reference::evaluator_protocol::EvaluationRequest;
 use pos_reference::provider_transport::guest::{
-    GuestExecuteJob, GuestInstantClock, GuestProviderClient, GuestReportError, GuestWaitError,
+    GuestExecuteJob, GuestInstantClock, GuestProviderClient,
 };
 use pos_reference::selector::installation::authority::AuthenticatedSelectorBootstrap;
 use pos_reference::selector::installation::InstalledSelectorState;
@@ -106,18 +106,21 @@ pub(super) fn run_execute(
             .map_err(refused)?;
     let client =
         GuestProviderClient::for_admitted_provider(&admitted, case.main_pid).map_err(refused)?;
-    let outcome = client.execute_when_open(
-        admitted.provider(),
-        &grant,
-        &GuestExecuteJob {
-            evaluation: &case.evaluation,
-            spx1: &case.spx1,
-        },
-        &mut Cursor::new(case.input),
-        &GuestInstantClock::start(),
-        EXECUTE_WINDOW,
-    );
-    report_outcome(outcome, |mut execution| execution.report(), report)
+    client
+        .execute_report(
+            admitted.provider(),
+            &grant,
+            &GuestExecuteJob {
+                evaluation: &case.evaluation,
+                spx1: &case.spx1,
+            },
+            &mut Cursor::new(case.input),
+            &GuestInstantClock::start(),
+            EXECUTE_WINDOW,
+        )
+        .map_err(refused)?
+        .iter()
+        .try_for_each(|line| report_line(report, line))
 }
 
 /// The seconds since the Unix epoch on the system clock, or zero before it.
@@ -126,34 +129,6 @@ fn unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-/// Report an exchange: `execute executed` and the evidence `lines` of what
-/// it produced, or its failure.
-fn report_outcome<Execution>(
-    outcome: Result<Execution, GuestWaitError>,
-    lines: impl FnOnce(Execution) -> Result<Vec<String>, GuestReportError>,
-    report: &mut impl Write,
-) -> Result<(), ConformanceError> {
-    match outcome {
-        Ok(execution) => {
-            report_line(report, "execute\texecuted")?;
-            lines(execution)
-                .map_err(refused)?
-                .iter()
-                .try_for_each(|line| report_line(report, line))
-        }
-        Err(error) => report_line(report, &failure_line(error)),
-    }
-}
-
-/// The report line of an exchange that produced no execution.
-fn failure_line(error: GuestWaitError) -> String {
-    match error {
-        GuestWaitError::Refused(Some(code)) => format!("execute\trefused\t{code:?}"),
-        GuestWaitError::Refused(None) => "execute\trefused\tundecodable".to_owned(),
-        GuestWaitError::Execute(error) => format!("execute\tfailed\t{error}"),
-    }
 }
 
 #[cfg(test)]
