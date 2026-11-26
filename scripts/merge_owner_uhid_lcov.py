@@ -8,6 +8,11 @@ hosted Linux run, so executed-line counts are added to the matching DA records
 of crates/pos-owner-ctap/src and nothing else changes. A U-tier source that the
 Linux LCOV lacks, a record outside that source tree, a wrong checkout or a
 tampered digest is refused; missing observations are never invented.
+
+cargo-crap derives each function's coverage from the DA records alone, so adding
+to those is the whole merge: the FN, FNDA, BRDA and BRF/BRH records keep the
+hosted Linux run's values. A U-tier line that was executed but that the Linux
+record does not list would be observed and then dropped, so it is refused.
 """
 
 from __future__ import annotations
@@ -89,7 +94,11 @@ def merge(linux, uhid, receipt, workspace, checkout):
                 counts[number] = count + extra
                 line = "DA:" + ",".join([str(number), str(count + extra), *rest])
             rewritten.append(line)
-        lines_unmatched += len(set(hits) - set(counts))
+        unmatched = set(hits) - set(counts)
+        lines_unmatched += len(unmatched)
+        lost = sorted(number for number in unmatched if hits[number] > 0)
+        require(not lost, f"executed U-tier lines are absent from the Linux LCOV of {path}: "
+                + ", ".join(map(str, lost)))
         covered = sum(1 for count in counts.values() if count > 0)
         out.extend(f"LH:{covered}" if line.startswith("LH:") else line for line in rewritten)
     missing = set(added) - seen

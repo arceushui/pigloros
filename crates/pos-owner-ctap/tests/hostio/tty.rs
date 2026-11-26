@@ -1,5 +1,6 @@
 //! The terminal prompt over pseudo-terminals: echo, restoring, cancelling, bounds and unwinding.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -8,12 +9,13 @@ use std::time::{Duration, Instant};
 
 use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::{BridgeError, LifecycleCode, MonotonicClock, UnavailableCode};
+use pos_owner_ctap::fdwait::{wait_readable, Wait};
 use pos_owner_ctap::{
     CtapAuthenticator, Drbg, MemoryHid, Notice, PinBuffer, PinPrompt, SoftAuthenticator, TtyPrompt,
 };
 use rustix::fs::{fcntl_getfl, OFlags};
-use rustix::io::dup;
-use rustix::termios::{tcgetattr, LocalModes};
+use rustix::io::{dup, write};
+use rustix::termios::{tcgetattr, tcsetattr, InputModes, LocalModes, OptionalActions};
 
 use super::{
     contains, enroll_and_unlock, pty, run_prompt, Pty, TestResult, Ticking, User, PIN, PROMPT,
@@ -90,12 +92,110 @@ fn the_entry_gives_up_at_the_deadline() -> TestResult {
     Ok(())
 }
 
+/// A clock whose first read types `line` at the terminal and waits until the owner's side has it,
+/// and then reports `late`. The deadline of the entry is the start, so it has passed by then.
+struct TypesThenExpires<'a> {
+    master: &'a OwnedFd,
+    probe: OwnedFd,
+    line: &'a [u8],
+    late: Instant,
+    typed: Cell<bool>,
+}
+
+impl MonotonicClock for TypesThenExpires<'_> {
+    fn now(&self) -> Instant {
+        if !self.typed.replace(true) {
+            let written = write(self.master, self.line).unwrap_or(0);
+            assert_eq!(written, self.line.len());
+            assert_eq!(wait_readable(&self.probe, FIVE_SECONDS), Wait::Readable);
+        }
+        self.late
+    }
+}
+
 #[test]
 fn a_deadline_that_has_passed_reads_nothing() -> TestResult {
-    let run = run_prompt(Duration::from_secs(1), Duration::ZERO, |user| {
-        user.wait_for(PROMPT)
+    let Pty { master, slave } = pty()?;
+    let probe = dup(&slave)?;
+    let mut prompt = TtyPrompt::new(slave)?;
+    let start = FakeClock::start().now();
+    let clock = TypesThenExpires {
+        master: &master,
+        probe,
+        line: b"2468\n",
+        late: start + Duration::from_secs(1),
+        typed: Cell::new(false),
+    };
+    let mut pin = PinBuffer::new();
+    // A whole line waits on the terminal when the entry looks at the clock, and the entry still
+    // reads none of it.
+    assert_eq!(prompt.read_pin(4, &mut pin, start, &clock), Err(TIMEOUT));
+    Ok(())
+}
+
+#[test]
+fn echo_flow_control_and_extended_characters_are_off_during_the_entry() -> TestResult {
+    let run = run_prompt(MILLISECOND, FIVE_SECONDS, |user| {
+        user.wait_for(PROMPT)?;
+        let modes = tcgetattr(user.master).map_err(|error| error.to_string())?;
+        let loud = LocalModes::ECHO | LocalModes::ISIG | LocalModes::IEXTEN;
+        let quiet = !modes.local_modes.intersects(loud);
+        let flow = modes.input_modes.contains(InputModes::IXON);
+        user.type_line(b"2468\n")?;
+        if quiet && !flow {
+            Ok(())
+        } else {
+            Err("the terminal was not quiet".to_owned())
+        }
     })?;
-    assert_eq!(run.result, Err(TIMEOUT));
+    assert_eq!(run.result, Ok(()));
+    let loud = LocalModes::ECHO | LocalModes::ISIG | LocalModes::IEXTEN;
+    assert!(run.before.contains(loud));
+    assert_eq!(run.after, run.before);
+    Ok(())
+}
+
+#[test]
+fn the_terminal_is_restored_to_what_it_was_at_the_start_of_the_entry() -> TestResult {
+    let Pty { master, slave } = pty()?;
+    let mut prompt = TtyPrompt::new(slave)?;
+    // Another program changes the terminal after the prompt was made.
+    let mut changed = tcgetattr(&master)?;
+    changed.local_modes.insert(LocalModes::ECHONL);
+    changed.input_modes.remove(InputModes::IXON);
+    tcsetattr(&master, OptionalActions::Now, &changed)?;
+    let clock = Ticking::new(FakeClock::start(), MILLISECOND);
+    let deadline = clock.now() + FIVE_SECONDS;
+    let result = thread::scope(|scope| {
+        let user = scope.spawn(|| {
+            let mut user = User::new(&master);
+            user.wait_for(PROMPT)?;
+            user.type_line(b"2468\n")
+        });
+        let result = prompt.read_pin(4, &mut PinBuffer::new(), deadline, &clock);
+        (result, user.join())
+    });
+    assert_eq!(result.0, Ok(()));
+    assert_eq!(result.1.map_err(|_| ()), Ok(Ok(())));
+    let after = tcgetattr(&master)?;
+    assert!(after.local_modes.contains(LocalModes::ECHONL));
+    assert!(!after.input_modes.contains(InputModes::IXON));
+    Ok(())
+}
+
+#[test]
+fn ctrl_d_after_typed_characters_only_hands_them_over() -> TestResult {
+    // Thirty bytes, Ctrl-D, thirty more and a newline: the first Ctrl-D delivers the typed bytes
+    // and the entry goes on to the newline, so the sixty bytes fit the buffer.
+    let run = run_prompt(MILLISECOND, FIVE_SECONDS, |user| {
+        user.wait_for(PROMPT)?;
+        user.type_line(&[b'a'; 30])?;
+        user.type_line(b"\x04")?;
+        user.type_line(&[b'b'; 30])?;
+        user.type_line(b"\n")
+    })?;
+    assert_eq!(run.result, Ok(()));
+    assert_eq!(run.after, run.before);
     Ok(())
 }
 

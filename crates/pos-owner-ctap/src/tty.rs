@@ -3,10 +3,21 @@
 //! The owner root opens `/dev/tty` with `O_RDWR | O_NOCTTY | O_CLOEXEC` and passes the fd in;
 //! tests pass a pseudo-terminal. Each PIN entry turns echo and signal characters off, shows the
 //! prompt, reads the line one byte at a time into the caller's fixed [`PinBuffer`], and then
-//! restores the terminal settings and discards unread input on every path, including unwinding.
-//! The PIN is never a `String`, a log line, an argument or an environment value. A newline ends
-//! the entry, Ctrl-C (read as a byte, because signals are off) or Ctrl-D cancels it, and a PIN
-//! beyond the buffer is refused.
+//! restores the terminal settings and discards unread input on every path that runs destructors,
+//! including unwinding. The PIN is never a `String`, a log line, an argument or an environment
+//! value. A newline ends the entry, Ctrl-C (read as a byte, because signals are off) cancels it,
+//! and a PIN beyond the buffer is refused.
+//!
+//! The terminal stays in canonical mode, so the kernel's line editing (erase, kill) applies and
+//! Ctrl-D is the end-of-file character: on an empty line it cancels the entry, and after typed
+//! characters it only hands them over and the entry goes on until a newline or a second Ctrl-D.
+//! Flow-control characters (Ctrl-S, Ctrl-Q) and the extended characters (Ctrl-V, Ctrl-O) are
+//! turned off so that they reach the PIN like any other byte.
+//!
+//! Restoring needs a destructor to run. `SIGKILL` and an unhandled `SIGTERM` or `SIGHUP` end the
+//! process without one, so a terminal that outlives the owner process can be left with echo off.
+//! That is outside LP5's "every path, including unwinding": the owner installs no handlers, and
+//! the shell's own `stty sane` or `reset` brings echo back.
 
 use std::os::fd::OwnedFd;
 use std::time::Instant;
@@ -14,7 +25,7 @@ use std::time::Instant;
 use pos_owner_bridge::{BridgeError, LifecycleCode, MonotonicClock, UnavailableCode};
 use rustix::fs::{fcntl_setfl, OFlags};
 use rustix::io::{read, write};
-use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions, Termios};
+use rustix::termios::{tcgetattr, tcsetattr, InputModes, LocalModes, OptionalActions, Termios};
 use zeroize::Zeroizing;
 
 use crate::fdwait::{wait_readable, Wait};
@@ -27,23 +38,27 @@ const NO_TERMINAL: BridgeError = BridgeError::Unavailable(UnavailableCode::Inter
 /// Ctrl-C, which arrives as a byte because the terminal's signal characters are off.
 const CANCEL: u8 = 0x03;
 
-/// Puts the saved terminal settings back, and discards unread input, when dropped.
+/// The local modes an entry turns off: no echo, no signal characters, no extended characters.
+const QUIET_LOCAL: LocalModes = LocalModes::ECHO
+    .union(LocalModes::ISIG)
+    .union(LocalModes::IEXTEN);
+
+/// Puts the settings the terminal had at the start of the entry back, and discards unread input,
+/// when dropped.
 struct Restore<'a> {
     fd: &'a OwnedFd,
-    saved: &'a Termios,
+    saved: Termios,
 }
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
-        tcsetattr(self.fd, OptionalActions::Flush, self.saved).ok();
+        tcsetattr(self.fd, OptionalActions::Flush, &self.saved).ok();
     }
 }
 
 /// A PIN prompt on a terminal file descriptor.
 pub struct TtyPrompt {
     fd: OwnedFd,
-    saved: Termios,
-    quiet: Termios,
 }
 
 impl TtyPrompt {
@@ -55,19 +70,21 @@ impl TtyPrompt {
     ///
     /// Returns `Unavailable(InterfaceUnavailable)` when `fd` is not a terminal.
     pub fn new(fd: OwnedFd) -> Result<Self, BridgeError> {
-        let saved = tcgetattr(&fd).or(Err(NO_TERMINAL))?;
-        let mut quiet = saved.clone();
-        quiet
-            .local_modes
-            .remove(LocalModes::ECHO | LocalModes::ISIG);
+        tcgetattr(&fd).or(Err(NO_TERMINAL))?;
         fcntl_setfl(&fd, OFlags::NONBLOCK).ok();
-        Ok(Self { fd, saved, quiet })
+        Ok(Self { fd })
     }
 
-    /// Show `text` on the terminal. A terminal that cannot take it is not an error: the entry
-    /// that follows fails or times out on its own.
-    fn show(&self, text: &[u8]) {
-        write(&self.fd, text).ok();
+    /// Show `text` on the terminal, continuing after a partial write. A terminal that cannot take
+    /// the rest, because it is gone or full, is not an error: the entry that follows fails or
+    /// times out on its own.
+    fn show(&self, mut text: &[u8]) {
+        while !text.is_empty() {
+            match write(&self.fd, text) {
+                Ok(written) => text = text.get(written..).unwrap_or_default(),
+                Err(_) => return,
+            }
+        }
     }
 
     /// Read one line into `pin` until `deadline`.
@@ -83,8 +100,9 @@ impl TtyPrompt {
             if remaining.is_zero() {
                 return Err(TIMEOUT);
             }
+            // The poll is bounded by the time left, so an idle wait is the deadline itself.
             match wait_readable(&self.fd, remaining) {
-                Wait::Idle => {}
+                Wait::Idle => return Err(TIMEOUT),
                 Wait::Gone => return Err(CLIENT_FAILED),
                 Wait::Readable => match read(&self.fd, &mut byte[..]) {
                     Ok(1) => match byte[0] {
@@ -111,10 +129,17 @@ impl PinPrompt for TtyPrompt {
         deadline: Instant,
         clock: &dyn MonotonicClock,
     ) -> Result<(), BridgeError> {
-        tcsetattr(&self.fd, OptionalActions::Flush, &self.quiet).or(Err(CLIENT_FAILED))?;
+        let saved = tcgetattr(&self.fd)
+            .and_then(|saved| {
+                let mut quiet = saved.clone();
+                quiet.local_modes.remove(QUIET_LOCAL);
+                quiet.input_modes.remove(InputModes::IXON);
+                tcsetattr(&self.fd, OptionalActions::Flush, &quiet).map(|()| saved)
+            })
+            .or(Err(CLIENT_FAILED))?;
         let restore = Restore {
             fd: &self.fd,
-            saved: &self.saved,
+            saved,
         };
         self.show(format!("Security key PIN ({retries} attempts left): ").as_bytes());
         let result = self.collect(pin, deadline, clock);

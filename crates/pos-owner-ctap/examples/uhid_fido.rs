@@ -8,36 +8,56 @@
 //! Closing the devices on exit destroys them, so a test can also unplug a device by creating the
 //! stop file. Only the setup that runs this binary uses `sudo` (`/dev/uhid` is root only).
 //!
-//! It is test support and never deployable. A kernel without the `uhid` module refuses it.
+//! It is test support and never deployable. A kernel without the `uhid` module refuses it, and
+//! on a platform other than Linux it does nothing.
 
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use pos_owner_bridge::fake::clock::FakeClock;
+#[cfg(target_os = "linux")]
 use pos_owner_ctap::fdwait::{wait_readable, Wait};
+#[cfg(target_os = "linux")]
 use pos_owner_ctap::{HidTransport, MemoryHid, SoftAuthenticator};
+#[cfg(target_os = "linux")]
 use rustix::fs::{open, Mode, OFlags};
+#[cfg(target_os = "linux")]
 use rustix::io::{read, write};
 
+#[cfg(target_os = "linux")]
 const UHID_OUTPUT: u32 = 6;
+#[cfg(target_os = "linux")]
 const UHID_CREATE2: u32 = 11;
+#[cfg(target_os = "linux")]
 const UHID_INPUT2: u32 = 12;
+#[cfg(target_os = "linux")]
 const BUS_USB: u16 = 0x03;
+#[cfg(target_os = "linux")]
 const VENDOR: u32 = 0x1209;
+#[cfg(target_os = "linux")]
 const DATA_MAX: usize = 4096;
+#[cfg(target_os = "linux")]
 const EVENT_BYTES: usize = 4 + 128 + 64 + 64 + 2 + 2 + 4 * 4 + DATA_MAX;
+#[cfg(target_os = "linux")]
 const DESCRIPTOR_OFFSET: usize = EVENT_BYTES - DATA_MAX;
+#[cfg(target_os = "linux")]
 const REPORT_BYTES: usize = 64;
 
 /// The CTAPHID report descriptor: one 64-byte input and one 64-byte output report on usage page
 /// `0xF1D0`, usage `0x01`.
+#[cfg(target_os = "linux")]
 const FIDO_DESCRIPTOR: [u8; 34] = [
     0x06, 0xd0, 0xf1, 0x09, 0x01, 0xa1, 0x01, 0x09, 0x20, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08,
     0x95, 0x40, 0x81, 0x02, 0x09, 0x21, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x40, 0x91,
     0x02, 0xc0,
 ];
 
+#[cfg(target_os = "linux")]
 struct Options {
     ready: PathBuf,
     stop: PathBuf,
@@ -45,11 +65,13 @@ struct Options {
     devices: usize,
 }
 
+#[cfg(target_os = "linux")]
 struct Virtual {
     fd: OwnedFd,
     hid: MemoryHid,
 }
 
+#[cfg(target_os = "linux")]
 fn options() -> Result<Options, String> {
     let mut args = std::env::args().skip(1);
     let (mut ready, mut stop, mut pin, mut devices) = (None, None, None, 1);
@@ -59,7 +81,13 @@ fn options() -> Result<Options, String> {
             "--ready" => ready = Some(PathBuf::from(value)),
             "--stop" => stop = Some(PathBuf::from(value)),
             "--pin" => pin = Some(value),
-            "--devices" => devices = value.parse().map_err(|_| "bad --devices".to_owned())?,
+            "--devices" => {
+                devices = value
+                    .parse()
+                    .ok()
+                    .filter(|count| *count > 0)
+                    .ok_or("--devices needs a positive number")?;
+            }
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -72,6 +100,7 @@ fn options() -> Result<Options, String> {
 }
 
 /// A `UHID_CREATE2` event for the virtual device number `index`.
+#[cfg(target_os = "linux")]
 fn create2(index: usize) -> Vec<u8> {
     let mut event = vec![0; EVENT_BYTES];
     event[..4].copy_from_slice(&UHID_CREATE2.to_le_bytes());
@@ -88,6 +117,7 @@ fn create2(index: usize) -> Vec<u8> {
 }
 
 /// A `UHID_INPUT2` event carrying one input `report`.
+#[cfg(target_os = "linux")]
 fn input2(report: &[u8; REPORT_BYTES]) -> Vec<u8> {
     let mut event = vec![0; EVENT_BYTES];
     event[..4].copy_from_slice(&UHID_INPUT2.to_le_bytes());
@@ -97,6 +127,7 @@ fn input2(report: &[u8; REPORT_BYTES]) -> Vec<u8> {
     event
 }
 
+#[cfg(target_os = "linux")]
 fn send(device: &Virtual, event: &[u8]) -> Result<(), String> {
     match write(&device.fd, event) {
         Ok(written) if written == event.len() => Ok(()),
@@ -106,6 +137,7 @@ fn send(device: &Virtual, event: &[u8]) -> Result<(), String> {
 
 /// Feed one kernel event to the device. Only `UHID_OUTPUT` carries a CTAPHID report: the hidraw
 /// write is the report ID byte `0` and the 64-byte report.
+#[cfg(target_os = "linux")]
 fn serve(device: &mut Virtual, event: &[u8]) -> Result<(), String> {
     if event[..4] != UHID_OUTPUT.to_le_bytes() {
         return Ok(());
@@ -137,6 +169,7 @@ fn serve(device: &mut Virtual, event: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), String> {
     let options = options()?;
     let mut devices = Vec::new();
@@ -170,3 +203,6 @@ fn main() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

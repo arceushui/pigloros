@@ -115,6 +115,30 @@ fn exactly_one_fido_device_is_found_among_others() -> TestResult {
 }
 
 #[test]
+fn a_descriptor_that_cannot_be_read_refuses_only_that_device() -> TestResult {
+    let fake = Fake::new("unreadable")?;
+    fake.add("hidraw0", &FIDO)?;
+    // A directory where the descriptor file should be: reading it fails.
+    fake.add_without_descriptor("hidraw1")?;
+    std::fs::create_dir(fake.sysfs().join("hidraw1/device/report_descriptor"))?;
+    fake.add("hidraw2", &[0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0])?;
+    assert_eq!(
+        discover(&fake.sysfs(), &fake.dev()),
+        Ok(fake.node("hidraw0"))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_sysfs_that_cannot_be_listed_is_refused() -> TestResult {
+    let fake = Fake::new("unlistable")?;
+    let file = fake.sysfs().join("not-a-directory");
+    std::fs::write(&file, b"")?;
+    assert_eq!(discover(&file, &fake.dev()), Err(CLIENT_FAILED));
+    Ok(())
+}
+
+#[test]
 fn no_fido_device_is_refused() -> TestResult {
     let fake = Fake::new("none")?;
     fake.add("hidraw0", &[0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0])?;

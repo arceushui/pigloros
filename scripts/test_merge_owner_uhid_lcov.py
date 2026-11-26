@@ -44,7 +44,7 @@ class OwnerUhidLcovTests(unittest.TestCase):
             path.write_text("fixture\n")
         self.linux = (record(self.root / OTHER, ((1, 2),)) + record(self.root / HIDRAW, ((1, 0), (2, 5), (3, 0)))
                       + record(self.root / TTY, ((7, 1),))).encode()
-        self.uhid = (record(self.root / HIDRAW, ((1, 4), (2, 1), (9, 3)))).encode()
+        self.uhid = (record(self.root / HIDRAW, ((1, 4), (2, 1), (9, 0)))).encode()
 
     def merge(self, uhid=None, linux=None, metadata=None, workspace=None):
         uhid = self.uhid if uhid is None else uhid
@@ -59,13 +59,18 @@ class OwnerUhidLcovTests(unittest.TestCase):
         self.assertIn(f"SF:{self.root / TTY}\nDA:7,1\nLF:1\nLH:1\n", merged)
         self.assertEqual(summary, {"sources": 1, "lines_added": 2, "lines_unmatched": 1})
 
+    def test_an_executed_line_the_linux_lcov_lacks_is_refused(self):
+        uhid = record(self.root / HIDRAW, ((1, 4), (9, 3))).encode()
+        with self.assertRaisesRegex(CoverageError, "absent from the Linux LCOV.*: 9"):
+            self.merge(uhid=uhid)
+
     def test_a_record_without_a_summary_is_rewritten_without_one(self):
-        linux = record(self.root / HIDRAW, ((1, 0),), summary=False).encode()
+        linux = record(self.root / HIDRAW, ((1, 0), (2, 0)), summary=False).encode()
         merged, _ = self.merge(linux=linux)
-        self.assertEqual(merged, f"SF:{self.root / HIDRAW}\nDA:1,4\nend_of_record\n")
+        self.assertEqual(merged, f"SF:{self.root / HIDRAW}\nDA:1,4\nDA:2,1\nend_of_record\n")
 
     def test_a_checksum_field_survives(self):
-        linux = f"SF:{self.root / HIDRAW}\nDA:1,0,abc\nend_of_record\n".encode()
+        linux = f"SF:{self.root / HIDRAW}\nDA:1,0,abc\nDA:2,0\nend_of_record\n".encode()
         merged, _ = self.merge(linux=linux)
         self.assertIn("DA:1,4,abc", merged)
 
@@ -140,6 +145,62 @@ class OwnerUhidLcovTests(unittest.TestCase):
         again = subprocess.run(arguments, capture_output=True, text=True, check=False)
         self.assertEqual(again.returncode, 1)
         self.assertIn("fresh", again.stderr)
+
+    def cli_checkout(self, linux=None, uhid=None, metadata=None, marker=b""):
+        """Run the command line on a real checkout; `metadata` False omits the receipt file."""
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "x"], check=True)
+        head = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        uhid = self.uhid if uhid is None else uhid
+        files = {name: self.root / name for name in ("linux.lcov", "uhid.lcov", "receipt.json", "out.lcov")}
+        files["out.lcov"].unlink(missing_ok=True)
+        files["receipt.json"].unlink(missing_ok=True)
+        files["linux.lcov"].write_bytes(self.linux if linux is None else linux)
+        files["uhid.lcov"].write_bytes(uhid)
+        if metadata is None:
+            files["receipt.json"].write_bytes(marker + json.dumps(receipt(uhid, self.root, head)).encode())
+        elif metadata is not False:
+            files["receipt.json"].write_bytes(metadata)
+        arguments = [sys.executable, str(SCRIPT), "--linux", str(files["linux.lcov"]), "--uhid", str(files["uhid.lcov"]),
+                     "--receipt", str(files["receipt.json"]), "--workspace", str(self.root), "--checkout", head,
+                     "--output", str(files["out.lcov"])]
+        return subprocess.run(arguments, capture_output=True, text=True, check=False), files["out.lcov"]
+
+    def assert_cli_refuses(self, done, output):
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("owner U-tier LCOV:", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertFalse(output.exists())
+
+    def test_the_command_line_accepts_a_receipt_with_a_byte_order_mark(self):
+        done, output = self.cli_checkout(marker=b"\xef\xbb\xbf")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("DA:2,6", output.read_text())
+
+    def test_the_command_line_refuses_a_missing_or_malformed_receipt(self):
+        for metadata in (False, b"not json", b"[]", b"", b"\xff\xfe\x00"):
+            with self.subTest(metadata=metadata):
+                self.assert_cli_refuses(*self.cli_checkout(metadata=metadata))
+
+    def test_the_command_line_refuses_empty_or_undecodable_lcov(self):
+        for field in ("linux", "uhid"):
+            for data in (b"", b"\xff\xfe\x00\x01", b"SF:/x.rs\nDA:1,1\n", b"SF:a\0b\nend_of_record\n"):
+                with self.subTest(field=field, data=data):
+                    self.assert_cli_refuses(*self.cli_checkout(**{field: data}))
+
+    def test_a_line_record_with_extra_fields_is_refused(self):
+        linux = f"SF:{self.root / HIDRAW}\nDA:1,0,abc,def\nend_of_record\n".encode()
+        with self.assertRaises(CoverageError):
+            self.merge(linux=linux)
+        with self.assertRaises(CoverageError):
+            self.merge(uhid=f"SF:{self.root / HIDRAW}\nDA:1,1,2,3\nend_of_record\n".encode())
+
+    def test_the_command_line_refuses_an_executed_line_the_linux_lcov_lacks(self):
+        done, output = self.cli_checkout(uhid=record(self.root / HIDRAW, ((1, 4), (9, 3))).encode())
+        self.assert_cli_refuses(done, output)
+        self.assertIn("absent from the Linux LCOV", done.stderr)
 
     def test_the_command_line_refuses_the_wrong_checkout(self):
         done, output = self.run_cli()

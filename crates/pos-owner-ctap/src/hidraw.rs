@@ -19,6 +19,9 @@ use rustix::io::{read, write};
 use crate::fdwait::{wait_readable, Wait};
 use crate::hid::{HidTransport, TransportError, REPORT_BYTES};
 
+/// How a hidraw node is opened.
+const OPEN_FLAGS: OFlags = OFlags::RDWR.union(OFlags::CLOEXEC).union(OFlags::NONBLOCK);
+
 /// Where the kernel lists hidraw devices.
 pub const SYSFS_HIDRAW: &str = "/sys/class/hidraw";
 
@@ -76,11 +79,15 @@ pub fn is_fido_descriptor(descriptor: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// Returns `Lifecycle(ClientFailed)` when `sysfs` cannot be listed and when it lists no FIDO
-/// device or more than one.
+/// Returns `Lifecycle(ClientFailed)` when `sysfs` cannot be listed, when listing it fails on any
+/// entry, and when it lists no FIDO device or more than one. A device whose descriptor cannot be
+/// read is not a FIDO device, and only that device is skipped.
 pub fn discover(sysfs: &Path, dev: &Path) -> Result<PathBuf, BridgeError> {
     let mut found = None;
-    for entry in fs::read_dir(sysfs).or(Err(CLIENT_FAILED))?.flatten() {
+    let entries = fs::read_dir(sysfs)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .or(Err(CLIENT_FAILED))?;
+    for entry in entries {
         let descriptor = fs::read(entry.path().join("device").join("report_descriptor"));
         if descriptor.is_ok_and(|bytes| is_fido_descriptor(&bytes)) {
             if found.is_some() {
@@ -117,14 +124,9 @@ impl HidrawTransport {
     ///
     /// Returns [`TransportError`] when the node cannot be opened.
     pub fn open_node(node: &Path) -> Result<Self, TransportError> {
-        openat(
-            CWD,
-            node,
-            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map(Self::from_fd)
-        .or(Err(TransportError))
+        openat(CWD, node, OPEN_FLAGS, Mode::empty())
+            .map(Self::from_fd)
+            .or(Err(TransportError))
     }
 
     /// Use `fd`, which moves 64-byte reports like a hidraw node: a write takes the report ID

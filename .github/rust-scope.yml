@@ -55,10 +55,10 @@ owner_uhid:
   - .clippy.toml
   - rustfmt.toml
   - .rustfmt.toml
+  - covgate.toml
   - .gitattributes
   - .github/workflows/owner-ctap-uhid.yml
   - .github/workflows/ci.yml
   - .github/rust-scope.yml
-  - scripts/owner_uhid_tier.sh
-  - scripts/*owner_uhid*
-  - scripts/merge_owner_bridge_lcov.py
+  - scripts/*owner*
+  - scripts/*cargo_crap*

@@ -37,7 +37,10 @@ tests=$(cargo test --locked -p pos-owner-ctap --features test-support --test hos
 test -x "${helper}"
 test -x "${tests}"
 
-# Wait for the helper's ready file, failing if the helper died first.
+# Wait for the helper's ready file, failing if the helper died first. $1 is the PID of the
+# `sudo` process that started the helper. sudo keeps the caller's real uid, so the runner user
+# may signal it (kill -0 is permitted) and it lives exactly as long as the helper does; the CI
+# log of the first run shows every phase passing this wait.
 wait_ready() {
   local pid=$1 ready=$2 deadline=$((SECONDS + 30))
   until [[ -e "${ready}" ]]; do

@@ -49,11 +49,22 @@ SHIM_ALLOW_ENV = {
         "${{ needs.ci_change_scope.outputs.owner_windows == 'false' && "
         "'crates/pos-owner-bridge-windows/**' || '' }}"
     ),
+    # The pos-owner-ctap sources are hidden from scoring only when the owner
+    # U-tier, whose counters the trusted baseline includes, did not run.
+    "UHID_ALLOW": (
+        "${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && "
+        "'crates/pos-owner-ctap/**' || '' }}"
+    ),
 }
 SHIM_ALLOW_ARG = '${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"} '
+UHID_ALLOW_ARG = '${UHID_ALLOW:+--allow "${UHID_ALLOW}"} '
 # The owner U-tier (ADR-110 E20, Redmine #1476) ran unless the trusted scope
 # explicitly said 'false'; an empty or unknown scope fails closed to the merge.
 UHID_MEASURED = "${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}"
+UHID_SKIPPED_BASELINE = (
+    "${{ steps.baseline.outputs.run-id != '' && "
+    "needs.ci_change_scope.outputs.owner_uhid == 'false' }}"
+)
 UHID_MERGE_COMMAND = (
     "python scripts/merge_owner_uhid_lcov.py \\\n"
     '  --linux "${{ runner.temp }}/cargo-crap-coverage.lcov" \\\n'
@@ -74,6 +85,9 @@ DROP_SHIM_BASELINE_COMMAND = (
     "test(\"(^|/)crates/pos-owner-bridge-windows/\") | not))' \\\n"
     '  "${baseline}" > "${baseline}.scoped"\n'
     'mv "${baseline}.scoped" "${baseline}"\n'
+)
+DROP_UHID_BASELINE_COMMAND = DROP_SHIM_BASELINE_COMMAND.replace(
+    "(^|/)crates/pos-owner-bridge-windows/", "(^|/)crates/pos-owner-ctap/src/"
 )
 TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -147,6 +161,7 @@ GENERATE_BASELINE_COMMAND = (
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
     + SHIM_ALLOW_ARG
+    + UHID_ALLOW_ARG
     + "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
@@ -156,6 +171,7 @@ ANALYZE_COMMAND = (
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
     + SHIM_ALLOW_ARG
+    + UHID_ALLOW_ARG
     + '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
@@ -543,7 +559,7 @@ def check_workflow(
     require(job.get("timeout-minutes") == 70, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
-    require(len(steps) == 18, "cargo-crap must contain the exact trusted step sequence")
+    require(len(steps) == 19, "cargo-crap must contain the exact trusted step sequence")
     require([step.get("name") for step in steps] == [
         None, None, "Install cargo-crap", "Download hosted LCOV", "Download hosted native LCOV",
         "Bind native and Linux coverage to this checkout",
@@ -552,6 +568,7 @@ def check_workflow(
         "Reject repository cargo-crap configuration",
         "Resolve trusted cargo-crap baseline", "Download trusted base baseline",
         "Drop the unmeasured native shim from the trusted baseline",
+        "Drop the unmeasured owner U-tier sources from the trusted baseline",
         "Generate trusted current baseline", "Analyze CRAP score changes", "Enforce cargo-crap policy",
         "Upload cargo-crap report", "Publish trusted main baseline",
     ], "cargo-crap evidence steps must retain their reviewed order")
@@ -610,6 +627,11 @@ def check_workflow(
               "needs.ci_change_scope.outputs.owner_windows == 'false' }}",
         "run": DROP_SHIM_BASELINE_COMMAND,
     }, "only an out-of-scope native lane may drop shim entries from the trusted baseline")
+    require(named_step(steps, "Drop the unmeasured owner U-tier sources from the trusted baseline") == {
+        "name": "Drop the unmeasured owner U-tier sources from the trusted baseline",
+        "if": UHID_SKIPPED_BASELINE,
+        "run": DROP_UHID_BASELINE_COMMAND,
+    }, "only a skipped owner U-tier may drop pos-owner-ctap entries from the trusted baseline")
     require(
         named_step(steps, "Reject repository cargo-crap configuration")
         == {

@@ -1291,10 +1291,24 @@ jobs:
           jq -e '.entries |= map(select(.file | gsub("\\\\"; "/") | test("(^|/)crates/pos-owner-bridge-windows/") | not))' \
             "${baseline}" > "${baseline}.scoped"
           mv "${baseline}.scoped" "${baseline}"
+      # Main always runs the owner U-tier, so the trusted baseline scores the
+      # pos-owner-ctap sources with its merged counters. A pull request that skips
+      # the lane scores them from the Linux LCOV alone, which would read as a
+      # regression at epsilon 0: hide those sources from the comparison, as for
+      # the native shim.
+      - name: Drop the unmeasured owner U-tier sources from the trusted baseline
+        if: ${{ steps.baseline.outputs.run-id != '' && needs.ci_change_scope.outputs.owner_uhid == 'false' }}
+        run: |
+          set -euo pipefail
+          baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"
+          jq -e '.entries |= map(select(.file | gsub("\\\\"; "/") | test("(^|/)crates/pos-owner-ctap/src/") | not))' \
+            "${baseline}" > "${baseline}.scoped"
+          mv "${baseline}.scoped" "${baseline}"
       - name: Generate trusted current baseline
         if: ${{ steps.baseline.outputs.bootstrap == 'true' }}
         env:
           NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
+          UHID_ALLOW: ${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && 'crates/pos-owner-ctap/**' || '' }}
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
@@ -1361,11 +1375,13 @@ jobs:
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
+          ${UHID_ALLOW:+--allow "${UHID_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
         env:
           NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
+          UHID_ALLOW: ${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && 'crates/pos-owner-ctap/**' || '' }}
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
@@ -1432,6 +1448,7 @@ jobs:
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
+          ${UHID_ALLOW:+--allow "${UHID_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
