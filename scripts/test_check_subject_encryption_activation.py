@@ -28,6 +28,7 @@ class ActivationPolicyTests(unittest.TestCase):
             "destroy_subject_key",
             "VolatileSubjectNonceLedgerV1",
             "OwnerEnrollmentAdapter",
+            "OwnerUnlockAdapter",
             "VolatileEnrollmentStore",
         ]:
             for source in [

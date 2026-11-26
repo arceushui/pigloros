@@ -49,14 +49,12 @@ use pos_owner_bridge_codec::{
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
-mod inventory;
 mod store;
 
-use inventory::Inventory;
+use crate::inventory::Inventory;
+use crate::RP_ID;
 pub use store::{EnrollmentStore, SubjectKeyRegistration, VolatileEnrollmentStore};
 
-/// The relying party of every owner credential (ADR-097 §5).
-const RP_ID: &str = "localhost";
 /// The root, the wrap salt and the subkey salt (32 bytes each) and the
 /// 12-byte wrap nonce, drawn in one fill.
 const RANDOM_BYTES: usize = 108;

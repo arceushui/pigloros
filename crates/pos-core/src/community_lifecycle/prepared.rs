@@ -259,14 +259,12 @@ impl<'a> CommunityPreparedInputSetV1<'a> {
     /// Deriving the private CIN1 hashes belongs before any database writer.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
-        let mut out = Zeroizing::new(Vec::with_capacity(9 + self.members.len() * 69));
-        encode_head(&mut out, 4, self.members.len() as u64);
-        for member in self.members {
-            out.push(0x82);
-            encode_hash(&mut out, member.as_input().member_binding_digest);
-            encode_hash(&mut out, member.digest());
-        }
-        out
+        encode_pairs(
+            self.members.len(),
+            self.members
+                .iter()
+                .map(|member| (member.as_input().member_binding_digest, member.digest())),
+        )
     }
 
     /// Exact CRI1 prepared-input-set identity, with no future pass/result/receipt.
@@ -294,6 +292,44 @@ impl<'a> CommunityPreparedInputSetV1<'a> {
             Err(Error::InvalidBinding)
         }
     }
+}
+
+/// The definite array of `[member_digest, CIN1_digest]` pairs.
+fn encode_pairs(count: usize, pairs: impl Iterator<Item = (Hash, Hash)>) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(Vec::with_capacity(9 + count * 69));
+    encode_head(&mut out, 4, count as u64);
+    for (member, invocation) in pairs {
+        out.push(0x82);
+        encode_hash(&mut out, member);
+        encode_hash(&mut out, invocation);
+    }
+    out
+}
+
+/// The prepared-input-set identity of `[member_digest, CIN1_digest]` pairs.
+///
+/// It is [`CommunityPreparedInputSetV1::digest`] for pairs a caller has
+/// already derived, so a store that holds only the digests can re-derive the
+/// identity a CRI1 names.
+///
+/// # Errors
+/// Returns `BoundsExceeded` for more than 64 pairs and `InvalidBinding` when
+/// the member digests are not strictly ascending.
+pub fn community_prepared_input_set_digest_v1(pairs: &[(Hash, Hash)]) -> Result<Hash> {
+    if pairs.len() > MAX_COMMUNITY_MEMBERS_V1 {
+        return Err(Error::BoundsExceeded);
+    }
+    if !pairs
+        .iter()
+        .zip(pairs.iter().skip(1))
+        .all(|(earlier, later)| earlier.0 < later.0)
+    {
+        return Err(Error::InvalidBinding);
+    }
+    Ok(digest(
+        b"PiglorOS.Community.PreparedInputSet.v1\0",
+        &encode_pairs(pairs.len(), pairs.iter().copied()),
+    ))
 }
 
 struct Identity {

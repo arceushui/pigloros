@@ -1,11 +1,13 @@
 //! Fail-closed provider and image admission for the root-owned selector.
 
+mod control;
 #[cfg(unix)]
 mod image_file;
 #[cfg(unix)]
 mod image_gpt;
 mod image_proof;
 mod network;
+pub use control::{AuthenticatedCancellation, AuthenticatedReconciliation, TerminalEvidenceCheck};
 pub use image_proof::SandboxImageProofError;
 pub use network::{LocalNetworkAdmission, NetworkProxyLimits};
 
@@ -1241,7 +1243,6 @@ impl AdmittedSandboxProvider {
     }
 
     /// The selected BHC1 hard caps, one per limit ID in ID order.
-    #[cfg(target_os = "linux")]
     #[must_use]
     pub fn broker_hard_caps(&self) -> &[SandboxLimit] {
         &self.broker_hard_caps

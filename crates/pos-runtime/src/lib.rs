@@ -30,6 +30,7 @@ pub mod composition;
 pub mod composition_fallback;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;
+pub mod decision_preview;
 pub mod driver;
 pub mod erasure_authority_view;
 pub mod erasure_host;
@@ -66,6 +67,15 @@ pub use composition_fallback::{
     FallbackDriverSettingsV1, FallbackDriverShellV1, FallbackEntryFactsV1,
     FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackHostGrantsV1, FallbackRegistryFactsV1,
     FallbackTriggerCauseV1, FallbackValidationFieldV1, InvalidFallbackPolicyV1,
+};
+pub use decision_preview::{
+    match_score_v1, ComputedRecommendationV1, MatchScoreErrorV1, OptionScoreV1, PreferenceWeightV1,
+    PreviewClaimKeyV1, PreviewClaimV1, PreviewFailureCodeV1, PreviewOptionV1, PreviewOutcomeV1,
+    PreviewPayloadErrorV1, PreviewRequestV1, PreviewResultV1, PreviewRevisionRefV1,
+    RecommendationV1, MATCH_SCORE_FUNCTION_ID_V1, MAX_MATCH_WEIGHT_MICRO_V1, MAX_OPTION_TAGS_V1,
+    MAX_PREFERENCE_WEIGHTS_V1, MAX_PREVIEW_CLAIM_BYTES_V1, MAX_PREVIEW_OPTIONS_V1,
+    MIN_PREVIEW_OPTIONS_V1, PREVIEW_REQUEST_EVENT_TYPE_V1, PREVIEW_REQUEST_SCHEMA_VERSION_V1,
+    PREVIEW_RESULT_EVENT_TYPE_V1, TOSS_UP_MARGIN_MICRO_V1,
 };
 pub use driver::{
     CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,

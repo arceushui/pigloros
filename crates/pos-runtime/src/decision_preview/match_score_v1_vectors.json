@@ -1,0 +1,804 @@
+{
+  "function_id": "pigloros.match-score.v1",
+  "toss_up_margin_micro": 20000,
+  "vectors": [
+    {
+      "name": "worked-example",
+      "weights": [
+        {"dimension": "city", "weight_micro": -300000},
+        {"dimension": "nature", "weight_micro": 800000},
+        {"dimension": "quiet", "weight_micro": 500000}
+      ],
+      "options": [
+        {"key": "coast", "tags": ["nature", "quiet", "surf"]},
+        {"key": "city", "tags": ["city", "nightlife"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "coast", "match_score_micro": 650000},
+          {"option_key": "city", "match_score_micro": -300000}
+        ],
+        "margin_micro": 950000,
+        "toss_up": false,
+        "option_key": "coast"
+      }
+    },
+    {
+      "name": "rounding-1-2",
+      "weights": [
+        {"dimension": "d0", "weight_micro": 1},
+        {"dimension": "d1", "weight_micro": 2}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 2},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 2,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-minus-1-minus-2",
+      "weights": [
+        {"dimension": "d0", "weight_micro": -1},
+        {"dimension": "d1", "weight_micro": -2}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": -2},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 2,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-1-1-1",
+      "weights": [
+        {"dimension": "d0", "weight_micro": 1},
+        {"dimension": "d1", "weight_micro": 1},
+        {"dimension": "d2", "weight_micro": 1}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1", "d2"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 1},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 1,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-1-0-0",
+      "weights": [
+        {"dimension": "d0", "weight_micro": 1},
+        {"dimension": "d1", "weight_micro": 0},
+        {"dimension": "d2", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1", "d2"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 0},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 0,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-1-1-0",
+      "weights": [
+        {"dimension": "d0", "weight_micro": 1},
+        {"dimension": "d1", "weight_micro": 1},
+        {"dimension": "d2", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1", "d2"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 1},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 1,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-800000-500000",
+      "weights": [
+        {"dimension": "d0", "weight_micro": 800000},
+        {"dimension": "d1", "weight_micro": 500000}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 650000},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 650000,
+        "toss_up": false,
+        "option_key": "x"
+      }
+    },
+    {
+      "name": "rounding-half-up-1-0",
+      "weights": [
+        {"dimension": "d0", "weight_micro": 1},
+        {"dimension": "d1", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 1},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 1,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-half-down-minus-1-0",
+      "weights": [
+        {"dimension": "d0", "weight_micro": -1},
+        {"dimension": "d1", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": -1},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 1,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-third-minus-1-0-0",
+      "weights": [
+        {"dimension": "d0", "weight_micro": -1},
+        {"dimension": "d1", "weight_micro": 0},
+        {"dimension": "d2", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1", "d2"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": 0},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 0,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "rounding-two-thirds-minus-1-minus-1-0",
+      "weights": [
+        {"dimension": "d0", "weight_micro": -1},
+        {"dimension": "d1", "weight_micro": -1},
+        {"dimension": "d2", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "x", "tags": ["d0", "d1", "d2"]},
+        {"key": "y", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "x", "match_score_micro": -1},
+          {"option_key": "y", "match_score_micro": 0}
+        ],
+        "margin_micro": 1,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "extreme-scores-and-margin",
+      "weights": [
+        {"dimension": "best", "weight_micro": 1000000},
+        {"dimension": "worst", "weight_micro": -1000000}
+      ],
+      "options": [
+        {"key": "high", "tags": ["best"]},
+        {"key": "low", "tags": ["worst"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "high", "match_score_micro": 1000000},
+          {"option_key": "low", "match_score_micro": -1000000}
+        ],
+        "margin_micro": 2000000,
+        "toss_up": false,
+        "option_key": "high"
+      }
+    },
+    {
+      "name": "margin-19999-is-a-toss-up",
+      "weights": [
+        {"dimension": "a", "weight_micro": 519999},
+        {"dimension": "b", "weight_micro": 500000}
+      ],
+      "options": [
+        {"key": "first", "tags": ["a"]},
+        {"key": "second", "tags": ["b"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "first", "match_score_micro": 519999},
+          {"option_key": "second", "match_score_micro": 500000}
+        ],
+        "margin_micro": 19999,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "margin-20000-is-not-a-toss-up",
+      "weights": [
+        {"dimension": "a", "weight_micro": 500000},
+        {"dimension": "b", "weight_micro": 520000}
+      ],
+      "options": [
+        {"key": "first", "tags": ["a"]},
+        {"key": "second", "tags": ["b"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "first", "match_score_micro": 500000},
+          {"option_key": "second", "match_score_micro": 520000}
+        ],
+        "margin_micro": 20000,
+        "toss_up": false,
+        "option_key": "second"
+      }
+    },
+    {
+      "name": "margin-0-tie-for-the-maximum",
+      "weights": [
+        {"dimension": "a", "weight_micro": 500000},
+        {"dimension": "b", "weight_micro": 500000},
+        {"dimension": "c", "weight_micro": 100000}
+      ],
+      "options": [
+        {"key": "first", "tags": ["a"]},
+        {"key": "second", "tags": ["c"]},
+        {"key": "third", "tags": ["b"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "first", "match_score_micro": 500000},
+          {"option_key": "second", "match_score_micro": 100000},
+          {"option_key": "third", "match_score_micro": 500000}
+        ],
+        "margin_micro": 0,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "insufficient-evidence",
+      "weights": [
+        {"dimension": "nature", "weight_micro": 800000}
+      ],
+      "options": [
+        {"key": "coast", "tags": ["surf"]},
+        {"key": "city", "tags": ["nightlife"]}
+      ],
+      "expected": {"status": "insufficient-evidence"}
+    },
+    {
+      "name": "zero-tag-option",
+      "weights": [
+        {"dimension": "nature", "weight_micro": 800000}
+      ],
+      "options": [
+        {"key": "coast", "tags": ["nature"]},
+        {"key": "empty", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "coast", "match_score_micro": 800000},
+          {"option_key": "empty", "match_score_micro": 0}
+        ],
+        "margin_micro": 800000,
+        "toss_up": false,
+        "option_key": "coast"
+      }
+    },
+    {
+      "name": "unmatched-tags-do-not-dilute",
+      "weights": [
+        {"dimension": "nature", "weight_micro": 800000},
+        {"dimension": "quiet", "weight_micro": -200000}
+      ],
+      "options": [
+        {"key": "coast", "tags": ["nature", "surf", "sand", "sun"]},
+        {"key": "town", "tags": ["quiet"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "coast", "match_score_micro": 800000},
+          {"option_key": "town", "match_score_micro": -200000}
+        ],
+        "margin_micro": 1000000,
+        "toss_up": false,
+        "option_key": "coast"
+      }
+    },
+    {
+      "name": "substring-and-prefix-do-not-match",
+      "weights": [
+        {"dimension": "nature", "weight_micro": 800000},
+        {"dimension": "quiet", "weight_micro": 500000}
+      ],
+      "options": [
+        {"key": "park", "tags": ["natur", "nature.trail", "nature_walk", "naturex"]},
+        {"key": "library", "tags": ["quietness", "qu"]}
+      ],
+      "expected": {"status": "insufficient-evidence"}
+    },
+    {
+      "name": "lean-hint-and-coordinates-are-ignored",
+      "weights": [
+        {"dimension": "city", "weight_micro": -300000},
+        {"dimension": "nature", "weight_micro": 800000},
+        {"dimension": "quiet", "weight_micro": 500000}
+      ],
+      "options": [
+        {"key": "coast", "tags": ["nature", "quiet", "surf"], "coordinates": {"x_micro": -5, "z_micro": 9}},
+        {"key": "city", "tags": ["city", "nightlife"], "lean_hint_micro": 1000000}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "coast", "match_score_micro": 650000},
+          {"option_key": "city", "match_score_micro": -300000}
+        ],
+        "margin_micro": 950000,
+        "toss_up": false,
+        "option_key": "coast"
+      }
+    },
+    {
+      "name": "lean-hint-alone-is-insufficient-evidence",
+      "weights": [
+        {"dimension": "nature", "weight_micro": 800000}
+      ],
+      "options": [
+        {"key": "coast", "tags": ["surf"], "lean_hint_micro": 1000000},
+        {"key": "city", "tags": ["nightlife"], "lean_hint_micro": -1000000}
+      ],
+      "expected": {"status": "insufficient-evidence"}
+    },
+    {
+      "name": "negative-scores-pick-the-largest",
+      "weights": [
+        {"dimension": "a", "weight_micro": -300000},
+        {"dimension": "b", "weight_micro": -100000},
+        {"dimension": "c", "weight_micro": -900000}
+      ],
+      "options": [
+        {"key": "first", "tags": ["a"]},
+        {"key": "second", "tags": ["b"]},
+        {"key": "third", "tags": ["c"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "first", "match_score_micro": -300000},
+          {"option_key": "second", "match_score_micro": -100000},
+          {"option_key": "third", "match_score_micro": -900000}
+        ],
+        "margin_micro": 200000,
+        "toss_up": false,
+        "option_key": "second"
+      }
+    },
+    {
+      "name": "maximum-not-first-in-authored-order",
+      "weights": [
+        {"dimension": "a", "weight_micro": 100000},
+        {"dimension": "b", "weight_micro": 900000},
+        {"dimension": "c", "weight_micro": 880000}
+      ],
+      "options": [
+        {"key": "first", "tags": ["a"]},
+        {"key": "second", "tags": ["b"]},
+        {"key": "third", "tags": ["c"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "first", "match_score_micro": 100000},
+          {"option_key": "second", "match_score_micro": 900000},
+          {"option_key": "third", "match_score_micro": 880000}
+        ],
+        "margin_micro": 20000,
+        "toss_up": false,
+        "option_key": "second"
+      }
+    },
+    {
+      "name": "signed-sum-zero-is-computed",
+      "weights": [
+        {"dimension": "plus", "weight_micro": 500000},
+        {"dimension": "minus", "weight_micro": -500000},
+        {"dimension": "zero", "weight_micro": 0}
+      ],
+      "options": [
+        {"key": "balanced", "tags": ["plus", "minus"]},
+        {"key": "neutral", "tags": ["zero"]},
+        {"key": "untagged", "tags": []}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "balanced", "match_score_micro": 0},
+          {"option_key": "neutral", "match_score_micro": 0},
+          {"option_key": "untagged", "match_score_micro": 0}
+        ],
+        "margin_micro": 0,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "maximum-weights-options-and-tags",
+      "weights": [
+        {"dimension": "dim.00", "weight_micro": -1000000},
+        {"dimension": "dim.01", "weight_micro": -968663},
+        {"dimension": "dim.02", "weight_micro": -937326},
+        {"dimension": "dim.03", "weight_micro": -905989},
+        {"dimension": "dim.04", "weight_micro": -874652},
+        {"dimension": "dim.05", "weight_micro": -843315},
+        {"dimension": "dim.06", "weight_micro": -811978},
+        {"dimension": "dim.07", "weight_micro": -780641},
+        {"dimension": "dim.08", "weight_micro": -749304},
+        {"dimension": "dim.09", "weight_micro": -717967},
+        {"dimension": "dim.10", "weight_micro": -686630},
+        {"dimension": "dim.11", "weight_micro": -655293},
+        {"dimension": "dim.12", "weight_micro": -623956},
+        {"dimension": "dim.13", "weight_micro": -592619},
+        {"dimension": "dim.14", "weight_micro": -561282},
+        {"dimension": "dim.15", "weight_micro": -529945},
+        {"dimension": "dim.16", "weight_micro": -498608},
+        {"dimension": "dim.17", "weight_micro": -467271},
+        {"dimension": "dim.18", "weight_micro": -435934},
+        {"dimension": "dim.19", "weight_micro": -404597},
+        {"dimension": "dim.20", "weight_micro": -373260},
+        {"dimension": "dim.21", "weight_micro": -341923},
+        {"dimension": "dim.22", "weight_micro": -310586},
+        {"dimension": "dim.23", "weight_micro": -279249},
+        {"dimension": "dim.24", "weight_micro": -247912},
+        {"dimension": "dim.25", "weight_micro": -216575},
+        {"dimension": "dim.26", "weight_micro": -185238},
+        {"dimension": "dim.27", "weight_micro": -153901},
+        {"dimension": "dim.28", "weight_micro": -122564},
+        {"dimension": "dim.29", "weight_micro": -91227},
+        {"dimension": "dim.30", "weight_micro": -59890},
+        {"dimension": "dim.31", "weight_micro": -28553},
+        {"dimension": "dim.32", "weight_micro": 2784},
+        {"dimension": "dim.33", "weight_micro": 34121},
+        {"dimension": "dim.34", "weight_micro": 65458},
+        {"dimension": "dim.35", "weight_micro": 96795},
+        {"dimension": "dim.36", "weight_micro": 128132},
+        {"dimension": "dim.37", "weight_micro": 159469},
+        {"dimension": "dim.38", "weight_micro": 190806},
+        {"dimension": "dim.39", "weight_micro": 222143},
+        {"dimension": "dim.40", "weight_micro": 253480},
+        {"dimension": "dim.41", "weight_micro": 284817},
+        {"dimension": "dim.42", "weight_micro": 316154},
+        {"dimension": "dim.43", "weight_micro": 347491},
+        {"dimension": "dim.44", "weight_micro": 378828},
+        {"dimension": "dim.45", "weight_micro": 410165},
+        {"dimension": "dim.46", "weight_micro": 441502},
+        {"dimension": "dim.47", "weight_micro": 472839},
+        {"dimension": "dim.48", "weight_micro": 504176},
+        {"dimension": "dim.49", "weight_micro": 535513},
+        {"dimension": "dim.50", "weight_micro": 566850},
+        {"dimension": "dim.51", "weight_micro": 598187},
+        {"dimension": "dim.52", "weight_micro": 629524},
+        {"dimension": "dim.53", "weight_micro": 660861},
+        {"dimension": "dim.54", "weight_micro": 692198},
+        {"dimension": "dim.55", "weight_micro": 723535},
+        {"dimension": "dim.56", "weight_micro": 754872},
+        {"dimension": "dim.57", "weight_micro": 786209},
+        {"dimension": "dim.58", "weight_micro": 817546},
+        {"dimension": "dim.59", "weight_micro": 848883},
+        {"dimension": "dim.60", "weight_micro": 880220},
+        {"dimension": "dim.61", "weight_micro": 911557},
+        {"dimension": "dim.62", "weight_micro": 942894},
+        {"dimension": "dim.63", "weight_micro": 974231}
+      ],
+      "options": [
+        {"key": "option-00", "tags": ["dim.00", "tag-00-01", "dim.02", "tag-00-03", "dim.04", "tag-00-05", "dim.06", "tag-00-07", "dim.08", "tag-00-09", "dim.10", "tag-00-11", "dim.12", "tag-00-13", "dim.14", "tag-00-15"]},
+        {"key": "option-01", "tags": ["dim.04", "tag-01-01", "dim.06", "tag-01-03", "dim.08", "tag-01-05", "dim.10", "tag-01-07", "dim.12", "tag-01-09", "dim.14", "tag-01-11", "dim.16", "tag-01-13", "dim.18", "tag-01-15"]},
+        {"key": "option-02", "tags": ["dim.08", "tag-02-01", "dim.10", "tag-02-03", "dim.12", "tag-02-05", "dim.14", "tag-02-07", "dim.16", "tag-02-09", "dim.18", "tag-02-11", "dim.20", "tag-02-13", "dim.22", "tag-02-15"]},
+        {"key": "option-03", "tags": ["dim.12", "tag-03-01", "dim.14", "tag-03-03", "dim.16", "tag-03-05", "dim.18", "tag-03-07", "dim.20", "tag-03-09", "dim.22", "tag-03-11", "dim.24", "tag-03-13", "dim.26", "tag-03-15"]},
+        {"key": "option-04", "tags": ["dim.16", "tag-04-01", "dim.18", "tag-04-03", "dim.20", "tag-04-05", "dim.22", "tag-04-07", "dim.24", "tag-04-09", "dim.26", "tag-04-11", "dim.28", "tag-04-13", "dim.30", "tag-04-15"]},
+        {"key": "option-05", "tags": ["dim.20", "tag-05-01", "dim.22", "tag-05-03", "dim.24", "tag-05-05", "dim.26", "tag-05-07", "dim.28", "tag-05-09", "dim.30", "tag-05-11", "dim.32", "tag-05-13", "dim.34", "tag-05-15"]},
+        {"key": "option-06", "tags": ["dim.24", "tag-06-01", "dim.26", "tag-06-03", "dim.28", "tag-06-05", "dim.30", "tag-06-07", "dim.32", "tag-06-09", "dim.34", "tag-06-11", "dim.36", "tag-06-13", "dim.38", "tag-06-15"]},
+        {"key": "option-07", "tags": ["dim.28", "tag-07-01", "dim.30", "tag-07-03", "dim.32", "tag-07-05", "dim.34", "tag-07-07", "dim.36", "tag-07-09", "dim.38", "tag-07-11", "dim.40", "tag-07-13", "dim.42", "tag-07-15"]},
+        {"key": "option-08", "tags": ["dim.32", "tag-08-01", "dim.34", "tag-08-03", "dim.36", "tag-08-05", "dim.38", "tag-08-07", "dim.40", "tag-08-09", "dim.42", "tag-08-11", "dim.44", "tag-08-13", "dim.46", "tag-08-15"]},
+        {"key": "option-09", "tags": ["dim.36", "tag-09-01", "dim.38", "tag-09-03", "dim.40", "tag-09-05", "dim.42", "tag-09-07", "dim.44", "tag-09-09", "dim.46", "tag-09-11", "dim.48", "tag-09-13", "dim.50", "tag-09-15"]},
+        {"key": "option-10", "tags": ["dim.40", "tag-10-01", "dim.42", "tag-10-03", "dim.44", "tag-10-05", "dim.46", "tag-10-07", "dim.48", "tag-10-09", "dim.50", "tag-10-11", "dim.52", "tag-10-13", "dim.54", "tag-10-15"]},
+        {"key": "option-11", "tags": ["dim.44", "tag-11-01", "dim.46", "tag-11-03", "dim.48", "tag-11-05", "dim.50", "tag-11-07", "dim.52", "tag-11-09", "dim.54", "tag-11-11", "dim.56", "tag-11-13", "dim.58", "tag-11-15"]},
+        {"key": "option-12", "tags": ["dim.48", "tag-12-01", "dim.50", "tag-12-03", "dim.52", "tag-12-05", "dim.54", "tag-12-07", "dim.56", "tag-12-09", "dim.58", "tag-12-11", "dim.60", "tag-12-13", "dim.62", "tag-12-15"]},
+        {"key": "option-13", "tags": ["dim.52", "tag-13-01", "dim.54", "tag-13-03", "dim.56", "tag-13-05", "dim.58", "tag-13-07", "dim.60", "tag-13-09", "dim.62", "tag-13-11", "dim.00", "tag-13-13", "dim.02", "tag-13-15"]},
+        {"key": "option-14", "tags": ["dim.56", "tag-14-01", "dim.58", "tag-14-03", "dim.60", "tag-14-05", "dim.62", "tag-14-07", "dim.00", "tag-14-09", "dim.02", "tag-14-11", "dim.04", "tag-14-13", "dim.06", "tag-14-15"]},
+        {"key": "option-15", "tags": ["dim.60", "tag-15-01", "dim.62", "tag-15-03", "dim.00", "tag-15-05", "dim.02", "tag-15-07", "dim.04", "tag-15-09", "dim.06", "tag-15-11", "dim.08", "tag-15-13", "dim.10", "tag-15-15"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "option-00", "match_score_micro": -780641},
+          {"option_key": "option-01", "match_score_micro": -655293},
+          {"option_key": "option-02", "match_score_micro": -529945},
+          {"option_key": "option-03", "match_score_micro": -404597},
+          {"option_key": "option-04", "match_score_micro": -279249},
+          {"option_key": "option-05", "match_score_micro": -153901},
+          {"option_key": "option-06", "match_score_micro": -28553},
+          {"option_key": "option-07", "match_score_micro": 96795},
+          {"option_key": "option-08", "match_score_micro": 222143},
+          {"option_key": "option-09", "match_score_micro": 347491},
+          {"option_key": "option-10", "match_score_micro": 472839},
+          {"option_key": "option-11", "match_score_micro": 598187},
+          {"option_key": "option-12", "match_score_micro": 723535},
+          {"option_key": "option-13", "match_score_micro": 347491},
+          {"option_key": "option-14", "match_score_micro": -28553},
+          {"option_key": "option-15", "match_score_micro": -404597}
+        ],
+        "margin_micro": 125348,
+        "toss_up": false,
+        "option_key": "option-12"
+      }
+    },
+    {
+      "name": "sixteen-matched-tags-per-option",
+      "weights": [
+        {"dimension": "w00", "weight_micro": -1000000},
+        {"dimension": "w01", "weight_micro": 1000000},
+        {"dimension": "w02", "weight_micro": 1000000},
+        {"dimension": "w03", "weight_micro": -1000000},
+        {"dimension": "w04", "weight_micro": 1000000},
+        {"dimension": "w05", "weight_micro": 1000000},
+        {"dimension": "w06", "weight_micro": -1000000},
+        {"dimension": "w07", "weight_micro": 1000000},
+        {"dimension": "w08", "weight_micro": 1000000},
+        {"dimension": "w09", "weight_micro": -1000000},
+        {"dimension": "w10", "weight_micro": 1000000},
+        {"dimension": "w11", "weight_micro": 1000000},
+        {"dimension": "w12", "weight_micro": -1000000},
+        {"dimension": "w13", "weight_micro": 1000000},
+        {"dimension": "w14", "weight_micro": 1000000},
+        {"dimension": "w15", "weight_micro": -1000000},
+        {"dimension": "w16", "weight_micro": 1000000},
+        {"dimension": "w17", "weight_micro": 1000000},
+        {"dimension": "w18", "weight_micro": -1000000},
+        {"dimension": "w19", "weight_micro": 1000000},
+        {"dimension": "w20", "weight_micro": 1000000},
+        {"dimension": "w21", "weight_micro": -1000000},
+        {"dimension": "w22", "weight_micro": 1000000},
+        {"dimension": "w23", "weight_micro": 1000000},
+        {"dimension": "w24", "weight_micro": -1000000},
+        {"dimension": "w25", "weight_micro": 1000000},
+        {"dimension": "w26", "weight_micro": 1000000},
+        {"dimension": "w27", "weight_micro": -1000000},
+        {"dimension": "w28", "weight_micro": 1000000},
+        {"dimension": "w29", "weight_micro": 1000000},
+        {"dimension": "w30", "weight_micro": -1000000},
+        {"dimension": "w31", "weight_micro": 1000000},
+        {"dimension": "w32", "weight_micro": 1000000},
+        {"dimension": "w33", "weight_micro": -1000000},
+        {"dimension": "w34", "weight_micro": 1000000},
+        {"dimension": "w35", "weight_micro": 1000000},
+        {"dimension": "w36", "weight_micro": -1000000},
+        {"dimension": "w37", "weight_micro": 1000000},
+        {"dimension": "w38", "weight_micro": 1000000},
+        {"dimension": "w39", "weight_micro": -1000000},
+        {"dimension": "w40", "weight_micro": 1000000},
+        {"dimension": "w41", "weight_micro": 1000000},
+        {"dimension": "w42", "weight_micro": -1000000},
+        {"dimension": "w43", "weight_micro": 1000000},
+        {"dimension": "w44", "weight_micro": 1000000},
+        {"dimension": "w45", "weight_micro": -1000000},
+        {"dimension": "w46", "weight_micro": 1000000},
+        {"dimension": "w47", "weight_micro": 1000000},
+        {"dimension": "w48", "weight_micro": -1000000},
+        {"dimension": "w49", "weight_micro": 1000000},
+        {"dimension": "w50", "weight_micro": 1000000},
+        {"dimension": "w51", "weight_micro": -1000000},
+        {"dimension": "w52", "weight_micro": 1000000},
+        {"dimension": "w53", "weight_micro": 1000000},
+        {"dimension": "w54", "weight_micro": -1000000},
+        {"dimension": "w55", "weight_micro": 1000000},
+        {"dimension": "w56", "weight_micro": 1000000},
+        {"dimension": "w57", "weight_micro": -1000000},
+        {"dimension": "w58", "weight_micro": 1000000},
+        {"dimension": "w59", "weight_micro": 1000000},
+        {"dimension": "w60", "weight_micro": -1000000},
+        {"dimension": "w61", "weight_micro": 1000000},
+        {"dimension": "w62", "weight_micro": 1000000},
+        {"dimension": "w63", "weight_micro": -1000000}
+      ],
+      "options": [
+        {"key": "o00", "tags": ["w00", "w04", "w08", "w12", "w16", "w20", "w24", "w28", "w32", "w36", "w40", "w44", "w48", "w52", "w56", "w60"]},
+        {"key": "o01", "tags": ["w01", "w05", "w09", "w13", "w17", "w21", "w25", "w29", "w33", "w37", "w41", "w45", "w49", "w53", "w57", "w61"]},
+        {"key": "o02", "tags": ["w02", "w06", "w10", "w14", "w18", "w22", "w26", "w30", "w34", "w38", "w42", "w46", "w50", "w54", "w58", "w62"]},
+        {"key": "o03", "tags": ["w03", "w07", "w11", "w15", "w19", "w23", "w27", "w31", "w35", "w39", "w43", "w47", "w51", "w55", "w59", "w63"]},
+        {"key": "o04", "tags": ["w04", "w08", "w12", "w16", "w20", "w24", "w28", "w32", "w36", "w40", "w44", "w48", "w52", "w56", "w60", "w00"]},
+        {"key": "o05", "tags": ["w05", "w09", "w13", "w17", "w21", "w25", "w29", "w33", "w37", "w41", "w45", "w49", "w53", "w57", "w61", "w01"]},
+        {"key": "o06", "tags": ["w06", "w10", "w14", "w18", "w22", "w26", "w30", "w34", "w38", "w42", "w46", "w50", "w54", "w58", "w62", "w02"]},
+        {"key": "o07", "tags": ["w07", "w11", "w15", "w19", "w23", "w27", "w31", "w35", "w39", "w43", "w47", "w51", "w55", "w59", "w63", "w03"]},
+        {"key": "o08", "tags": ["w08", "w12", "w16", "w20", "w24", "w28", "w32", "w36", "w40", "w44", "w48", "w52", "w56", "w60", "w00", "w04"]},
+        {"key": "o09", "tags": ["w09", "w13", "w17", "w21", "w25", "w29", "w33", "w37", "w41", "w45", "w49", "w53", "w57", "w61", "w01", "w05"]},
+        {"key": "o10", "tags": ["w10", "w14", "w18", "w22", "w26", "w30", "w34", "w38", "w42", "w46", "w50", "w54", "w58", "w62", "w02", "w06"]},
+        {"key": "o11", "tags": ["w11", "w15", "w19", "w23", "w27", "w31", "w35", "w39", "w43", "w47", "w51", "w55", "w59", "w63", "w03", "w07"]},
+        {"key": "o12", "tags": ["w12", "w16", "w20", "w24", "w28", "w32", "w36", "w40", "w44", "w48", "w52", "w56", "w60", "w00", "w04", "w08"]},
+        {"key": "o13", "tags": ["w13", "w17", "w21", "w25", "w29", "w33", "w37", "w41", "w45", "w49", "w53", "w57", "w61", "w01", "w05", "w09"]},
+        {"key": "o14", "tags": ["w14", "w18", "w22", "w26", "w30", "w34", "w38", "w42", "w46", "w50", "w54", "w58", "w62", "w02", "w06", "w10"]},
+        {"key": "o15", "tags": ["w15", "w19", "w23", "w27", "w31", "w35", "w39", "w43", "w47", "w51", "w55", "w59", "w63", "w03", "w07", "w11"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "o00", "match_score_micro": 250000},
+          {"option_key": "o01", "match_score_micro": 375000},
+          {"option_key": "o02", "match_score_micro": 375000},
+          {"option_key": "o03", "match_score_micro": 250000},
+          {"option_key": "o04", "match_score_micro": 250000},
+          {"option_key": "o05", "match_score_micro": 375000},
+          {"option_key": "o06", "match_score_micro": 375000},
+          {"option_key": "o07", "match_score_micro": 250000},
+          {"option_key": "o08", "match_score_micro": 250000},
+          {"option_key": "o09", "match_score_micro": 375000},
+          {"option_key": "o10", "match_score_micro": 375000},
+          {"option_key": "o11", "match_score_micro": 250000},
+          {"option_key": "o12", "match_score_micro": 250000},
+          {"option_key": "o13", "match_score_micro": 375000},
+          {"option_key": "o14", "match_score_micro": 375000},
+          {"option_key": "o15", "match_score_micro": 250000}
+        ],
+        "margin_micro": 0,
+        "toss_up": true,
+        "option_key": null
+      }
+    },
+    {
+      "name": "largest-signed-sums",
+      "weights": [
+        {"dimension": "p00", "weight_micro": 1000000},
+        {"dimension": "p01", "weight_micro": 1000000},
+        {"dimension": "p02", "weight_micro": 1000000},
+        {"dimension": "p03", "weight_micro": 1000000},
+        {"dimension": "p04", "weight_micro": 1000000},
+        {"dimension": "p05", "weight_micro": 1000000},
+        {"dimension": "p06", "weight_micro": 1000000},
+        {"dimension": "p07", "weight_micro": 1000000},
+        {"dimension": "p08", "weight_micro": 1000000},
+        {"dimension": "p09", "weight_micro": 1000000},
+        {"dimension": "p10", "weight_micro": 1000000},
+        {"dimension": "p11", "weight_micro": 1000000},
+        {"dimension": "p12", "weight_micro": 1000000},
+        {"dimension": "p13", "weight_micro": 1000000},
+        {"dimension": "p14", "weight_micro": 1000000},
+        {"dimension": "p15", "weight_micro": 1000000},
+        {"dimension": "p16", "weight_micro": 1000000},
+        {"dimension": "p17", "weight_micro": 1000000},
+        {"dimension": "p18", "weight_micro": 1000000},
+        {"dimension": "p19", "weight_micro": 1000000},
+        {"dimension": "p20", "weight_micro": 1000000},
+        {"dimension": "p21", "weight_micro": 1000000},
+        {"dimension": "p22", "weight_micro": 1000000},
+        {"dimension": "p23", "weight_micro": 1000000},
+        {"dimension": "p24", "weight_micro": 1000000},
+        {"dimension": "p25", "weight_micro": 1000000},
+        {"dimension": "p26", "weight_micro": 1000000},
+        {"dimension": "p27", "weight_micro": 1000000},
+        {"dimension": "p28", "weight_micro": 1000000},
+        {"dimension": "p29", "weight_micro": 1000000},
+        {"dimension": "p30", "weight_micro": 1000000},
+        {"dimension": "p31", "weight_micro": 1000000},
+        {"dimension": "n00", "weight_micro": -1000000},
+        {"dimension": "n01", "weight_micro": -1000000},
+        {"dimension": "n02", "weight_micro": -1000000},
+        {"dimension": "n03", "weight_micro": -1000000},
+        {"dimension": "n04", "weight_micro": -1000000},
+        {"dimension": "n05", "weight_micro": -1000000},
+        {"dimension": "n06", "weight_micro": -1000000},
+        {"dimension": "n07", "weight_micro": -1000000},
+        {"dimension": "n08", "weight_micro": -1000000},
+        {"dimension": "n09", "weight_micro": -1000000},
+        {"dimension": "n10", "weight_micro": -1000000},
+        {"dimension": "n11", "weight_micro": -1000000},
+        {"dimension": "n12", "weight_micro": -1000000},
+        {"dimension": "n13", "weight_micro": -1000000},
+        {"dimension": "n14", "weight_micro": -1000000},
+        {"dimension": "n15", "weight_micro": -1000000},
+        {"dimension": "n16", "weight_micro": -1000000},
+        {"dimension": "n17", "weight_micro": -1000000},
+        {"dimension": "n18", "weight_micro": -1000000},
+        {"dimension": "n19", "weight_micro": -1000000},
+        {"dimension": "n20", "weight_micro": -1000000},
+        {"dimension": "n21", "weight_micro": -1000000},
+        {"dimension": "n22", "weight_micro": -1000000},
+        {"dimension": "n23", "weight_micro": -1000000},
+        {"dimension": "n24", "weight_micro": -1000000},
+        {"dimension": "n25", "weight_micro": -1000000},
+        {"dimension": "n26", "weight_micro": -1000000},
+        {"dimension": "n27", "weight_micro": -1000000},
+        {"dimension": "n28", "weight_micro": -1000000},
+        {"dimension": "n29", "weight_micro": -1000000},
+        {"dimension": "n30", "weight_micro": -1000000},
+        {"dimension": "n31", "weight_micro": -1000000}
+      ],
+      "options": [
+        {"key": "all-positive", "tags": ["p00", "p01", "p02", "p03", "p04", "p05", "p06", "p07", "p08", "p09", "p10", "p11", "p12", "p13", "p14", "p15"]},
+        {"key": "all-negative", "tags": ["n00", "n01", "n02", "n03", "n04", "n05", "n06", "n07", "n08", "n09", "n10", "n11", "n12", "n13", "n14", "n15"]}
+      ],
+      "expected": {
+        "status": "computed",
+        "scores": [
+          {"option_key": "all-positive", "match_score_micro": 1000000},
+          {"option_key": "all-negative", "match_score_micro": -1000000}
+        ],
+        "margin_micro": 2000000,
+        "toss_up": false,
+        "option_key": "all-positive"
+      }
+    }
+  ]
+}

@@ -39,7 +39,12 @@ use crate::selector::{InstallationError, SelectorBoundaryError};
 type InstallationOpener = Box<dyn Fn() -> Result<FixedInstallation, InstallationError> + Send>;
 
 /// Where each closed failure kind is reported: standard error in production.
-type DiagnosticSink = Mutex<Box<dyn std::io::Write + Send>>;
+pub(super) type DiagnosticSink = Mutex<Box<dyn std::io::Write + Send>>;
+
+/// Standard error, the production sink.
+pub(super) fn stderr_diagnostics() -> DiagnosticSink {
+    Mutex::new(Box::new(std::io::stderr()))
+}
 
 /// One pending transaction and how the selector serves it.
 pub(super) struct PendingRecovery {
@@ -63,7 +68,7 @@ impl PendingRecovery {
             authority: opening.authority(),
             opening,
             evaluator: PathBuf::from(crate::selector::SANDBOX_SELECTOR_SOCKET),
-            diagnostics: Mutex::new(Box::new(std::io::stderr())),
+            diagnostics: stderr_diagnostics(),
         }
     }
 
@@ -213,14 +218,18 @@ impl PendingRecovery {
     /// One diagnostic line with the closed failure kind; it names no
     /// secret. A sink that cannot be written changes nothing.
     fn report(&self, what: &str, error: &impl std::fmt::Display) {
-        writeln!(
-            self.diagnostics
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            "pos-root-selector: {what}: {error}"
-        )
-        .ok();
+        report_diagnostic(&self.diagnostics, what, error);
     }
+}
+
+/// One diagnostic line with the closed failure kind; it names no secret. A
+/// sink that cannot be written changes nothing.
+pub(super) fn report_diagnostic(sink: &DiagnosticSink, what: &str, error: &impl std::fmt::Display) {
+    writeln!(
+        sink.lock().unwrap_or_else(PoisonError::into_inner),
+        "pos-root-selector: {what}: {error}"
+    )
+    .ok();
 }
 
 #[cfg(test)]
