@@ -221,6 +221,12 @@ in
     "ip6_tunnel"
     "ip_gre"
   ];
+  # The provider's host requirement (ADR-069 R14 N12): the production drop-in, byte for byte,
+  # so that systemd-sysctl applies it before the composed runtime starts. The runtime refuses
+  # step 7 (HostUnavailable) while net.core.fb_tunnels_only_for_init_net is below 1. The
+  # R14 network cases below set the sysctl to 0, 1 and 2 on their own and restore it.
+  environment.etc."sysctl.d/60-piglor-sandbox.conf".source = ../../sysctl.d/60-piglor-sandbox.conf;
+
   networking.hostName = "piglor-qemu-evidence";
   networking.useDHCP = false;
   documentation.enable = false;

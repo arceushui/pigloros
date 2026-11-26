@@ -514,7 +514,7 @@ ROUTES6 = ("local ::1 dev lo table local proto kernel metric 0 pref medium\n"
 
 def network_files() -> dict[str, bytes | str]:
     files: dict[str, bytes | str] = {
-        "guest/network/boot-sysctl": "0\n",
+        "guest/network/boot-sysctl": "1\n",
         "guest/network/init-netns": INIT_NETNS + "\n",
         "guest/network/init-links": LINK_LO + FALLBACKS,
         "guest/network/modules": MODULES,
@@ -583,6 +583,7 @@ def daemon_files() -> dict[str, bytes | str]:
         f"{base}/start-state": "ActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\n",
         f"{base}/start-journal": RUNTIME_LOG.split("[ 120.0]")[0],
         f"{base}/launcher-program-headers": LAUNCHER_HEADERS,
+        f"{base}/fb-tunnels-sysctl": "1\n",
         f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
         f"{base}/runtime-credentials": RUNTIME_CREDENTIALS,
         f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
@@ -1538,7 +1539,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_private_network_unit_holds_only_the_loopback_once_the_sysctl_is_set(self):
         network = self.verdict()["private_network"]
-        self.assertEqual(network["boot_sysctl"], 0)
+        self.assertEqual(network["boot_sysctl"], 1)
         self.assertEqual(network["fb-0"]["links"], ["lo", "tunl0", "sit0", "ip6tnl0", "gre0"])
         for case in ("fb-1", "fb-2"):
             self.assertEqual(network[case]["links"], ["lo"])
@@ -1583,6 +1584,10 @@ class EvidenceTests(unittest.TestCase):
             (lambda f: f.update({f"{base}/stop-status": "1\n"}), "did not start and stop cleanly"),
             # The executable that stands in for the provider.
             (lambda f: f.update({f"{base}/runtime-exe": "/nix/store/x-other\n"}), "not the staged provider binary"),
+            # The runtime refuses step 7 below 1 (R14 N12): only a start at 1 or more counts.
+            *[(lambda f, value=value: f.update({f"{base}/fb-tunnels-sysctl": value}),
+               "below the 1 that the provider requires")
+              for value in ("0\n", "x\n", "\n", "-1\n", "\u0661\n")],
             (lambda f: f.update({f"{base}/launcher-sha256": "nothing\n"}), "launcher digest line is malformed"),
             # One case per sub-check of the digest line (the rest of the line stays valid).
             *[(lambda f, line=line: f.update({f"{base}/launcher-sha256": line + "\n"}),
@@ -1764,6 +1769,12 @@ class EvidenceTests(unittest.TestCase):
             with self.subTest(change=change, message=message), self.assertRaisesRegex(checker.EvidenceError, message):
                 self.verdict(change=change)
 
+    def test_the_runtime_may_start_at_one_or_more(self):
+        base = "guest/daemon/start"
+        for value in ("1\n", "2\n"):
+            with self.subTest(value=value):
+                self.verdict(change=lambda f, v=value: f.update({f"{base}/fb-tunnels-sysctl": v}))
+
     def test_a_static_executable_or_a_static_pie_is_a_launcher(self):
         base = "guest/daemon/start"
         for kind in ("EXEC (Executable file)", "DYN (Position-Independent Executable file)",
@@ -1850,7 +1861,8 @@ class EvidenceTests(unittest.TestCase):
             (lambda f: f.update({f"{base}/extra": ""}), "does not hold exactly"),
             (lambda f: f.pop(f"{base}/fb-1/routes6"), "completed but wrote only"),
             (lambda f: f.update({f"{base}/boot-sysctl": "x\n"}), "does not boot"),
-            (lambda f: f.update({f"{base}/boot-sysctl": "1\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "0\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "2\n"}), "does not boot"),
             (lambda f: f.update({f"{base}/boot-sysctl": "7\n"}), "does not boot"),
             # The modules, and the control: value 0 must show the host's fallback devices.
             (lambda f: f.update({f"{base}/modules": ""}), "tunnel modules are not loaded"),

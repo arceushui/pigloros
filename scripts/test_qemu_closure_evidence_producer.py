@@ -399,6 +399,7 @@ class ProducerShellTests(unittest.TestCase):
     def test_daemon_case_records_what_the_checker_judges_in_order(self):
         import check_qemu_closure_evidence as checker
         calls = self.base / "calls"
+        (self.base / "fb_tunnels").write_text("1\n")
         out = self.base / "out"
         out.mkdir()
         images = self.base / "images"
@@ -427,6 +428,7 @@ class ProducerShellTests(unittest.TestCase):
         script = "\n".join([
             f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
             f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
+            f'FB_TUNNELS_SYSCTL="{self.base}/fb_tunnels"',
             f'cd "{out}"; mkdir daemon',
             'daemon_case start image.raw signer.der "CN: 01"',
         ])
@@ -436,6 +438,8 @@ class ProducerShellTests(unittest.TestCase):
         # Every file the checker's inventory expects after a successful stage is written.
         self.assertEqual(recorded, checker.DAEMON_STAGE_FILES | checker.DAEMON_RUNTIME_FILES)
         self.assertEqual((case / "start-stderr").read_text(), "start-stderr line\n")
+        # The sysctl the runtime starts under is recorded before the stager runs.
+        self.assertEqual((case / "fb-tunnels-sysctl").read_text(), "1\n")
         self.assertEqual((case / "stage-report").read_text(), f"staged\t{installed}\nunstaged\n")
         self.assertEqual((case / "stage-status").read_text(), "0\n")
         self.assertEqual((case / "start-status").read_text(), "0\n")
@@ -475,6 +479,7 @@ class ProducerShellTests(unittest.TestCase):
     def test_a_failing_busctl_leaves_a_partial_line_and_the_collector_finishes(self):
         import check_qemu_closure_evidence as checker
         calls = self.base / "calls"
+        (self.base / "fb_tunnels").write_text("1\n")
         out = self.base / "out"
         out.mkdir()
         images = self.base / "images"
@@ -501,6 +506,7 @@ class ProducerShellTests(unittest.TestCase):
         script = "\n".join([
             f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
             f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
+            f'FB_TUNNELS_SYSCTL="{self.base}/fb_tunnels"',
             f'cd "{out}"; mkdir daemon',
             'daemon_case start image.raw signer.der "CN: 01"',
         ])

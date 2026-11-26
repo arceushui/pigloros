@@ -192,7 +192,7 @@ NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
 # stops.
 DAEMON_CASES = ("start",)
 DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status",
-                      "start-stderr", "launcher-sha256", "launcher-program-headers"}
+                      "start-stderr", "launcher-sha256", "launcher-program-headers", "fb-tunnels-sysctl"}
 # `start-state` and `start-journal` are diagnostics: required to exist, and read only to explain
 # a failed start.
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
@@ -1424,6 +1424,12 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
                             f"journal after the start: {start_journal.strip()[-600:]!r}; "
                             f"log: {log.strip()[-600:]!r}")
     check_launcher(evidence, base, binary)
+    # The runtime refuses step 7 below 1 (ADR-069 R14 N12), so a start that proves anything ran at
+    # at least 1; the guest gets it from the production sysctl.d drop-in.
+    sysctl = evidence.line(f"{base}/fb-tunnels-sysctl")
+    if not (sysctl.isascii() and sysctl.isdigit() and int(sysctl) >= 1):
+        raise EvidenceError(f"the {name} runtime started with net.core.fb_tunnels_only_for_init_net="
+                            f"{sysctl!r}, below the 1 that the provider requires")
     unit = properties(evidence, f"{base}/runtime-properties")
     for key, expected in RUNTIME_UNIT_PROPERTIES.items():
         if unit.get(key) != expected:
@@ -1506,10 +1512,10 @@ def check_daemon(evidence: Evidence) -> dict:
 
 def check_network(evidence: Evidence) -> dict:
     """ADR-069 R14: the unit holds only lo whenever the sysctl is at least 1."""
-    # The packaged default: the kernel's own 0, which R14 changes through
-    # a host sysctl.d drop-in that #1488-b ships.
-    if evidence.line("guest/network/boot-sysctl") != "0":
-        raise EvidenceError("the packaged guest does not boot with net.core.fb_tunnels_only_for_init_net=0")
+    # The packaged value: the production sysctl.d drop-in sets 1 (the kernel's own default, 0, is
+    # what the cases below set explicitly as the control).
+    if evidence.line("guest/network/boot-sysctl") != "1":
+        raise EvidenceError("the packaged guest does not boot with net.core.fb_tunnels_only_for_init_net=1")
     modules = {line.split()[0] for line in evidence.text("guest/network/modules").splitlines() if line.split()}
     if not TUNNEL_MODULES <= modules:
         raise EvidenceError(f"the tunnel modules are not loaded: {sorted(TUNNEL_MODULES - modules)}")
@@ -1517,7 +1523,7 @@ def check_network(evidence: Evidence) -> dict:
     init_links = link_names(evidence, "guest/network/init-links")
     if not FALLBACK_DEVICES <= set(init_links):
         raise EvidenceError("the init namespace has no fallback tunnel device to compare with")
-    return {"boot_sysctl": 0, "init_links": init_links, "modules": sorted(TUNNEL_MODULES),
+    return {"boot_sysctl": 1, "init_links": init_links, "modules": sorted(TUNNEL_MODULES),
             **{name: check_network_case(evidence, name, value, (init_netns, init_links))
                for name, value in NETWORK_CASES.items()}}
 

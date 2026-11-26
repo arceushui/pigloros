@@ -228,6 +228,8 @@ start_runtime() { # BINARY
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   local dir="daemon/$1" fifo="${STAGE_FIFO}" control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
+  # The fallback-tunnel sysctl the runtime starts under: it refuses step 7 below 1.
+  cat "${FB_TUNNELS_SYSCTL}" >"${dir}/fb-tunnels-sysctl"
   # The provider executable the stager installs: its digest, and its program
   # headers, which show a loadable statically linked ELF file (no INTERP).
   sha256sum "${launcher}" >"${dir}/launcher-sha256"
