@@ -25,7 +25,9 @@ use crate::selector::installation::fixture::{
     admitted_state, admitted_state_with_arguments, admitted_state_with_provider_binary,
     ddi_fixture, materialize_state, provider_executable_path, ImageSigning, RUNTIME_KEY_SEED,
 };
-use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
+use crate::selector::installation::{
+    InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
+};
 
 const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
 
@@ -99,29 +101,45 @@ impl StagedInstallation {
     /// empty or over-long SPI1 (its file rules allow 1 to 4096 bytes) and a
     /// key file name that is not one plain file name.
     pub fn stage_provider(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
-        let name = provider.key_file_name;
-        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
-            return Err("the key file name is not one plain file name".into());
-        }
-        if !(1..=4096).contains(&provider.installation.len()) {
-            return Err("SPI1 must be between 1 and 4096 bytes".into());
-        }
-        let binary = fs::read(provider.binary)?;
-        let (partitions, signing, salt) = described(&provider.image)?;
-        let state = admitted_state_with_provider_binary(
-            provider.image.image,
-            provider.image.executable,
-            &partitions,
-            &signing,
-            salt,
-            provider.image.arguments,
-            &binary,
-        )?;
+        let state = provider_state(provider)?;
         let mut staged = Self::create_parent()?;
-        let root = Path::new(SANDBOX_ARTIFACT_ROOT);
-        let admitted = materialize_state(root, state)?;
+        let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
         staged.request = request_for(&admitted)?;
-        staged.provider_executable = provider_executable_path(root, &admitted)?;
+        staged.install_provider_files(&admitted, provider)?;
+        Ok(staged)
+    }
+
+    /// [`Self::stage_provider`] around a complete authenticated execution
+    /// fixture: the EVR1/CFB1/TPS1 source and canonical input of
+    /// [`Self::stage_execution`], and the SPX1 execute request for case 0,
+    /// all bound to the caller's image, adapter and provider binary.
+    ///
+    /// The input is the EAI1 attempt stream the staged adapter reads, so an
+    /// adapter that decodes EAI1 (as the evidence adapter's `honest` mode
+    /// does) accepts it. [`Self::evaluation`], [`Self::input`] and
+    /// [`Self::request`] are the selector's side of one execute exchange.
+    ///
+    /// # Errors
+    /// Everything [`Self::stage_provider`] refuses, and invalid fixture
+    /// material.
+    pub fn stage_provider_execution(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
+        let state = provider_state(provider)?;
+        let mut staged = Self::create_parent()?;
+        let admitted = staged.stage_execution_state(state)?;
+        staged.install_provider_files(&admitted, provider)?;
+        Ok(staged)
+    }
+
+    /// Install the provider executable path, the SPI1 file and the
+    /// runtime-attestation key file of `provider` beside the materialized
+    /// `admitted` installation.
+    fn install_provider_files(
+        &mut self,
+        admitted: &AdmittedSelectorProvider,
+        provider: &StagedProvider<'_>,
+    ) -> Result<(), Box<dyn Error>> {
+        let root = Path::new(SANDBOX_ARTIFACT_ROOT);
+        self.provider_executable = provider_executable_path(root, admitted)?;
         write_private(
             &root.join("provider-installation.cbor"),
             provider.installation,
@@ -130,13 +148,12 @@ impl StagedInstallation {
         let keys = root.join("provider-keys");
         fs::create_dir(&keys)?;
         fs::set_permissions(&keys, fs::Permissions::from_mode(0o700))?;
-        write_private(&keys.join(name), &RUNTIME_KEY_SEED, 0o400)?;
-        Ok(staged)
+        write_private(&keys.join(provider.key_file_name), &RUNTIME_KEY_SEED, 0o400)
     }
 
     /// The installed provider executable, which a runtime must run as: the
     /// file the SIC1 provider-executable descriptor names. Empty unless
-    /// staged by [`Self::stage_provider`].
+    /// staged by [`Self::stage_provider`] or [`Self::stage_provider_execution`].
     #[must_use]
     pub fn provider_executable(&self) -> &Path {
         &self.provider_executable
@@ -191,19 +208,29 @@ impl StagedInstallation {
     /// Refuses an existing fixed installation and invalid fixture material.
     pub fn stage_execution() -> Result<Self, Box<dyn Error>> {
         let mut staged = Self::create_parent()?;
+        staged.stage_execution_state(admitted_state()?)?;
+        Ok(staged)
+    }
+
+    /// Materialize `state` with the execution fixture's corpus, and record
+    /// the canonical input, the SPX1 request and the EVR1 of case 0.
+    fn stage_execution_state(
+        &mut self,
+        state: InstalledSelectorState,
+    ) -> Result<AdmittedSelectorProvider, Box<dyn Error>> {
         let corpus = crate::selector_test_support::air_gapped_corpus()?;
         let (evaluation, state) =
-            crate::selector::installation::fixture::execution_state(admitted_state()?, &corpus)?;
+            crate::selector::installation::fixture::execution_state(state, &corpus)?;
         let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
         let resolved = admitted
             .bootstrap()
             .resolve_installed_case(&evaluation, 0)?;
-        crate::adapter_transport::write_attempt(&mut staged.input, resolved.attempt())?;
+        crate::adapter_transport::write_attempt(&mut self.input, resolved.attempt())?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
-        hasher.update(&staged.input);
+        hasher.update(&self.input);
         let input = PayloadDescriptor {
-            byte_length: staged.input.len() as u64,
+            byte_length: self.input.len() as u64,
             digest: *hasher.finalize().as_bytes(),
         };
         let request = crate::selector_protocol::execute_request_for_case(
@@ -214,9 +241,9 @@ impl StagedInstallation {
             0,
             fixture_nonce(),
         )?;
-        staged.request = request.to_canonical_cbor()?;
-        staged.evaluation = evaluation.to_canonical_cbor()?;
-        Ok(staged)
+        self.request = request.to_canonical_cbor()?;
+        self.evaluation = evaluation.to_canonical_cbor()?;
+        Ok(admitted)
     }
 
     /// Create the fixed, private installation directories, never adopting
@@ -438,6 +465,29 @@ impl Drop for StagedInstallation {
             drop(fs::remove_dir_all(parent));
         }
     }
+}
+
+/// Validate `provider`'s files and build the installation state around its
+/// image, adapter and provider binary.
+fn provider_state(provider: &StagedProvider<'_>) -> Result<InstalledSelectorState, Box<dyn Error>> {
+    let name = provider.key_file_name;
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return Err("the key file name is not one plain file name".into());
+    }
+    if !(1..=4096).contains(&provider.installation.len()) {
+        return Err("SPI1 must be between 1 and 4096 bytes".into());
+    }
+    let binary = fs::read(provider.binary)?;
+    let (partitions, signing, salt) = described(&provider.image)?;
+    admitted_state_with_provider_binary(
+        provider.image.image,
+        provider.image.executable,
+        &partitions,
+        &signing,
+        salt,
+        provider.image.arguments,
+        &binary,
+    )
 }
 
 /// Create `path` exclusively with `mode` from the start, then write `bytes`.

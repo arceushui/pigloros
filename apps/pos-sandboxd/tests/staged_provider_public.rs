@@ -20,9 +20,11 @@ use std::{
     process::Command,
 };
 
+use pos_reference::adapter_transport::read_attempt;
 use pos_reference::provider_admission::test_support::{
     StagedImage, StagedInstallation, StagedProvider,
 };
+use pos_reference::provider_admission::ProviderImageSnapshot;
 use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
 use pos_reference::selector::installation::InstalledSelectorState;
 use pos_sandboxd::{ProviderInstallation, RuntimeKey};
@@ -269,5 +271,41 @@ fn bad_provider_inputs_are_refused_and_leave_no_installation() -> TestResult {
     fs::set_permissions(FIXED, fs::Permissions::from_mode(0o700))?;
     assert!(StagedInstallation::stage_provider(&good).is_err());
     assert!(Path::new(FIXED).exists());
+    Ok(())
+}
+
+#[test]
+fn the_staged_execution_fixture_is_bound_to_the_staged_provider_and_adapter() -> TestResult {
+    if !require_isolated_root(
+        "the_staged_execution_fixture_is_bound_to_the_staged_provider_and_adapter",
+    )? {
+        return Ok(());
+    }
+    let inputs = Inputs::new(Path::new("/tmp"))?;
+    let staged = StagedInstallation::stage_provider_execution(&inputs.provider())?;
+
+    // The provider files are those of `stage_provider`.
+    let binary = fs::read(&inputs.binary)?;
+    assert_eq!(fs::read(staged.provider_executable())?, binary);
+    let installation = ProviderInstallation::open()?;
+    assert_eq!(installation.attempt_range().slots(), 256);
+    let admitted = InstalledSelectorState::open()?
+        .authenticate_bootstrap()?
+        .admit_provider()?;
+    RuntimeKey::open(&installation)?
+        .require_admitted(admitted.provider().runtime_attestation_key())?;
+
+    // The selector's side of one execute exchange is present, and the input
+    // is the EAI1 attempt stream that an EAI1-reading adapter accepts.
+    assert!(!staged.request().is_empty());
+    assert!(!staged.evaluation().is_empty());
+    assert!(!staged.input().is_empty());
+    read_attempt(staged.input())?;
+
+    // Production admission reads the staged SIM1 (the caller's adapter and
+    // argument vector) back through the request.
+    ProviderImageSnapshot::open(staged.request())?.admit_held_image()?;
+    drop(staged);
+    assert!(!Path::new(FIXED).exists());
     Ok(())
 }
