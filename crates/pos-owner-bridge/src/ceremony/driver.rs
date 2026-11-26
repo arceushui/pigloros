@@ -34,6 +34,8 @@ use super::timing::{
     expired, poll_interval, receipt_window, CHALLENGE_TTL, EXIT_WINDOW, INTERACTION, MAX_POSTS,
     READINESS, RELEASE_WINDOW, SERVED_SETTLE,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::OwnerAuthenticatorPort;
 use crate::{
     cleanup_record_bytes, folder_name, BridgeError, CleanupStore, LifecycleCode, LoopbackPort,
     MonotonicClock, NavigationId, OwnerWebSurface, PostGuard, ProcessIdentity, ProtocolCode,
@@ -926,6 +928,76 @@ impl CeremonyDriver {
         self.plan.wipe_secrets();
         self.phase = Phase::Quarantined;
         Step::Finished(Err(error))
+    }
+
+    /// Run the whole ceremony through a native authenticator client (ADR-110 E20 LS3).
+    ///
+    /// The reply takes the same `parse_and_verify` path as the buffer protocol. There is no
+    /// surface, listener, generation or cleanup record, so neither the §6 readiness, receipt,
+    /// release and exit windows nor the §5.5 states apply. The challenge time to live, the
+    /// enrollment budget and the interaction bound do: the interaction bound starts here, at
+    /// the first CTAP command, and the port must cancel the authenticator by the deadline it is
+    /// given. A driver runs once: a second call is refused and changes nothing; any other
+    /// failure wipes the ceremony slots.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Protocol(UnexpectedState)` for a driver that already ran, the enrollment budget
+    /// or deadline failure, the port's failure, `Protocol(LengthOutOfBounds)` for a reply
+    /// length of zero or above the reply capacity, and the decode or verification failure.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn run_direct(
+        &mut self,
+        port: &mut dyn OwnerAuthenticatorPort,
+        clock: &dyn MonotonicClock,
+    ) -> Result<Verified, BridgeError> {
+        if self.phase != Phase::Opening {
+            return Err(UNEXPECTED_STATE);
+        }
+        let outcome = self.direct(port, clock);
+        if outcome.is_ok() {
+            self.slots.wipe_buffers();
+        } else {
+            self.slots.wipe_ceremony();
+        }
+        self.phase = Phase::Done;
+        outcome
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn direct(
+        &mut self,
+        port: &mut dyn OwnerAuthenticatorPort,
+        clock: &dyn MonotonicClock,
+    ) -> Result<Verified, BridgeError> {
+        let started = clock.now();
+        self.first_past_empty = Some(started);
+        if let Some(error) = self
+            .budget_failure(started)
+            .or_else(|| self.consume_deadline_error(started))
+        {
+            return Err(error);
+        }
+        self.write_request()?;
+        let deadline = (started + INTERACTION).min(self.plan.t0 + CHALLENGE_TTL);
+        let slots = &mut *self.slots;
+        slots.copy_a.select(self.plan.kind);
+        let performed = port.perform(&slots.request, &mut slots.copy_a, deadline, clock);
+        if let Some(error) = self.consume_deadline_error(clock.now()) {
+            return Err(error);
+        }
+        let length = performed?;
+        let slots = &mut *self.slots;
+        let capacity = slots.copy_a.as_bytes().len().saturating_sub(HEADER);
+        if length == 0 || length > capacity {
+            return Err(BridgeError::Protocol(ProtocolCode::LengthOutOfBounds));
+        }
+        let payload = slots.copy_a.as_bytes().get(..length).unwrap_or_default();
+        let verified = parse_and_verify(&self.plan, payload, &mut slots.prf)?;
+        if expired(clock.now(), self.plan.t0, CHALLENGE_TTL) {
+            return Err(lifecycle(LifecycleCode::ChallengeExpired));
+        }
+        Ok(verified)
     }
 
     /// Poll a quarantined ceremony for its browser exit. Returns `true` once cleanup finished.

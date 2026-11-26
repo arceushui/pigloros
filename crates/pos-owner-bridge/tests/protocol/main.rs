@@ -2,6 +2,7 @@
 //! the 10,000-seed oracle, all driven by `FakeSurface` and fake owner ports.
 
 mod channel;
+mod direct;
 mod driver_paths;
 mod enrollment;
 mod fakes;
