@@ -88,8 +88,10 @@ impl AttemptCleanupDeadlines {
 
 /// Why an attempt's terminal cleanup did not complete.
 ///
-/// Every variant leaves the durable intent in place and new registry commits
-/// closed; restart reconciliation must inspect the surviving state.
+/// Every variant closes new registry commits. All but [`Self::Network`] also
+/// leave the durable intent in place for restart reconciliation to inspect;
+/// the network variant is reported after the cleanup itself finished, so the
+/// intent is already removed and the port's own quarantine keeps the network.
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptCleanupError {
     /// The unit could not be stopped and observed absent in time.
@@ -102,6 +104,10 @@ pub enum AttemptCleanupError {
     /// could not be removed.
     #[error(transparent)]
     Registry(#[from] SystemdAttemptRegistryError),
+    /// The attempt's Local network could not be removed (ADR-069 R14 N7 and
+    /// base §8): the cleanup is not proved.
+    #[error(transparent)]
+    Network(#[from] crate::NetworkRemovalFailure),
 }
 
 /// Finish one attempt's terminal cleanup within `deadlines`.
