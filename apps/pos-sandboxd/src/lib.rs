@@ -342,7 +342,7 @@ pub use lifecycle::{
 pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
     HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
-    ServedProxy,
+    ServedProxy, SetupClass, SetupError,
 };
 #[cfg(target_os = "linux")]
 pub use namespace_network::netlink;

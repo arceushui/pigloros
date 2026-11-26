@@ -1398,3 +1398,44 @@ fn an_ipv4_mapped_endpoint_establishes_the_namespace_of_the_ipv4_it_maps() -> Te
     assert_eq!(installed, Some(ipv4));
     Ok(())
 }
+
+/// ADR-069 R14 §3.4: creation, transport and resource refusals are
+/// `Creation`; a failed readback, an existing namespace and a slot held
+/// twice contradict the provider's own state.
+#[test]
+fn every_attempt_network_error_has_its_setup_class() {
+    use crate::SetupError as _;
+    let establish = |failure| {
+        AttemptNetworkError::Establish(EstablishError {
+            failure,
+            removal: None,
+        })
+    };
+    let creation = [
+        AttemptNetworkError::Exhausted,
+        AttemptNetworkError::Plan(NetworkPlanError::Ipv4Range),
+        AttemptNetworkError::Open(NetlinkError::Empty),
+        AttemptNetworkError::Quarantined {
+            slot: 0,
+            reason: String::new(),
+        },
+        establish(EstablishFailure::Install(NetlinkError::Empty)),
+        AttemptNetworkError::Egress(HostEgressError::Netlink(NetlinkError::Empty)),
+        AttemptNetworkError::Egress(HostEgressError::Ipv6Egress),
+        AttemptNetworkError::Egress(HostEgressError::State(io::Error::other("record"))),
+    ];
+    let contradiction = [
+        establish(EstablishFailure::Observe(NetlinkError::Empty)),
+        establish(EstablishFailure::Readback(crate::ReadbackMismatch::Links)),
+        AttemptNetworkError::Egress(HostEgressError::Readback),
+        AttemptNetworkError::Egress(HostEgressError::Forwarding),
+        AttemptNetworkError::InUse,
+        AttemptNetworkError::Exists,
+    ];
+    for error in creation {
+        assert_eq!(error.setup_class(), SetupClass::Creation, "{error}");
+    }
+    for error in contradiction {
+        assert_eq!(error.setup_class(), SetupClass::Contradiction, "{error}");
+    }
+}
