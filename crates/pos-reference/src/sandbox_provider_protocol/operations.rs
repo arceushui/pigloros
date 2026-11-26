@@ -469,6 +469,25 @@ impl SandboxDescribeRequest {
 }
 
 impl SandboxCancelRequest {
+    /// Build the exact canonical SCQ1 bytes of one attempt cancellation.
+    pub(crate) fn canonical(
+        request: RequestAuthority,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<(Self, Vec<u8>), SandboxProviderProtocolError> {
+        let (request_digest, bytes) =
+            canonical_attempt_request("SCQ1", &request, attempt_id, agr1_digest)?;
+        Ok((
+            Self {
+                request,
+                attempt_id,
+                agr1_digest,
+                request_digest,
+            },
+            bytes,
+        ))
+    }
+
     fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = [
             text_value("SCQ1"),
@@ -483,6 +502,25 @@ impl SandboxCancelRequest {
 }
 
 impl SandboxReconcileRequest {
+    /// Build the exact canonical SRQ1 bytes of one attempt reconciliation.
+    pub(crate) fn canonical(
+        request: RequestAuthority,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<(Self, Vec<u8>), SandboxProviderProtocolError> {
+        let (request_digest, bytes) =
+            canonical_attempt_request("SRQ1", &request, attempt_id, agr1_digest)?;
+        Ok((
+            Self {
+                request,
+                attempt_id,
+                agr1_digest,
+                request_digest,
+            },
+            bytes,
+        ))
+    }
+
     fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = [
             text_value("SRQ1"),
@@ -1001,6 +1039,28 @@ fn validate_request_record<const N: usize>(
 ) -> Result<(), SandboxProviderProtocolError> {
     validate_request_authority(request)?;
     verify_digest(magic, unsigned, digest)
+}
+
+/// SCQ1 and SRQ1 share one shape: `[magic, 1, request, attempt, AGR1 digest]`
+/// and a trailing self-digest (ADR-069 §10).
+fn canonical_attempt_request(
+    magic: &str,
+    request: &RequestAuthority,
+    attempt_id: [u8; 16],
+    agr1_digest: [u8; 32],
+) -> Result<([u8; 32], Vec<u8>), SandboxProviderProtocolError> {
+    validate_request_authority(request)?;
+    validate_attempt_binding(attempt_id, agr1_digest)?;
+    let unsigned = Value::Array(vec![
+        text_value(magic),
+        uint_value(1),
+        request_authority_value(request),
+        bytes_value(&attempt_id),
+        bytes_value(&agr1_digest),
+    ]);
+    let request_digest = record_digest(magic, &unsigned)?;
+    encode(&Value::Array(vec![unsigned, bytes_value(&request_digest)]))
+        .map(|bytes| (request_digest, bytes))
 }
 
 fn validate_attempt_binding(

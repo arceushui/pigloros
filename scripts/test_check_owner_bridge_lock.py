@@ -6,6 +6,7 @@ import unittest
 
 from check_owner_bridge_lock import (
     CHECKSUM, SOURCE, TARGET, WINDOWS_PINS, WEBVIEW_PINS, WINDOWS_TARGET, COMPANIONS, check, check_windows,
+    CTAP_PINS, CTAP_RUSTIX, CTAP_WORKSPACE, check_ctap,
 )
 
 
@@ -179,6 +180,114 @@ class WindowsFamilyLockTests(unittest.TestCase):
             lock = copy.deepcopy(self.lock)
             lock["package"].append({"name": name})
             self.assertTrue(check_windows(lock, self.shim, self.workspace), name)
+
+
+class CtapLockTests(unittest.TestCase):
+    """ADR-110 E20 AM-110g: direct aes/hmac pins and crate-local rustix features."""
+
+    def setUp(self):
+        self.lock = {"package": [
+            {"name": name, "version": version, "source": SOURCE, "checksum": checksum}
+            for name, (version, checksum) in CTAP_PINS.items()
+        ] + [
+            {"name": "pos-owner-ctap", "dependencies": ["aes", "hkdf", "hmac", "p256", "unicode-normalization"]},
+            {"name": "piglor-owner", "dependencies": ["pos-owner-bridge"]},
+        ]}
+        self.ctap = {"dependencies": {
+            "aes": {"workspace": True, "features": ["zeroize"]},
+            "hmac": {"workspace": True},
+            "unicode-normalization": {"workspace": True},
+        }}
+        self.workspace = {"workspace": {"dependencies": copy.deepcopy(CTAP_WORKSPACE)}}
+
+    def with_rustix(self):
+        ctap = copy.deepcopy(self.ctap)
+        ctap["target"] = {TARGET: {kind: {"rustix": copy.deepcopy(dependency)} for kind, dependency in CTAP_RUSTIX.items()}}
+        return ctap
+
+    def test_selected_graph_with_and_without_the_s2_rustix_features(self):
+        self.assertEqual(check_ctap(self.lock, self.ctap, self.workspace), [])
+        lock = copy.deepcopy(self.lock)
+        for package in lock["package"][-2:]:
+            package["dependencies"].append("rustix 1.1.6")
+        self.assertEqual(check_ctap(lock, self.with_rustix(), self.workspace), [])
+
+    def test_workspace_pins_are_exact(self):
+        for name, value in [("aes", {"version": "=0.9.4"}), ("aes", {"version": "0.9.4", "default-features": False}),
+                            ("hmac", "0.13.0"), ("hmac", {"version": "=0.13.0"}),
+                            ("unicode-normalization", {"version": "=0.1.26"}),
+                            ("unicode-normalization", "=0.1.26")]:
+            workspace = copy.deepcopy(self.workspace)
+            workspace["workspace"]["dependencies"][name] = value
+            self.assertTrue(check_ctap(self.lock, self.ctap, workspace), (name, value))
+        for name in CTAP_PINS:
+            workspace = copy.deepcopy(self.workspace)
+            del workspace["workspace"]["dependencies"][name]
+            self.assertTrue(check_ctap(self.lock, self.ctap, workspace), name)
+
+    def test_locked_versions_and_the_crate_resolution(self):
+        for index in range(len(CTAP_PINS)):
+            for field in ["version", "source", "checksum"]:
+                lock = copy.deepcopy(self.lock)
+                lock["package"][index][field] = "unapproved"
+                self.assertTrue(check_ctap(lock, self.ctap, self.workspace), (index, field))
+            for duplicate in [False, True]:
+                lock = copy.deepcopy(self.lock)
+                if duplicate:
+                    lock["package"].append(copy.deepcopy(lock["package"][index]))
+                else:
+                    lock["package"].pop(index)
+                self.assertTrue(check_ctap(lock, self.ctap, self.workspace), (index, duplicate))
+        crate = len(CTAP_PINS)
+        for dependencies in [["hkdf", "hmac", "unicode-normalization"], ["aes", "hkdf", "unicode-normalization"],
+                             ["aes", "aes", "hmac", "unicode-normalization"], ["aes", "hmac"]]:
+            lock = copy.deepcopy(self.lock)
+            lock["package"][crate]["dependencies"] = dependencies
+            self.assertTrue(check_ctap(lock, self.ctap, self.workspace), dependencies)
+        for duplicate in [False, True]:
+            lock = copy.deepcopy(self.lock)
+            if duplicate:
+                lock["package"].append(copy.deepcopy(lock["package"][crate]))
+            else:
+                lock["package"].pop(crate)
+            self.assertTrue(check_ctap(lock, self.ctap, self.workspace), duplicate)
+
+    def test_the_crate_inherits_both_pins(self):
+        for name in CTAP_PINS:
+            for value in ["0.9.4", {"version": "=0.9.4"}, {"workspace": False}]:
+                ctap = copy.deepcopy(self.ctap)
+                ctap["dependencies"][name] = value
+                self.assertTrue(check_ctap(self.lock, ctap, self.workspace), (name, value))
+            ctap = copy.deepcopy(self.ctap)
+            del ctap["dependencies"][name]
+            self.assertTrue(check_ctap(self.lock, ctap, self.workspace), name)
+
+    def test_rustix_stays_in_the_crate_local_linux_tables(self):
+        for kind in CTAP_RUSTIX:
+            for features in [[], ["termios"], ["termios", "event", "process", "pty"], ["fs"]]:
+                ctap = self.with_rustix()
+                ctap["target"][TARGET][kind]["rustix"]["features"] = features
+                self.assertTrue(check_ctap(self.lock, ctap, self.workspace), (kind, features))
+            ctap = self.with_rustix()
+            ctap["target"][TARGET][kind]["rustix"]["workspace"] = False
+            self.assertTrue(check_ctap(self.lock, ctap, self.workspace), kind)
+        for target in [None, TARGET, "cfg(windows)"]:
+            for kind in ["dependencies", "dev-dependencies", "build-dependencies"]:
+                for name in ["rustix", "renamed"]:
+                    if target == TARGET and name == "rustix" and kind in CTAP_RUSTIX:
+                        continue
+                    ctap = copy.deepcopy(self.ctap)
+                    table = ctap if target is None else ctap.setdefault("target", {}).setdefault(target, {})
+                    dependency = {"package": "rustix", "workspace": True, "features": ["pty"]}
+                    table.setdefault(kind, {})[name] = dependency
+                    self.assertTrue(check_ctap(self.lock, ctap, self.workspace), (target, kind, name))
+
+    def test_rustix_consumers_resolve_only_the_pinned_release(self):
+        for consumer in [-2, -1]:
+            for dependencies in [["rustix 0.38.44"], ["rustix 1.1.6", "rustix 0.38.44"], ["rustix 1.1.6", "rustix 1.1.6"]]:
+                lock = copy.deepcopy(self.lock)
+                lock["package"][consumer]["dependencies"].extend(dependencies)
+                self.assertTrue(check_ctap(lock, self.ctap, self.workspace), (consumer, dependencies))
 
 
 if __name__ == "__main__":
