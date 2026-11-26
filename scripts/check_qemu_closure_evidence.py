@@ -103,6 +103,7 @@ PROVENANCE_FILES = (
     "deploy/nixos/dev-trust/root-hash-dev-test.key",
     "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt",
     "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key",
+    "deploy/sysctl.d/60-piglor-sandbox.conf",
 )
 COLLECTOR_PROGRAM = "bin/piglor-qemu-evidence"
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -166,7 +167,7 @@ GUEST_FILES = {
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
     "mountfsd-service-properties", "mountfsd-socket-properties", "manager-environment",
-    "pid1-namespaces", "cases", "network",
+    "pid1-namespaces", "cases", "network", "daemon",
 }
 DRIVER_CASES = ("positive", "tampered", "wrong-key", "verity-d")
 MOUNTED_CASES = ("positive", "tampered")
@@ -184,6 +185,47 @@ NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWOR
 # got as far as writing them, so a failed case still has an explaining record.
 NETWORK_RUN_FILES = {"sysctl", "status", "stderr", "journal"}
 NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
+# The composed provider runtime: started as the staged provider binary, then stopped.
+# The unit is not the production `pigloros-provider-runtime-<hex32>.service` (R11 D7) and
+# carries no confinement beyond the R11 5.2 common property set; the shared confinement set
+# is later work. These rows are the ones R11 5.2 lists, and `Result` after the stop is read
+# from the journal, because the unit is collected (CollectMode=inactive-or-failed) once it
+# stops.
+DAEMON_CASES = ("start",)
+DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status",
+                      "start-stderr", "launcher-sha256", "launcher-program-headers", "fb-tunnels-sysctl"}
+# `start-state` and `start-journal` are diagnostics: required to exist, and read only to explain
+# a failed start.
+DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
+                        "runtime-log", "provider-sha256", "start-state", "start-journal"}
+# R11 5.2 gives the unit no environment, no descriptor and no credential. These environment and
+# descriptor lists must be empty or omitted (systemctl show omits some empty lists); the
+# credential lists cannot be read that way and are checked through `runtime-credentials`
+# (CREDENTIAL_PROPERTIES). `ListenStream` belongs to socket units, which the runtime unit has
+# none of.
+EMPTY_UNIT_PROPERTIES = ("EnvironmentFiles", "Sockets", "OpenFile", "ExtraFileDescriptors")
+# The credential lists, which `systemctl show` cannot print: read over the bus as JSON, each with
+# its D-Bus type, and each must be an empty list.
+CREDENTIAL_PROPERTIES = {"SetCredential": "a(say)", "SetCredentialEncrypted": "a(say)",
+                         "LoadCredential": "a(ss)", "LoadCredentialEncrypted": "a(ss)",
+                         "ImportCredential": "as"}
+# The manager's own lines for the stop, as `journalctl -o short-monotonic` prints them: PID 1
+# says it is stopping the unit, and later that the unit deactivated successfully. A line a
+# daemon wrote, one for another unit, or one from before the stop does not count.
+RUNTIME_STOPPED = re.compile(
+    r"^\[[^\]]+\] \S+ systemd\[1\]: Stopping [^\n]*\n(?:[^\n]*\n)*?"
+    r"\[[^\]]+\] \S+ systemd\[1\]: piglor-sandbox-runtime\.service: Deactivated successfully\.$",
+    re.M)
+PROVIDER_BINARY_PATH = re.compile(r"/var/lib/pigloros/sandbox/providers/[0-9a-f]{64}")
+RUNTIME_UNIT_PROPERTIES = {
+    "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
+    "Type": "notify", "NotifyAccess": "main", "ExitType": "main", "KillMode": "control-group",
+    "Restart": "no", "CollectMode": "inactive-or-failed", "UMask": "0077", "StandardInput": "null",
+    "TimeoutStartUSec": "30s", "Environment": "", "PassEnvironment": "", "RuntimeMaxUSec": "infinity",
+}
+RUNTIME_ENDPOINTS = ("provider-execute.sock", "provider-control.sock")
+ENDPOINT_MODE, DIRECTORY_MODE = "600", "700"
+STOP_FAILURES = ("Failed with result", "SIGKILL", "timed out", "Killing process")
 LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
 # The modules guest.nix loads, and the fallback device each creates in a new
 # network namespace while the sysctl is 0 (ipip, sit, ip6_tunnel, ip_gre).
@@ -425,6 +467,7 @@ class Evidence:
                 raise EvidenceError(f"{name}/ files differ: missing {missing}, unexpected {extra}")
         self._inventory_cases()
         self._inventory_network()
+        self._inventory_daemon()
         found = {path.name for path in (self.root / "host" / "images").iterdir()}
         if found != HOST_IMAGE_FILES:
             raise EvidenceError(f"host/images/ differs: {sorted(found)}")
@@ -450,6 +493,18 @@ class Evidence:
                 raise EvidenceError(f"malformed case record: {name}: {sorted(found)}")
         if {path.name for path in (cases / "mountfsd-reply").iterdir()} != REPLY_FILES:
             raise EvidenceError("malformed case record: mountfsd-reply")
+
+    def _inventory_daemon(self) -> None:
+        daemon = self.root / "guest" / "daemon"
+        if {path.name for path in daemon.iterdir()} != set(DAEMON_CASES):
+            raise EvidenceError("guest/daemon/ does not hold exactly the composed runtime cases")
+        for name in DAEMON_CASES:
+            found = {path.name for path in (daemon / name).iterdir()}
+            if found not in (DAEMON_STAGE_FILES, DAEMON_STAGE_FILES | DAEMON_RUNTIME_FILES):
+                raise EvidenceError(
+                    f"malformed daemon record {name}: missing {sorted(DAEMON_STAGE_FILES - found)}, "
+                    f"unexpected {sorted(found - DAEMON_STAGE_FILES - DAEMON_RUNTIME_FILES)}, "
+                    f"runtime files {sorted(found & DAEMON_RUNTIME_FILES)}")
 
     def _inventory_network(self) -> None:
         network = self.root / "guest" / "network"
@@ -1347,12 +1402,121 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
             "routes6": require_loopback_routes(evidence, f"{base}/routes6", ROUTES6_ALLOWED)}
 
 
+def check_daemon_case(evidence: Evidence, name: str) -> dict:
+    """The composed runtime started as exactly the staged provider binary and was stopped."""
+    base = f"guest/daemon/{name}"
+    report = evidence.text(f"{base}/stage-report").splitlines()
+    fields = report[0].split("\t") if report else []
+    if evidence.line(f"{base}/stage-status") != "0" or len(fields) != 2 or fields[0] != "staged" \
+            or not PROVIDER_BINARY_PATH.fullmatch(fields[1]) or report[1:] != ["unstaged"]:
+        raise EvidenceError(f"the {name} stager did not stage and unstage the provider: {report}; "
+                            f"stderr: {evidence.text(f'{base}/stage-stderr').strip()[:400]!r}")
+    binary = fields[1]
+    if evidence.line(f"{base}/start-status") != "0" or evidence.line(f"{base}/stop-status") != "0":
+        log = evidence.text(f"{base}/runtime-log") if (evidence.root / base / "runtime-log").exists() else ""
+        start_journal = evidence.text(f"{base}/start-journal") \
+            if (evidence.root / base / "start-journal").exists() else ""
+        start_stderr = evidence.text(f"{base}/start-stderr").strip(" \t\r\n")[:400]
+        start_state = evidence.text(f"{base}/start-state") \
+            if (evidence.root / base / "start-state").exists() else ""
+        raise EvidenceError(f"the {name} runtime unit did not start and stop cleanly; "
+                            f"start stderr: {start_stderr!r}; "
+                            f"state after the start: {start_state.split()!r}; "
+                            f"journal after the start: {start_journal.strip()[-600:]!r}; "
+                            f"log: {log.strip()[-600:]!r}")
+    check_launcher(evidence, base, binary)
+    # The runtime refuses step 7 below 1 (ADR-069 R14 N12), so a start that proves anything ran at
+    # at least 1; the guest gets it from the production sysctl.d drop-in.
+    sysctl = evidence.line(f"{base}/fb-tunnels-sysctl")
+    if not (re.fullmatch(r"[0-9]{1,9}", sysctl) and int(sysctl) >= 1):
+        raise EvidenceError(f"the {name} runtime started with net.core.fb_tunnels_only_for_init_net="
+                            f"{sysctl!r}, below the 1 that the provider requires")
+    unit = properties(evidence, f"{base}/runtime-properties")
+    for key, expected in RUNTIME_UNIT_PROPERTIES.items():
+        if unit.get(key) != expected:
+            raise EvidenceError(f"the {name} runtime unit has {key}={unit.get(key)!r}, not {expected!r}")
+    # systemctl show omits some empty lists instead of printing them.
+    for key in EMPTY_UNIT_PROPERTIES:
+        if unit.get(key, "") != "":
+            raise EvidenceError(f"the {name} runtime unit has {key}={unit[key]!r}")
+    check_credentials(evidence, f"{base}/runtime-credentials", name)
+    # One ExecStart entry, for exactly the binary and argv, that does not ignore errors.
+    exec_start = unit.get("ExecStart", "")
+    if not unit.get("MainPID", "").isdigit() or int(unit["MainPID"]) == 0 \
+            or exec_start.count("path=") != 1 \
+            or f"path={binary} ; argv[]={binary} provider-runtime ; ignore_errors=no ;" not in exec_start:
+        raise EvidenceError(f"the {name} runtime unit does not run {binary} provider-runtime: {unit.get('ExecStart')!r}")
+    if evidence.line(f"{base}/runtime-exe") != binary:
+        raise EvidenceError(f"the {name} runtime process is not the staged provider binary")
+    log = evidence.text(f"{base}/runtime-log")
+    failures = [marker for marker in STOP_FAILURES if marker in log]
+    if not RUNTIME_STOPPED.search(log) or failures:
+        raise EvidenceError(f"the {name} runtime unit did not stop with Result=success: "
+                            f"{failures or 'no Stopping and Deactivated successfully lines from systemd[1]'}; "
+                            f"log: {log.strip()[-600:]!r}")
+    tree = {}
+    for line in evidence.text(f"{base}/runtime-tree").splitlines():
+        path, kind, mode = tab_fields(line, 3, "runtime-tree")
+        tree[path] = (kind, mode)
+    for endpoint in RUNTIME_ENDPOINTS:
+        if tree.get(endpoint, ("", ""))[0] != "s":
+            raise EvidenceError(f"the {name} runtime bound no socket at /run/pigloros/{endpoint}")
+        if tree[endpoint][1] != ENDPOINT_MODE:
+            raise EvidenceError(f"the {name} runtime socket {endpoint} has mode {tree[endpoint][1]}, "
+                                f"not {ENDPOINT_MODE}")
+    loose = sorted(path for path, (kind, mode) in tree.items() if kind == "d" and mode != DIRECTORY_MODE)
+    if loose:
+        raise EvidenceError(f"the {name} runtime directories {loose} are not mode {DIRECTORY_MODE}")
+    return {"binary": binary, "properties": unit, "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
+
+
+def check_credentials(evidence: Evidence, path: str, name: str) -> None:
+    """Each credential list of the runtime unit is present and empty (R11 5.2)."""
+    seen = {}
+    for line in evidence.text(path).splitlines():
+        key, _, value = line.partition("\t")
+        try:
+            document = json.loads(value)
+        except json.JSONDecodeError:
+            document = None
+        if key in seen or not isinstance(document, dict) or not isinstance(document.get("data"), list) \
+                or document.get("type") != CREDENTIAL_PROPERTIES.get(key):
+            raise EvidenceError(f"the {name} runtime unit's credential line is malformed or of the wrong "
+                                f"type: {line!r}")
+        seen[key] = document["data"]
+    if sorted(seen) != sorted(CREDENTIAL_PROPERTIES):
+        raise EvidenceError(f"the {name} runtime unit's credential properties are {sorted(seen)}, "
+                            f"not {sorted(CREDENTIAL_PROPERTIES)}")
+    held = sorted(key for key, data in seen.items() if data)
+    if held:
+        raise EvidenceError(f"the {name} runtime unit has credentials: {held}")
+
+
+def check_launcher(evidence: Evidence, base: str, binary: str) -> None:
+    """The provider executable is the statically linked pos-sandboxd the attempt units bind."""
+    digest = evidence.line(f"{base}/launcher-sha256").split("  ")
+    if len(digest) != 2 or not re.fullmatch(r"[0-9a-f]{64}", digest[0]) or not digest[1].startswith("/nix/store/"):
+        raise EvidenceError(f"the {base} launcher digest line is malformed")
+    headers = evidence.text(f"{base}/launcher-program-headers")
+    if not re.search(r"^\s*Type:\s+(EXEC|DYN) ", headers, re.M) or re.search(r"\bINTERP\b", headers) \
+            or not re.search(r"^\s*LOAD\s", headers, re.M) or "(NEEDED)" in headers:
+        raise EvidenceError(f"the {base} launcher is not a loadable statically linked ELF file")
+    # The copy the stager installed is the launcher, byte for byte.
+    installed = evidence.line(f"{base}/provider-sha256").split("  ")
+    if len(installed) != 2 or installed[0] != digest[0] or installed[1] != binary:
+        raise EvidenceError(f"the {base} installed provider executable is not the launcher: {installed}")
+
+
+def check_daemon(evidence: Evidence) -> dict:
+    return {name: check_daemon_case(evidence, name) for name in DAEMON_CASES}
+
+
 def check_network(evidence: Evidence) -> dict:
     """ADR-069 R14: the unit holds only lo whenever the sysctl is at least 1."""
-    # The packaged default: the kernel's own 0, which R14 changes through
-    # a host sysctl.d drop-in that #1488-b ships.
-    if evidence.line("guest/network/boot-sysctl") != "0":
-        raise EvidenceError("the packaged guest does not boot with net.core.fb_tunnels_only_for_init_net=0")
+    # The packaged value: the production sysctl.d drop-in sets 1 (the kernel's own default, 0, is
+    # what the cases below set explicitly as the control).
+    if evidence.line("guest/network/boot-sysctl") != "1":
+        raise EvidenceError("the packaged guest does not boot with net.core.fb_tunnels_only_for_init_net=1")
     modules = {line.split()[0] for line in evidence.text("guest/network/modules").splitlines() if line.split()}
     if not TUNNEL_MODULES <= modules:
         raise EvidenceError(f"the tunnel modules are not loaded: {sorted(TUNNEL_MODULES - modules)}")
@@ -1360,7 +1524,7 @@ def check_network(evidence: Evidence) -> dict:
     init_links = link_names(evidence, "guest/network/init-links")
     if not FALLBACK_DEVICES <= set(init_links):
         raise EvidenceError("the init namespace has no fallback tunnel device to compare with")
-    return {"boot_sysctl": 0, "init_links": init_links, "modules": sorted(TUNNEL_MODULES),
+    return {"boot_sysctl": 1, "init_links": init_links, "modules": sorted(TUNNEL_MODULES),
             **{name: check_network_case(evidence, name, value, (init_netns, init_links))
                for name, value in NETWORK_CASES.items()}}
 
@@ -1431,6 +1595,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
         "mount_image_cases": check_cases(evidence, architecture, paths, (der, description), untrusted),
         "private_network": check_network(evidence),
+        "provider_runtime": check_daemon(evidence),
     }
 
 

@@ -10,17 +10,19 @@
 //! accept or drop, `xt` compatibility matches, attributes it does not know,
 //! and a chain or rule whose table or chain the dumps did not report.
 
+use std::time::Instant;
+
 use netlink_packet_core::{NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL};
 use netlink_packet_netfilter::nftables::{
-    ChainAttribute, ChainFlags, ChainMessage, Hook, HookNumber, InetHookNumber, NfTablesMessage,
-    RuleAttribute, RuleMessage, TableAttribute, TableMessage,
+    ChainAttribute, ChainFlags, ChainMessage, GenAttribute, GenMessage, Hook, HookNumber,
+    InetHookNumber, NfTablesMessage, RuleAttribute, RuleMessage, TableAttribute, TableMessage,
 };
 use netlink_packet_netfilter::none::ControlMessage;
 use netlink_packet_netfilter::{
     NetfilterHeader, NetfilterMessage, NetfilterMessageInner, NetfilterProtoFamily,
 };
 
-use super::netlink::{NetlinkError, Request};
+use super::netlink::{NetlinkError, NetlinkSession, NetlinkTransport, Request};
 use super::{
     decode_firewall_rule, encode_firewall_rule, FirewallBaseChain, FirewallChain, FirewallHook,
     FirewallRule, FirewallTableFamily, FirewallVerdict, ObservedTable,
@@ -155,6 +157,98 @@ pub(super) fn dumps() -> [NetfilterMessage; 3] {
             }),
         ),
     ]
+}
+
+/// How many bracketed reads [`settled`] makes before it gives up.
+const READS: usize = 3;
+
+/// The replies of the three [`dumps`] of one read.
+pub(super) struct Dumps {
+    pub(super) tables: Vec<NetfilterMessage>,
+    pub(super) chains: Vec<NetfilterMessage>,
+    pub(super) rules: Vec<NetfilterMessage>,
+}
+
+/// `NFT_MSG_GETGEN`: the ruleset generation of the session's namespace.
+///
+/// # Errors
+/// Fails if the kernel refuses the request or answers with anything but a
+/// generation.
+fn generation<T: NetlinkTransport>(session: &NetlinkSession<T>) -> Result<u32, NetlinkError> {
+    let request = message(
+        NetfilterProtoFamily::Unspec,
+        NfTablesMessage::GetGen(GenMessage {
+            attributes: Vec::new(),
+        }),
+    );
+    session
+        .request(request)
+        .and_then(|reply| match nftables(reply).1 {
+            Some(NfTablesMessage::NewGen(report)) => report
+                .attributes
+                .into_iter()
+                .find_map(|attribute| match attribute {
+                    GenAttribute::Id(id) => Some(id),
+                    _ => None,
+                })
+                .ok_or(NetlinkError::Unexpected),
+            _ => Err(NetlinkError::Unexpected),
+        })
+}
+
+/// One read: the generation, the three dumps, the generation again.
+fn bracketed<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+) -> Result<(u32, Dumps, u32), NetlinkError> {
+    let [tables, chains, rules] = dumps();
+    generation(session).and_then(|first| {
+        session.dump(tables).and_then(|tables| {
+            session.dump(chains).and_then(|chains| {
+                session.dump(rules).and_then(|rules| {
+                    generation(session).map(|last| {
+                        (
+                            first,
+                            Dumps {
+                                tables,
+                                chains,
+                                rules,
+                            },
+                            last,
+                        )
+                    })
+                })
+            })
+        })
+    })
+}
+
+/// Read every table, chain and rule of the namespace a session of `open`
+/// sees, bracketed by `NFT_MSG_GETGEN` (ADR-069 R14 §3.2 steps 4 and 5):
+/// the settled generation, and the dumps made while it held.
+///
+/// A read is torn if the generation moved or a dump was interrupted; it is
+/// discarded and repeated with a new session, at most three reads in all.
+/// Any other failure is returned at once. A `deadline` that has passed
+/// before a read starts fails with a receive timeout.
+///
+/// # Errors
+/// Fails with [`NetlinkError::Torn`] if every read was torn, with
+/// `ETIMEDOUT` once `deadline` passed, and with the first other failure.
+pub(super) fn settled<T: NetlinkTransport>(
+    open: impl Fn() -> Result<NetlinkSession<T>, NetlinkError>,
+    deadline: Option<Instant>,
+) -> Result<(u32, Dumps), NetlinkError> {
+    for _ in 0..READS {
+        if deadline.is_some_and(|limit| limit.checked_duration_since(Instant::now()).is_none()) {
+            return Err(NetlinkError::Io(rustix::io::Errno::TIMEDOUT));
+        }
+        match open().and_then(|session| bracketed(&session)) {
+            Ok((first, dumps, last)) if first == last => return Ok((first, dumps)),
+            Ok(_) | Err(NetlinkError::Interrupted) => {}
+            Err(failure) => return Err(failure),
+        }
+    }
+    Err(NetlinkError::Torn)
 }
 
 /// A table, chain or rule of one family, as the dumps report it.
@@ -363,6 +457,9 @@ pub(super) fn observed_tables(
     Ok(tables.into_iter().map(|table| table.item).collect())
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod settled_tests;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

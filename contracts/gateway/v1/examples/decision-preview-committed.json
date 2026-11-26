@@ -1,11 +1,13 @@
 {
-  "name": "draft-decision-preview-committed",
+  "name": "decision-preview-committed",
   "operation_id": "getDecisionPreview",
   "request": {
     "path": {
       "preview_id": "01JC0GATEWAYW90PREV1EW0001"
     },
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {
@@ -13,9 +15,9 @@
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:decision-preview",
       "id": "01JC0GATEWAYW90PREV1EW0001",
-      "generation": 3,
+      "generation": 2,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "digest": "be5e700b8fed84430a7e1a2d322fe430409354ef40f6c3b721da7aafd4dfeaa9",
         "origin": "host-derived"
       },
       "mode_profile": {
@@ -27,8 +29,9 @@
       },
       "execution_profile": {
         "profile_kind": "epf1",
-        "state": "unavailable",
-        "reason": "not-installed"
+        "state": "installed",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101"
       },
       "availability": {
         "state": "available",
@@ -39,43 +42,51 @@
         "scenario_room": {
           "id": "01JC0GATEWAYW9R00M00000001",
           "revision": 2,
-          "digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+          "digest": "fd6e6cb67f418f827eed51918ee73b195a95d0e478a85da75eb99db0145288ab"
         },
         "preference": {
-          "id": "01JC0GATEWAYW9PREF0000001A",
+          "id": "01JC0GATEWAYW9PREF0000002A",
           "revision": 1,
-          "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+          "digest": "783cea660bc4ce412fd10485f31be662bb9521343368b6b32bed2cee8b56f0b8"
         },
         "option_spec": {
-          "id": "01JC0GATEWAYW9QPT10N00001A",
+          "id": "01JC0GATEWAYW9QPT10N00002A",
           "revision": 1,
-          "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+          "digest": "64041535a2bf7be712372924efbd41bfb590d6f96c4f6770f08eaa213d4657be"
         }
       },
-      "factual_timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+      "factual_timeline_id": null,
       "recommendation": {
         "status": "computed",
         "option_key": "coast",
         "toss_up": false,
-        "margin_micro": 140000,
+        "margin_micro": 950000,
         "scores": [
           {
             "option_key": "coast",
-            "match_score_micro": 620000
+            "match_score_micro": 650000
           },
           {
             "option_key": "city",
-            "match_score_micro": 480000
+            "match_score_micro": -300000
           }
         ]
       },
       "committed": {
         "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
-        "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
-        "event_id": "01JC0GATEWAYW9EVENT0000001",
-        "seq": 3,
-        "event_schema_id": "world.action.v1",
-        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.4"
+        "timeline_id": "4SKQW3XVN6B14SKZ8NNKJCHJ6G",
+        "event_id": "01JC0GATEWAYW90RES00000001",
+        "seq": 2,
+        "event_schema_id": "preview.result.v1",
+        "next_cursor": null
+      },
+      "failure": null,
+      "uncertainty": {
+        "status": "unavailable"
+      },
+      "calibration": {
+        "status": "unavailable",
+        "reason": "no-resolved-predictions"
       },
       "proposals": "inert",
       "actuation": "none"

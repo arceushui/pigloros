@@ -2,12 +2,14 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
+    decision_preview::route,
     operation::{
-        AppendSignalOperation, CreateOptionSpecOperation, CreatePredictionOperation,
-        CreatePreferenceOperation, CreateScenarioRoomOperation, CreateTimelineOperation,
-        DeriveScenarioRoomOperation, OperationAuthority, ReadErasureOperation,
-        ReadOptionSpecOperation, ReadPreferenceOperation, ReadScenarioRoomOperation,
-        ReadSessionOperation, RequestErasureOperation, RevokeConsentOperation,
+        AppendSignalOperation, CreateDecisionPreviewOperation, CreateOptionSpecOperation,
+        CreatePredictionOperation, CreatePreferenceOperation, CreateScenarioRoomOperation,
+        CreateTimelineOperation, DeriveScenarioRoomOperation, OperationAuthority,
+        ReadDecisionPreviewOperation, ReadErasureOperation, ReadOptionSpecOperation,
+        ReadPreferenceOperation, ReadScenarioRoomOperation, ReadSessionOperation,
+        RequestErasureOperation, RevokeConsentOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -183,6 +185,11 @@ fn loopback_routes() -> Router<AppState> {
             "/v1/option-specs/{option_spec_id}/revisions/{revision}",
             get(get_option_spec_revision),
         )
+        .route("/v1/decision-previews", post(post_decision_preview))
+        .route(
+            "/v1/decision-previews/{preview_id}",
+            get(get_decision_preview),
+        )
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -237,6 +244,8 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
         "GET",
         "/v1/option-specs/{option_spec_id}/revisions/{revision}",
     ),
+    ("POST", "/v1/decision-previews"),
+    ("GET", "/v1/decision-previews/{preview_id}"),
 ];
 
 /// Answer every protected route of an unprovisioned host `401` before its
@@ -884,6 +893,28 @@ async fn get_option_spec_revision(
     .await
 }
 
+/// `POST /v1/decision-previews` (#305): admit one Decision Preview under the
+/// permit of its `decision-preview.create` decision (ADR-140 section 6).
+async fn post_decision_preview(
+    State(state): State<AppState>,
+    authority: OperationAuthority<CreateDecisionPreviewOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Response {
+    route::create_decision_preview_route(&state.gateway, authority, key, &body).await
+}
+
+/// `GET /v1/decision-previews/{preview_id}` (#305): one of the acting entity's
+/// own Decision Previews under the permit of its `decision-preview.read`
+/// decision (ADR-140 section 7).
+async fn get_decision_preview(
+    State(state): State<AppState>,
+    ContractPath(preview_id): ContractPath<String>,
+    authority: OperationAuthority<ReadDecisionPreviewOperation>,
+) -> Response {
+    route::read_decision_preview_route(&state.gateway, authority, &preview_id).await
+}
+
 async fn post_ledger_prediction(
     State(state): State<AppState>,
     authority: OperationAuthority<CreatePredictionOperation>,
@@ -1341,6 +1372,7 @@ mod tests {
                                 .replace("{option_spec_id}", &timeline)
                                 .replace("{room_id}", &timeline)
                                 .replace("{erasure_id}", &timeline)
+                                .replace("{preview_id}", &timeline)
                                 .replace("{revision}", "1")
                         ))
                         .header("content-type", "application/json")
@@ -2278,6 +2310,7 @@ osf_link = \"https://osf.io/example\"\n";
         let id = EntityId::new();
         for path in [
             "/v1/me/erasures".to_owned(),
+            "/v1/decision-previews".to_owned(),
             "/v1/preferences".to_owned(),
             "/v1/option-specs".to_owned(),
             "/v1/scenario-rooms".to_owned(),

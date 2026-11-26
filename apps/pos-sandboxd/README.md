@@ -150,8 +150,12 @@ guest only (`deploy/nixos/qemu-evidence`). The binary stages the dev/test
 installation around one image, admits it, registers and prepares one attempt,
 and calls `activate_admitted_root`. While its standard input stays open, it
 holds the mounted root so the guest can record the live kernel state. It then
-detaches the root and removes the directory. The feature is never enabled in
-deployable builds.
+detaches the root and removes the directory. With `stage` as its first argument
+the binary instead stages the installation around the real `pos-sandboxd`
+provider binary, an SPI1 file and the runtime key file, and holds it until its
+standard input closes, so that the composed `provider-runtime` can run as the
+staged binary; it activates nothing. The feature is never enabled in deployable
+builds.
 
 `/work`, the sole writable mount, is requested as
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
@@ -396,6 +400,20 @@ descriptor and reads its links and main table; any other link, any route off
 `lo` (a blackhole, prohibit or unreachable route counts), or a failed read is
 KOE1 status 2. At the release recheck a transport failure is barrier failure 6
 and a changed namespace is 7.
+
+A Local attempt's KOE1 also carries `network-readback` (ADR-069 R14 section
+3.2): the attempt namespace's nsfs identity (read from the descriptor the
+proxy holds, and checked again through its pin), both namespace ids, the veth
+pair with its addresses and routes, the firewall generation and chains
+(`NFT_MSG_GETGEN` brackets the read, at most three reads), and the attempt's own
+slice of the host table `inet piglor_sandbox` (read under the host change
+lock). The read must verify exactly against what the attempt was installed
+with. A transport failure (a socket error other than a missing object, a
+receive timeout, a failed `setns`, three torn reads, the release deadline) and
+a change (a missing or re-pinned namespace, a mismatch, anything else) are both
+KOE1 status 2 at the first observation; at the release recheck the first is
+barrier failure 6 and the second is 7. A Local attempt is never released
+without its network (`BarrierError::LocalNetworkMissing`).
 
 Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
 an IPv6 endpoint is admitted only when it is an address of the host itself,
