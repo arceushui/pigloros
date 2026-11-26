@@ -319,12 +319,11 @@ fn geographic_and_consent_events_never_reach_the_reducer() {
         page_limit(100),
     );
     assert_eq!(page.map(|page| page.entries.len()), Ok(1));
-    assert_eq!(
-        *seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-        vec!["test.other".to_owned()]
-    );
+    let reached = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(reached, vec!["test.other".to_owned()]);
 }
 
 #[test]
