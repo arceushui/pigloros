@@ -553,7 +553,7 @@ const fn transition() -> Operation {
     }
 }
 
-const fn refused_operations() -> [Operation; 3] {
+const fn refused_operations() -> [Operation; 4] {
     [
         Operation::ForkCurrent {
             initial_source: Source::Fork {
@@ -572,6 +572,10 @@ const fn refused_operations() -> [Operation; 3] {
         Operation::QuarantineReset {
             timeline: target(),
             control_operation_id: CONTROL,
+        },
+        Operation::PassAbort {
+            timeline: target(),
+            reservation_operation_id: CONTROL,
         },
     ]
 }
