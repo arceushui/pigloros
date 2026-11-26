@@ -25,6 +25,7 @@ use super::{
 use crate::evaluator_protocol::{
     encode, EvaluationRequest, ProtocolError, RequiredProviderCapability, SandboxRequirement,
 };
+use crate::provider_admission::test_support::StagedLimits;
 use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole, SandboxArchitecture};
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -431,14 +432,14 @@ fn image_manifest(
     )
 }
 
-fn launch_policy(image_manifest: [u8; 32]) -> TestResult<Vec<u8>> {
+fn launch_policy(image_manifest: [u8; 32], limits: &[u64; LIMIT_COUNT]) -> TestResult<Vec<u8>> {
     let unsigned = Value::Array(vec![
         Value::Text("LPS1".to_owned()),
         integer(1),
         Value::Text("air-gapped".to_owned()),
         integer(1),
         digest(image_manifest),
-        Value::Array(selector_limit_values()),
+        Value::Array(limit_values(limits)),
         Value::Array(Vec::new()),
     ]);
     let encoded = encode(&unsigned)?;
@@ -451,20 +452,29 @@ fn launch_policy(image_manifest: [u8; 32]) -> TestResult<Vec<u8>> {
     ]))?)
 }
 
-fn selector_limit_values() -> Vec<Value> {
-    (0..17)
-        .map(|limit_id| {
-            let value = if limit_id == 13 { 256 } else { 2_000 };
-            Value::Array(vec![integer(limit_id), integer(value)])
-        })
+/// The ELM1 limit count.
+pub(crate) const LIMIT_COUNT: usize = 17;
+
+/// The value of every operating limit of the default fixture, but for limit
+/// 13 (the concurrent attempts), which is 256.
+pub(crate) const DEFAULT_LIMITS: [u64; LIMIT_COUNT] = {
+    let mut limits = [2_000; LIMIT_COUNT];
+    limits[13] = 256;
+    limits
+};
+
+fn limit_values(limits: &[u64; LIMIT_COUNT]) -> Vec<Value> {
+    (0..)
+        .zip(limits)
+        .map(|(limit_id, value)| Value::Array(vec![integer(limit_id), integer(*value)]))
         .collect()
 }
 
-fn broker_hard_caps() -> Result<Vec<u8>, ProtocolError> {
+fn broker_hard_caps(limits: &[u64; LIMIT_COUNT]) -> Result<Vec<u8>, ProtocolError> {
     encode(&Value::Array(vec![
         Value::Text("BHC1".to_owned()),
         integer(1),
-        Value::Array(selector_limit_values()),
+        Value::Array(limit_values(limits)),
     ]))
 }
 
@@ -596,6 +606,30 @@ pub(crate) fn admitted_state_with_provider_binary(
     arguments: &[String],
     provider_binary: &[u8],
 ) -> TestResult<InstalledSelectorState> {
+    admitted_state_with_limits(
+        root_image,
+        executable,
+        partitions,
+        signing,
+        salt,
+        arguments,
+        provider_binary,
+        &StagedLimits::DEFAULT,
+    )
+}
+
+/// [`admitted_state_with_provider_binary`] with the broker hard caps and the
+/// launch policy of `limits` in place of the default fixture's.
+pub(crate) fn admitted_state_with_limits(
+    root_image: &[u8],
+    executable: &[u8],
+    partitions: &[PartitionDescriptor; 3],
+    signing: &ImageSigning,
+    salt: [u8; 32],
+    arguments: &[String],
+    provider_binary: &[u8],
+    limits: &StagedLimits,
+) -> TestResult<InstalledSelectorState> {
     let authority = provider_authority();
     let architecture = signing.architecture;
     let trust = provider_trust(&authority, signing)?;
@@ -607,7 +641,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         .to_vec();
     let features_digest = feature_digest(&features)?;
     let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
-    let hard_caps = broker_hard_caps()?;
+    let hard_caps = broker_hard_caps(&limits.broker)?;
     let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
     let manifest = provider_manifest(
         &authority,
@@ -632,7 +666,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         &authority, root_image, executable, partitions, signing, salt, arguments,
     )?;
     let image_digest = signed_record_digest(&image)?;
-    let launch = launch_policy(image_digest)?;
+    let launch = launch_policy(image_digest, &limits.launch)?;
     let launch_digest = signed_record_digest(&launch)?;
     let policy = provider_policy(
         &authority,
