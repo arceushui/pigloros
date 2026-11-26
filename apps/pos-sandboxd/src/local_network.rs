@@ -34,6 +34,7 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zbus::OwnedFd;
 
+use crate::network_removal::{OwnedConnector, RemovalReport};
 use crate::AdmittedAttempt;
 
 /// The provider end of one attempt's FD 3 socket pair.
@@ -74,6 +75,16 @@ pub struct EstablishedNetwork<C> {
     connector: C,
 }
 
+impl<C: RemoveNetwork> EstablishedNetwork<C> {
+    /// The network with its removal result reported to `report`.
+    pub(crate) fn owned_by(self, report: &RemovalReport) -> EstablishedNetwork<OwnedConnector<C>> {
+        EstablishedNetwork {
+            attempt_id: self.attempt_id,
+            connector: OwnedConnector::new(self.connector, report),
+        }
+    }
+}
+
 impl<C> EstablishedNetwork<C> {
     /// Claim the namespace of `attempt_id`, whose state the caller has read
     /// back, with the connector that operates inside it.
@@ -89,8 +100,11 @@ impl<C> EstablishedNetwork<C> {
 /// What kind of failure ended a Local network setup (ADR-069 R14 §3.4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupClass {
-    /// A creation, transport or resource refusal that left no owned state:
-    /// TME1 `launch-failure` 6, with no quarantine.
+    /// A creation, transport or resource refusal: TME1 `launch-failure` 6.
+    /// It leaves no owned state, and so no quarantine, unless the setup had
+    /// begun installing and its removal failed: then
+    /// [`SetupError::removal`] says so, and `cleanup.result` 1 and a
+    /// quarantine follow (R14 N7).
     Creation,
     /// The provider contradicted its own state or lifecycle: the O6 fallback,
     /// code 2 with quarantine (R14 N9, N11 and N15).
@@ -102,16 +116,55 @@ pub enum SetupClass {
 pub trait SetupError: Error {
     /// The class of this failure.
     fn setup_class(&self) -> SetupClass;
+
+    /// Why the network the failed setup had begun could not be removed, if
+    /// it could not (R14 N7): the attempt's `cleanup.result` is then 1.
+    /// Every port says so, so none can forget a removal that failed.
+    fn removal(&self) -> Option<NetworkRemovalFailure>;
 }
 
-impl SetupError for std::convert::Infallible {
+/// A Local network that could not be removed (ADR-069 R14 N7, base §8).
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("the Local network could not be removed: {reason}")]
+pub struct NetworkRemovalFailure {
+    reason: String,
+}
+
+impl NetworkRemovalFailure {
+    /// A removal that failed for `reason`.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// A connector that removes the network it owns, and says whether it did.
+pub trait RemoveNetwork {
+    /// Remove the namespace, nftables state and veth pair behind this
+    /// connector. A repeat after the first attempt returns `Ok`: removal is
+    /// tried once, and a failure is reported once.
+    ///
+    /// # Errors
+    /// Fails if the network could not be removed.
+    fn remove(&mut self) -> Result<(), NetworkRemovalFailure>;
+}
+
+/// The error of [`FailClosedLocalNetwork`], which never fails; it names a
+/// class and no removal, so the port needs no blanket answer for a foreign
+/// error type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("the fail-closed Local network cannot fail")]
+pub struct FailClosedSetup;
+
+impl SetupError for FailClosedSetup {
     fn setup_class(&self) -> SetupClass {
-        // No value of this type exists, so the dereference is never run.
-        #[expect(
-            clippy::uninhabited_references,
-            reason = "an empty match on `Infallible`"
-        )]
-        match *self {}
+        SetupClass::Creation
+    }
+
+    fn removal(&self) -> Option<NetworkRemovalFailure> {
+        None
     }
 }
 
@@ -121,17 +174,19 @@ impl SetupError for std::convert::Infallible {
 /// nftables rules for the attempt and reads them back before it returns. The
 /// connector it hands out must honour the timeout it is given.
 ///
-/// Teardown is RAII: the returned [`EstablishedNetwork`], and the connector
-/// inside it, own the namespace, and dropping them removes it. The execute
-/// path establishes the network before the recheck and before the unit
-/// starts, so it drops the handle on every path that does not serve it: a
-/// refused admission, a failed barrier preparation, a failed recheck, a failed
-/// start, a refused release and a finished attempt. An implementation must
-/// therefore make its `Drop` (or its connector's) tear the namespace down, and
-/// must not rely on the caller to do it.
+/// Removal is the connector's [`RemoveNetwork::remove`], and its result is
+/// never lost (ADR-069 R14 N7). The execute path establishes the network
+/// before the recheck and before the unit starts, and wraps its connector so
+/// that every path that does not serve it, and the end of one that does,
+/// removes it and reports a failed removal with the execution: a refused
+/// admission, a failed barrier preparation, a failed recheck, a failed start,
+/// a refused release and a finished attempt. An implementation must also
+/// tear the namespace down when its connector is dropped without a removal
+/// (a cancelled execution), and must not rely on the caller to do it; that
+/// removal is only recorded by the port's own quarantine.
 pub trait LocalNetworkPort {
     /// The connector that operates inside the established namespace.
-    type Connector: NetworkEndpointConnector + Send + 'static;
+    type Connector: NetworkEndpointConnector + RemoveNetwork + Send + 'static;
     /// Why a namespace could not be established or read back.
     type Error: SetupError + Send + Sync + 'static;
 
@@ -139,8 +194,9 @@ pub trait LocalNetworkPort {
     /// exactly `endpoints`, the attempt's admitted LPS1 endpoints.
     ///
     /// # Errors
-    /// Fails, leaving nothing behind, if the namespace, veth pair or firewall
-    /// cannot be created or read back.
+    /// Fails if the namespace, veth pair or firewall cannot be created or
+    /// read back, leaving nothing behind unless it could not remove what it
+    /// had installed, which [`SetupError::removal`] then reports.
     fn establish(
         &self,
         attempt_id: [u8; 16],
@@ -157,13 +213,13 @@ pub struct FailClosedLocalNetwork;
 
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
-    type Error = std::convert::Infallible;
+    type Error = FailClosedSetup;
 
     fn establish(
         &self,
         attempt_id: [u8; 16],
         _endpoints: &[SocketAddr],
-    ) -> Result<EstablishedNetwork<RefusingConnector>, std::convert::Infallible> {
+    ) -> Result<EstablishedNetwork<RefusingConnector>, FailClosedSetup> {
         Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }
 }
@@ -171,6 +227,12 @@ impl LocalNetworkPort for FailClosedLocalNetwork {
 /// A connector that fails every connection.
 #[derive(Clone, Copy, Debug)]
 pub struct RefusingConnector;
+
+impl RemoveNetwork for RefusingConnector {
+    fn remove(&mut self) -> Result<(), NetworkRemovalFailure> {
+        Ok(())
+    }
+}
 
 impl NetworkEndpointConnector for RefusingConnector {
     fn connect(&mut self, _endpoint: SocketAddr, _timeout: Duration) -> io::Result<TcpStream> {

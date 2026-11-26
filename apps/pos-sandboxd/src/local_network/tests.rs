@@ -428,3 +428,18 @@ async fn a_failed_proxy_task_is_reported() -> TestResult {
     assert!(adapter.join().map_err(|_| "adapter thread")?.is_err());
     Ok(())
 }
+
+#[test]
+fn a_refusing_connector_removes_nothing() {
+    assert_eq!(RefusingConnector.remove(), Ok(()));
+}
+
+#[test]
+fn the_fail_closed_setup_error_is_a_creation_failure_that_removed_nothing() {
+    assert_eq!(FailClosedSetup.setup_class(), SetupClass::Creation);
+    assert_eq!(FailClosedSetup.removal(), None);
+    assert_eq!(
+        FailClosedSetup.to_string(),
+        "the fail-closed Local network cannot fail"
+    );
+}
