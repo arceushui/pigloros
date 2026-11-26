@@ -230,6 +230,7 @@ execution or establish resource absence; intent remains available for recovery.
 `ExecStart=` is requested as `a(sasb)`: the bind-mounted launcher at
 `/.pigloros/release-launcher`, `launch-barrier` and one lowercase-hexadecimal
 LPV1 argument, and read back as path, argument vector and ignore-failure flag.
+The provider root image must carry `/.pigloros/release-launcher` as an empty file: systemd cannot create a bind-mount point in a read-only erofs root, and the unit then fails mount namespacing.
 `ProviderReleaseBarrier` is the production `LaunchBarrier`. Its `prepare`
 operation checks the complete admitted attempt before handing over a descriptor,
 and release checks the active attempt against that same record again.
