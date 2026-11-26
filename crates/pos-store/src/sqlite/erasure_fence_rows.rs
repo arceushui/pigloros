@@ -111,8 +111,11 @@ pub enum ErasureFenceRefusalV1 {
 /// reads only; it neither begins nor finishes the transaction. Only the exact
 /// Timeline is read: no Fork ancestor or descendant is consulted.
 ///
-/// The connection must hold a write transaction on `main`
-/// (`sqlite3_txn_state` reports `SQLITE_TXN_WRITE`). `BEGIN IMMEDIATE`, and a
+/// The connection must hold an explicit write transaction on `main`: it is
+/// not in autocommit mode and `sqlite3_txn_state` reports `SQLITE_TXN_WRITE`.
+/// Both are required because a partially stepped write statement (for example
+/// `INSERT ... RETURNING`) in autocommit mode also reports a write state, yet
+/// no enclosing transaction would cover the caller's later effect. `BEGIN IMMEDIATE`, and a
 /// savepoint inside it, hold one from the start. A deferred `BEGIN` is
 /// refused until it has written: before that it may read a stale WAL
 /// snapshot, and once it holds the write lock its snapshot is current,
@@ -136,10 +139,12 @@ pub fn require_no_erasure_fence_rows(
     conn: &Connection,
     timeline: TimelineId,
 ) -> Result<(), ErasureFenceRefusalV1> {
-    if !matches!(
-        conn.transaction_state(Some(MAIN_DB)),
-        Ok(TransactionState::Write)
-    ) {
+    if conn.is_autocommit()
+        || !matches!(
+            conn.transaction_state(Some(MAIN_DB)),
+            Ok(TransactionState::Write)
+        )
+    {
         return Err(ErasureFenceRefusalV1::NotWriteTransaction);
     }
     conn.query_row(

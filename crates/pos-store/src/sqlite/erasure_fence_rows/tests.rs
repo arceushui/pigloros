@@ -264,6 +264,26 @@ fn the_check_refuses_outside_a_transaction() -> TestResult {
 }
 
 #[test]
+fn the_check_refuses_an_active_autocommit_write_statement() -> TestResult {
+    let store = SqliteStore::open_in_memory()?;
+    let timeline = TimelineId::new();
+    let mut statement = store.conn.prepare(
+        "INSERT INTO erasure_fence_rows (timeline_id, erasure_request_id, lifecycle_code)
+         VALUES (?1, ?2, 2) RETURNING lifecycle_code",
+    )?;
+    let mut rows = statement.query(params![timeline.to_string(), request("active")])?;
+    assert!(rows.next()?.is_some(), "the statement stays active");
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        require_no_erasure_fence_rows(&store.conn, timeline),
+        Err(ErasureFenceRefusalV1::NotWriteTransaction),
+        "an in-flight autocommit write is no enclosing transaction"
+    );
+    drop(rows);
+    Ok(())
+}
+
+#[test]
 fn the_check_refuses_a_deferred_transaction_before_it_writes() -> TestResult {
     let store = SqliteStore::open_in_memory()?;
     let timeline = TimelineId::new();

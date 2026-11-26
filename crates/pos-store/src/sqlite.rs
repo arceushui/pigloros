@@ -2343,6 +2343,8 @@ impl SqliteStore {
                         .and_then(|()| self.validate_pipeline_admission_schema())
                         .and_then(|()| self.validate_present_counterfactual_schema())
                 } else {
+                    // Deliberately first: the table is idempotent and harmless
+                    // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
                     self.prepare_authority_schema()
