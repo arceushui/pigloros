@@ -10,9 +10,10 @@ use pos_core::community_lifecycle::{
 };
 
 use super::{
-    publication, target, Case, Fallible, Roster, TestResult, FAILURE, HORIZON, METADATA, OPERATION,
-    SEAL,
+    publication, snapshot, target, Case, Fallible, Roster, TestResult, FAILURE, HORIZON, METADATA,
+    OPERATION, SEAL,
 };
+use crate::community::private_hash::private_digest;
 use crate::community::{
     CommunityAdministrativeOperationV1, CommunityAdministrativeRequestV1, CommunityPassAbortCallV1,
     CommunityPassAbortReceiptV1, CommunityPassStatusV1,
@@ -64,6 +65,17 @@ fn seals(case: &mut Case<'_>, id: [u8; 16]) -> Fallible<bool> {
         .is_ok())
 }
 
+/// What a refused Abort must leave alone besides the Reserve's snapshot: the
+/// committed Aborts and the credits each pass key has burned.
+fn abort_snapshot(case: &Case<'_>) -> Fallible<(usize, [u32; 2])> {
+    let domain = &case.domain.world.domain;
+    let credits = |id: [u8; 16]| Ok::<_, &str>(domain.keys.get(&id).ok_or("key")?.burned_credits());
+    Ok((
+        domain.pass_aborts.len(),
+        [credits(METADATA)?, credits(FAILURE)?],
+    ))
+}
+
 /// A published Reserve is aborted only once its `run_pass` call has ended
 /// (15 while it is live); the Abort then commits against the keys and
 /// records the Reserve left, and a retry returns the original receipt.
@@ -84,7 +96,12 @@ fn a_published_reserve_is_aborted_once_its_call_ended() -> TestResult {
     // The call that reserved the pass is live: the Abort is refused and
     // changes nothing.
     assert!(case.domain.world.domain.pass_is_live(target(), OPERATION));
+    let before = (snapshot(&case.domain.world.domain), abort_snapshot(&case)?);
     assert_eq!(abort(&mut case)?.err(), Some(Error::OperationActive));
+    assert_eq!(
+        (snapshot(&case.domain.world.domain), abort_snapshot(&case)?),
+        before
+    );
     assert_eq!(
         case.domain.world.domain.pass_status(target(), OPERATION),
         Some(CommunityPassStatusV1::Reserved)
@@ -116,6 +133,10 @@ fn a_published_reserve_is_aborted_once_its_call_ended() -> TestResult {
         reservation.as_input().evidence_not_after_micros
     );
     assert_eq!(fields.sealed_result_digest, None);
+    assert!(matches!(
+        fields.reason,
+        CommunityAbortReasonV1::AuthenticatedCancellation
+    ));
 
     // The pass is Aborted, its pending entry gone, its floor kept.
     let domain = &case.domain.world.domain;
@@ -132,8 +153,9 @@ fn a_published_reserve_is_aborted_once_its_call_ended() -> TestResult {
             .get(&target())
             .ok_or("state")?
             .highest_pass_ordinal,
-        pass_key.ordinal()
+        1
     );
+    assert_eq!(pass_key.ordinal(), 1);
 
     // The Abort closes the pass metadata key, and only uses the failure
     // cohort key, which the Reserve left open.
@@ -151,5 +173,10 @@ fn a_published_reserve_is_aborted_once_its_call_ended() -> TestResult {
     // A retry returns the original receipt.
     let retry = abort(&mut case)??;
     assert_eq!(retry.abort_digest(), receipt.abort_digest());
+    assert_eq!(retry.abort(), receipt.abort());
+    assert_eq!(
+        private_digest(b"PiglorOS.Community.CAB1.v1", &[receipt.abort()]),
+        receipt.abort_digest()
+    );
     Ok(())
 }
