@@ -107,7 +107,7 @@ fn genesis() -> Result<Hash, Box<dyn std::error::Error>> {
 }
 
 /// The cut of an observation of no Events: T and its Fork child at 0.
-fn cut() -> Result<CommunityObservationCutV1, Box<dyn std::error::Error>> {
+fn observed_cut() -> Result<CommunityObservationCutV1, Box<dyn std::error::Error>> {
     let store = store()?;
     Ok(CommunityObservationCutV1 {
         through_seq: 0,
@@ -115,6 +115,15 @@ fn cut() -> Result<CommunityObservationCutV1, Box<dyn std::error::Error>> {
             (id(1), 0, store.chain_hash_at(id(1), Seq::ZERO)?),
             (id(2), 0, store.chain_hash_at(id(2), Seq::ZERO)?),
         ],
+    })
+}
+
+/// [`observed_cut`], or no heads when the store cannot be built, which every
+/// test then refuses loudly.
+fn cut() -> CommunityObservationCutV1 {
+    observed_cut().unwrap_or(CommunityObservationCutV1 {
+        through_seq: 0,
+        chain_heads: Vec::new(),
     })
 }
 
@@ -131,7 +140,7 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
         CommunityRetainedObservationV1 {
             generation: GENERATION,
             not_after_micros: GENERATION_HORIZON,
-            cut: cut()?,
+            cut: cut(),
         },
     );
     domain.pass_states.insert(id(1), state);
@@ -255,7 +264,7 @@ fn minted(cut: CommunityObservationCutV1) -> CommunityMintedObservationV1 {
 
 /// A Reserve of 24 pass rows with `F_p` of 4 targets, minting.
 fn input() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
-    cut().map(|cut| CommunityReserveInputV1 {
+    observed_cut().map(|cut| CommunityReserveInputV1 {
         timeline: id(1),
         generation: GENERATION,
         reservation_operation_id: OPERATION,
