@@ -64,9 +64,9 @@ use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservation
 use crate::{
     observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,
     CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
-    KernelObservationError, LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit,
-    ReleaseBarrierError, ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
-    TransientServiceUnitName, UnitNetworkError,
+    KernelObservationError, LaunchBarrier, LauncherInvocation, NetworkReadback, ObservationContext,
+    ObservedUnit, ReadbackError, ReleaseBarrierError, ReleaseBinding, ReleaseOutcome,
+    ReleaseRecheck, RuntimeAttestationSigner, TransientServiceUnitName, UnitNetworkError,
 };
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -251,11 +251,13 @@ fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefus
 }
 
 /// An observation the recheck could not make (6), or one that found the
-/// unit's network namespace now holding more than `lo` (7, R14 N12).
+/// unit's network namespace now holding more than `lo` (7, R14 N12) or a Local
+/// network that reads back as other state (7, R14 §3.2).
 const fn unavailable_or_changed(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
     if matches!(
         unavailable.0,
         KernelObservationError::UnitNetwork(UnitNetworkError::Changed)
+            | KernelObservationError::Network(ReadbackError::Changed)
     ) {
         RecheckRefusal::ObservationChanged
     } else {
@@ -304,6 +306,9 @@ struct Observing<'a> {
     adapter: FdIdentity,
     observed_fdl1_digest: [u8; 32],
     work: bool,
+    /// The Local network the observation reads back, if the attempt is
+    /// Local.
+    network: Option<&'a (dyn NetworkReadback + Sync)>,
 }
 
 impl<R, O, I> Bounded<'_, R, O, I>
@@ -438,6 +443,9 @@ where
             self.observing.observed_fdl1_digest,
             self.observing.work,
         );
+        let context = self.observing.network.map_or(context, |network| {
+            context.with_network(network, self.deadline)
+        });
         self.check.observed.observe(&unit, &context)
     }
 }
@@ -502,6 +510,11 @@ pub enum BarrierError {
     /// use and never retried.
     #[error("a release was already attempted")]
     AlreadyAttempted,
+    /// A Local attempt was handed no network to read back, so its KOE1
+    /// could not carry `network-readback` (ADR-069 R14 §3.1): nothing was
+    /// released.
+    #[error("a Local attempt was released without its network")]
+    LocalNetworkMissing,
     /// `ReleaseV1` was sent, and the attempt deadline passed before the
     /// barrier returned.
     #[error("the attempt deadline passed after the release")]
@@ -543,6 +556,7 @@ impl BarrierError {
             | Self::UnitEndTaken
             | Self::RuntimeFlavor
             | Self::AlreadyAttempted
+            | Self::LocalNetworkMissing
             | Self::ExpiredAfterRelease => None,
         }
     }
@@ -898,12 +912,12 @@ where
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
+        network: Option<&(dyn NetworkReadback + Sync)>,
     ) -> Result<(), BarrierError> {
         require_multi_thread()?;
-        self.require_attempt(attempt.admitted())?;
-        if self.attempted {
-            return Err(BarrierError::AlreadyAttempted);
-        }
+        self.require_attempt(attempt.admitted())
+            .and_then(|()| self.require_unused())
+            .and_then(|()| self.require_network(network))?;
         let main_pid = read_by(
             attempt.deadline(),
             self.identity.main_pid(attempt.unit_name()),
@@ -944,6 +958,7 @@ where
                     .admitted
                     .service_limits()
                     .is_ok_and(|limits| limits.work_bytes() != 0),
+                network,
             },
             ready: Cell::new(None),
             requested_configuration_evidence: attempt.requested_configuration_evidence(),
@@ -994,6 +1009,29 @@ where
         }
     }
 
+    /// `ReadyV1` and `ReleaseV1` are single use: a barrier that attempted a
+    /// release refuses every later one as such, whatever it is handed.
+    const fn require_unused(&self) -> Result<(), BarrierError> {
+        if self.attempted {
+            Err(BarrierError::AlreadyAttempted)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Local status 0 requires `network-readback` (R14 §3.1): a Local
+    /// attempt is never released without the network that fills it.
+    fn require_network(
+        &self,
+        network: Option<&(dyn NetworkReadback + Sync)>,
+    ) -> Result<(), BarrierError> {
+        if self.admitted.mode() == SandboxExecutionMode::Local && network.is_none() {
+            Err(BarrierError::LocalNetworkMissing)
+        } else {
+            Ok(())
+        }
+    }
+
     fn require_attempt(&self, attempt: &AdmittedAttempt) -> Result<(), BarrierError> {
         if &self.admitted == attempt {
             Ok(())
@@ -1034,8 +1072,9 @@ where
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
+        network: Option<&(dyn NetworkReadback + Sync)>,
     ) -> Result<(), BarrierError> {
-        let released = self.release_inner(attempt, cgroup).await;
+        let released = self.release_inner(attempt, cgroup, network).await;
         // TME1 `barrier-failure` (ADR-069 R9 §4.6.1), kept typed for the
         // terminal records (Redmine #443 journal 22723).
         self.failure = released

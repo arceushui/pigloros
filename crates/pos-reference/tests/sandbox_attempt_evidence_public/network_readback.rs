@@ -803,3 +803,28 @@ fn r14_the_encoder_applies_the_decoder_rules() -> TestResult {
     assert_eq!(encoded.fields(), &local_fields(regular)?);
     Ok(())
 }
+
+#[test]
+fn r14_canonicalized_sorts_every_list_into_the_decoders_order() -> TestResult {
+    let [web, _] = vector_d_endpoints();
+    let second = SocketAddr::new(web.ip(), 8443);
+    let mut expected = vector_d_readback();
+    expected.egress_allowed = vec![web, second];
+    expected.egress_masqueraded = vec![web, second];
+    let mut shuffled = expected.clone();
+    shuffled.inner_addresses.reverse();
+    shuffled.host_addresses.reverse();
+    shuffled.routes.reverse();
+    shuffled.chains.reverse();
+    shuffled.egress_allowed.reverse();
+    shuffled.egress_masqueraded.reverse();
+    assert_ne!(shuffled, expected);
+    // The sorted record equals the vector order, which is not lexicographic:
+    // text is length-first, so `input` and `output` sort before `forward`.
+    let sorted = shuffled.canonicalized();
+    assert_eq!(sorted, expected);
+    let record = KernelObservationEvidence::new(&local_fields(sorted)?)?;
+    let decoded = KernelObservationEvidence::from_canonical_cbor(record.canonical_bytes())?;
+    assert_eq!(decoded, record);
+    Ok(())
+}
