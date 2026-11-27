@@ -860,8 +860,7 @@ fn a_used_control_identity_conflicts() -> TestResult {
                 expected_head: hash(3),
             }),
             generation: GENERATION,
-            metadata_key: PASS_KEY_ID,
-            records: Vec::new(),
+            sealed: None,
             admission: None,
             receipt: CommunityQuarantineReceiptV1 {
                 timeline: target(),

@@ -240,7 +240,33 @@ fn a_reset_applies_from_the_index_alone() -> TestResult {
     assert!(domain
         .quarantine_controls
         .contains_key(&(target(), CONTROL)));
-    assert_eq!(domain.inventory_generation, inventory);
+    assert_eq!(domain.inventory_generation, inventory + 1);
+    assert!(domain
+        .quarantine_controls
+        .get(&(target(), CONTROL))
+        .is_some_and(|retained| retained.sealed.is_none()));
+    Ok(())
+}
+
+/// A reset of a ledger the earlier reset emptied is a new reset: it needs
+/// the same premises, and it appends one more empty revision.
+#[test]
+fn a_reset_of_an_empty_ledger_appends_another_revision() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let first = reset(&mut case, &Claim::of_seeded())??;
+    let again = Claim::of_seeded().with(|c| {
+        c.control = [0x51; 16];
+        c.ledger = first.selected_ledger_digest();
+        c.reasons = Vec::new();
+    });
+    let second = reset(&mut case, &again)??;
+    assert_ne!(
+        second.selected_ledger_digest(),
+        first.selected_ledger_digest()
+    );
+    assert_eq!(ledger(&case)?.ordinal, 5);
+    assert!(ledger(&case)?.reasons.is_empty());
+    assert_eq!(active_pairs(&case), 2);
     Ok(())
 }
 

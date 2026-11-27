@@ -54,7 +54,7 @@ use super::super::vault::{fresh_identity, VaultKeyV1};
 use super::{
     control_request, failure_record, ledger_states, CommittedQuarantineControlV1,
     CommunityQuarantineReceiptV1, ControlBoundV1, OperationV1, QuarantineLedgerV1,
-    QuarantineReasonStateV1, SetReasonBoundV1, StagedSetReasonV1,
+    QuarantineReasonStateV1, SealedControlV1, SetReasonBoundV1, StagedSetReasonV1,
 };
 
 /// Preferred CBOR encoding of the empty scope-member array.
@@ -500,8 +500,10 @@ impl MemoryCommunityDomainV1 {
                     expected_head: call.expected_state_head_digest,
                 }),
                 generation: operation.member.generation,
-                metadata_key,
-                records,
+                sealed: Some(SealedControlV1 {
+                    metadata_key,
+                    records,
+                }),
                 admission,
                 receipt,
             },

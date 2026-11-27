@@ -297,15 +297,21 @@ pub(super) fn ledger_states(
     states
 }
 
-/// One committed `SetReason`, retained for its retry (A5.3(5)).
-pub(super) struct CommittedQuarantineControlV1 {
-    pub(super) bound: ControlBoundV1,
-    /// The generation whose catalogue owner owns the CFO1's ARD1.
-    pub(super) generation: [u8; 16],
+/// The sealed metadata records of one `SetReason`.
+pub(super) struct SealedControlV1 {
     /// The protection ID of the metadata key that sealed `records`.
     pub(super) metadata_key: [u8; 16],
     /// Every sealed metadata record; the last is the CQO1.
     pub(super) records: Vec<SealedMetadataV1>,
+}
+
+/// One committed control, retained for its retry (A5.3(5)).
+pub(super) struct CommittedQuarantineControlV1 {
+    pub(super) bound: ControlBoundV1,
+    /// The generation whose catalogue owner owns the CFO1's ARD1.
+    pub(super) generation: [u8; 16],
+    /// The sealed records of a `SetReason`; a reset retains none.
+    pub(super) sealed: Option<SealedControlV1>,
     /// The CFO1's COA1, absent when the reason was already active.
     pub(super) admission: Option<CommunityArtifactAdmissionV1>,
     pub(super) receipt: CommunityQuarantineReceiptV1,
@@ -578,9 +584,14 @@ impl MemoryCommunityDomainV1 {
                 )
             })
         });
-        self.keys
-            .get(&original.metadata_key)
-            .zip(original.records.last())
+        original
+            .sealed
+            .as_ref()
+            .and_then(|retained| {
+                self.keys
+                    .get(&retained.metadata_key)
+                    .zip(retained.records.last())
+            })
             .and_then(|(key, sealed)| key.open(sealed).ok())
             .filter(|outcome| published && outcome.as_slice() == receipt.outcome())
             .map(|_| receipt.clone())
