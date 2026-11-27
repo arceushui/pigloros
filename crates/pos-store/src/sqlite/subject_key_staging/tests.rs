@@ -443,6 +443,9 @@ fn a_registration_at_or_below_the_high_water_mark_is_refused() -> TestResult {
         store.commit_subject_key_staging_record(&subject, epoch, &STORE)?;
         assert_refused(&store.register_subject_key(&subject, timeline, epoch, &STORE, digest(9)));
     }
+    // The very same material at the ceiling would be an idempotent
+    // re-registration; the strict comparison still refuses it.
+    assert_refused(&store.register_subject_key(&subject, timeline, 3, &STORE, digest(1)));
     assert_eq!(rows(&store.conn)?.len(), 3, "the records stay for P5");
     assert_eq!(
         store.subject_key_lifecycle(&subject, 1)?,
@@ -723,16 +726,28 @@ fn none_pending() -> PendingKeyDestructionsV1 {
     }
 }
 
+/// The verification key a registration of `identity` carries.
+fn public_of(identity: KeyIdentityV1, seed: u8) -> Option<PublicKey> {
+    identity
+        .role
+        .is_signing()
+        .then_some(PublicKey::from_bytes([seed; 32]))
+}
+
+/// Register `identity` in the stored registry.
+fn register_identity(store: &mut SqliteStore, identity: KeyIdentityV1, seed: u8) -> TestResult {
+    let mut registry = load_registry(store)?;
+    registry.register_key(KeyRegistrationV1::new(
+        identity,
+        digest(seed),
+        public_of(identity, seed),
+    ))?;
+    Ok(store.save_key_registry(&registry)?)
+}
+
 /// Register `identity` and make its destruction pending.
 fn pend(store: &mut SqliteStore, identity: KeyIdentityV1, seed: u8) -> TestResult {
-    let mut registry = load_registry(store)?;
-    let public = if identity.role.is_signing() {
-        Some(PublicKey::from_bytes([seed; 32]))
-    } else {
-        None
-    };
-    registry.register_key(KeyRegistrationV1::new(identity, digest(seed), public))?;
-    store.save_key_registry(&registry)?;
+    register_identity(store, identity, seed)?;
     store.begin_key_registry_destruction(KeyDestructionRequestV1::new(
         identity,
         digest(seed),
