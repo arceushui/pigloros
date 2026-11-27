@@ -115,43 +115,58 @@ fn reaches(from: ErasureLifecycleV1, to: ErasureLifecycleV1) -> bool {
 
 /// The Timelines of a frozen request: its scope and its ERSE1 children.
 ///
-/// A verified frozen request always carries its scope, so the scope Timelines
-/// are read as a sequence rather than as a fallible lookup.
-fn frozen_timelines(state: &ErasureVerifiedStateV1) -> Vec<TimelineId> {
+/// A verified inventory never yields a frozen request without its scope, but
+/// a missing scope must refuse rather than fence nothing.
+fn frozen_timelines(
+    state: &ErasureVerifiedStateV1,
+) -> Result<Vec<TimelineId>, ErasureFenceReconcileErrorV1> {
     state
         .scope()
-        .into_iter()
-        .flat_map(|scope| scope.scope_timeline_ids().iter().copied())
-        .chain(
-            state
-                .scope_extensions()
+        .ok_or(ErasureFenceReconcileErrorV1::Contradictory)
+        .map(|scope| {
+            scope
+                .scope_timeline_ids()
                 .iter()
-                .map(pos_core::ErasureScopeExtensionV1::child_timeline),
-        )
-        .collect()
+                .copied()
+                .chain(
+                    state
+                        .scope_extensions()
+                        .iter()
+                        .map(pos_core::ErasureScopeExtensionV1::child_timeline),
+                )
+                .collect()
+        })
 }
 
-fn add_state(mut plan: Expectation, state: &ErasureVerifiedStateV1) -> Expectation {
+fn add_state(
+    mut plan: Expectation,
+    state: &ErasureVerifiedStateV1,
+) -> Result<Expectation, ErasureFenceReconcileErrorV1> {
     let request = state.request().reference().digest().to_vec();
     match state.lifecycle() {
-        ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => {}
+        ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => Ok(plan),
         ErasureLifecycleV1::Rejected => {
             plan.cleared.insert(request);
+            Ok(plan)
         }
-        mirrored => {
+        mirrored => frozen_timelines(state).map(|timelines| {
             let code = code_of(mirrored);
             plan.expected.extend(
-                frozen_timelines(state)
+                timelines
                     .into_iter()
                     .map(|timeline| ((timeline.to_string(), request.clone()), code)),
             );
-        }
+            plan
+        }),
     }
-    plan
 }
 
-fn expectation(inventory: &ErasureVerifiedInventoryV1) -> Expectation {
-    inventory.states().fold(Expectation::default(), add_state)
+fn expectation(
+    inventory: &ErasureVerifiedInventoryV1,
+) -> Result<Expectation, ErasureFenceReconcileErrorV1> {
+    inventory
+        .states()
+        .try_fold(Expectation::default(), add_state)
 }
 
 fn read_heads(conn: &Connection) -> rusqlite::Result<BTreeMap<Vec<u8>, Vec<u8>>> {
@@ -248,7 +263,7 @@ fn reconcile(
     inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<(), ErasureFenceReconcileErrorV1> {
     require_current_heads(conn, inventory)
-        .map(|()| expectation(inventory))
+        .and_then(|()| expectation(inventory))
         .and_then(|plan| {
             read_rows(conn).map_err(unreadable).and_then(|stored| {
                 require_explained(&stored, &plan)

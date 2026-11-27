@@ -582,3 +582,46 @@ fn a_failed_delete_keeps_the_rejected_requests_rows() -> TestResult {
     assert!(fixture.rows()?.is_empty());
     Ok(())
 }
+
+/// `reaches` recurses along `permits` edges without a depth bound, which is
+/// finite only while the edges, minus self edges, form a DAG. A future edge
+/// that closes a cycle must fail here rather than overflow the stack.
+#[test]
+fn the_lifecycle_edges_without_self_edges_have_no_cycle() {
+    const ALL: [ErasureLifecycleV1; 8] = [
+        ErasureLifecycleV1::Submitted,
+        ErasureLifecycleV1::Authorized,
+        ErasureLifecycleV1::AccessFrozen,
+        ErasureLifecycleV1::DestructionDispatched,
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        ErasureLifecycleV1::Complete,
+        ErasureLifecycleV1::PartialFailure,
+        ErasureLifecycleV1::Rejected,
+    ];
+    let successors = |from: ErasureLifecycleV1| {
+        ALL.into_iter()
+            .filter(move |next| *next != from && from.permits(*next))
+    };
+    // After n rounds each set holds every state reachable in 1..=n+1 steps;
+    // a path longer than the state count must repeat a state.
+    let closure = ALL.into_iter().fold(
+        ALL.map(|from| successors(from).collect::<Vec<_>>()),
+        |reached, _| {
+            ALL.map(|from| {
+                let index = from as usize;
+                let mut next = reached[index].clone();
+                next.extend(
+                    reached[index]
+                        .iter()
+                        .flat_map(|step| reached[*step as usize].clone()),
+                );
+                next.sort_by_key(|state| *state as u8);
+                next.dedup();
+                next
+            })
+        },
+    );
+    assert!(ALL
+        .into_iter()
+        .all(|from| !closure[from as usize].contains(&from)));
+}
