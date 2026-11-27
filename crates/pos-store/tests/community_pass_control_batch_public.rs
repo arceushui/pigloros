@@ -222,8 +222,16 @@ fn the_batch_is_exactly_the_cfo1_and_its_listed_cfi1s() -> TestResult {
     let stray = protect(&mut key, &stray_bytes, &[])?;
     let (_, absent) = invocation(Some(pass()?), 3)?;
     let absent_listing = protect(&mut key, &outcome(Some(pass()?), &[absent])?, &[])?;
+    let twin = protect(&mut key, &cfi1_bytes, &[])?;
+    let listing_twice = protect(
+        &mut key,
+        &outcome(Some(pass()?), &[cfi1_digest, cfi1_digest])?,
+        &[edge(&cfi1)],
+    )?;
     for records in [
         vec![&listing],
+        vec![&listing, &cfi1, &twin],
+        vec![&listing_twice, &cfi1],
         vec![&empty, &cfi1],
         vec![&no_edge, &cfi1],
         vec![&listing, &with_child],

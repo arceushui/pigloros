@@ -469,6 +469,7 @@ fn check_pass_failure_set(read: &[PassFailureRecord]) -> Result<(), Error> {
     });
     let edges = listed_edges(outcome, &invocations);
     if listed != present
+        || outcome.listed.len() != invocations.len()
         || !children
         || outcome.record.registration().fields().child_artifacts != edges
     {
