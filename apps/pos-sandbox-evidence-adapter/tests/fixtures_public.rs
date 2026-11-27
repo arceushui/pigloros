@@ -692,6 +692,22 @@ impl Drop for Orphan {
     }
 }
 
+/// On drop, kills every orphan that carries the marker, whatever ended the
+/// test: no failure path leaves a 600 s idle process behind. Errors are
+/// ignored there.
+struct Sweep(String);
+
+impl Drop for Sweep {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn drop(&mut self) {
+        for raw in idle_orphans(&self.0).unwrap_or_default() {
+            if let Some(pid) = i32::try_from(raw).ok().and_then(Pid::from_raw) {
+                kill_process(pid, Signal::KILL).ok();
+            }
+        }
+    }
+}
+
 /// Kill `pid`, which is not a child of this process (its parent exited, so
 /// its new parent reaps it), and wait until it is gone or a zombie.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -712,6 +728,7 @@ fn kill_and_wait(pid: u32) -> TestResult {
 #[test]
 fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
     let marker = unique_marker()?;
+    let _sweep = Sweep(marker.clone());
     assert!(idle_orphans(&marker)?.is_empty());
 
     // Through the real binary: the adapter exits, its child does not.
