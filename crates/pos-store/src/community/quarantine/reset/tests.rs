@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1,
     CommunityPassKeyV1, CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
@@ -11,6 +12,7 @@ use pos_core::community_lifecycle::{
     CommunityQuarantineReasonV1 as Reason, CommunityReservationInputV1, CommunitySharedCountsV1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash};
+use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 
 use super::CommunityQuarantineResetCallV1;
 use crate::community::pass_record::{
@@ -23,10 +25,10 @@ use crate::community::{
     CommunityDomainBindingV1, CommunityPreExecutionTrustV1, CommunityQuarantineContextV1,
 };
 use crate::community_initialization_fixture::{
-    hash, profile_until, target, Fallible, QuarantineCase, Revocation, ENTRIES, GENERATION,
+    hash, profile_until, target, Fallible, QuarantineCase, Revocation, Roster, ENTRIES, GENERATION,
     HORIZON, INSTALLED_CATALOGUE, NATIVE_PROFILE,
 };
-use crate::plugin_trust_registry_fixtures::release_one;
+use crate::plugin_trust_registry_fixtures::{release_one, Material};
 
 /// The trust-root seal of the test composition.
 const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
@@ -141,37 +143,11 @@ fn reset(
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
     let projection = release_one().projection()?;
     let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
-    let retained = Hash::from_bytes(case.material.tps1_digest());
-    let call = CommunityQuarantineResetCallV1 {
-        timeline: target(),
-        stable_entry: ENTRIES[0],
-        implementation: &case.roster.implementation,
-        control_operation_id: claim.control,
-        expected_ledger_digest: claim.ledger,
-        expected_reasons: &claim.reasons,
-        expected_generation: claim.generation,
-        expected_state_head_digest: claim.head.unwrap_or(case.head),
-        trust_snapshot_digest: claim.tps1.unwrap_or(retained),
-        trust: CommunityPreExecutionTrustV1 {
-            anchor: &case.domain.harness.env.anchor,
-            tps1_bytes: &case.material.tps1,
-            evidence: &case.material.evidence,
-            projection: &projection,
-            trusted_utc: case.material.trusted()?,
-            tick: case.material.tick,
-        },
-        principal_ref: ArtifactRefV1 {
-            schema_id: claim.principal,
-            byte_length: 10,
-            digest: [0x51; 32],
-        },
-        authorization_ref: ArtifactRefV1 {
-            schema_id: 8,
-            byte_length: 11,
-            digest: [0x52; 32],
-        },
-        authorization_not_after_micros: claim.deadline,
-    };
+    let trust = trust_of(
+        (&case.domain.harness.env.anchor, &case.material),
+        &projection,
+    )?;
+    let call = call_of((&case.roster, &case.material, case.head), claim, trust);
     let context = CommunityQuarantineContextV1 {
         profile: &profile,
         binding: CommunityDomainBindingV1 {
@@ -184,6 +160,53 @@ fn reset(
     Ok(world
         .domain
         .reset_quarantine(&SEAL, context, &world.authority, &call))
+}
+
+/// The trust evidence of the case's gate for the release `projection`.
+fn trust_of<'a>(
+    (anchor, material): (&'a PluginTrustPolicyAnchorV1, &'a Material),
+    projection: &'a ValidatedPluginManifestProjectionV1,
+) -> Fallible<CommunityPreExecutionTrustV1<'a>> {
+    Ok(CommunityPreExecutionTrustV1 {
+        anchor,
+        tps1_bytes: &material.tps1,
+        evidence: &material.evidence,
+        projection,
+        trusted_utc: material.trusted()?,
+        tick: material.tick,
+    })
+}
+
+/// The call of `claim` over `trust`.
+fn call_of<'a>(
+    (roster, material, head): (&'a Roster, &'a Material, Hash),
+    claim: &'a Claim,
+    trust: CommunityPreExecutionTrustV1<'a>,
+) -> CommunityQuarantineResetCallV1<'a> {
+    let retained = Hash::from_bytes(material.tps1_digest());
+    CommunityQuarantineResetCallV1 {
+        timeline: target(),
+        stable_entry: ENTRIES[0],
+        implementation: &roster.implementation,
+        control_operation_id: claim.control,
+        expected_ledger_digest: claim.ledger,
+        expected_reasons: &claim.reasons,
+        expected_generation: claim.generation,
+        expected_state_head_digest: claim.head.unwrap_or(head),
+        trust_snapshot_digest: claim.tps1.unwrap_or(retained),
+        trust,
+        principal_ref: ArtifactRefV1 {
+            schema_id: claim.principal,
+            byte_length: 10,
+            digest: [0x51; 32],
+        },
+        authorization_ref: ArtifactRefV1 {
+            schema_id: 8,
+            byte_length: 11,
+            digest: [0x52; 32],
+        },
+        authorization_not_after_micros: claim.deadline,
+    }
 }
 
 /// The seeded ledger as the index holds it now.
