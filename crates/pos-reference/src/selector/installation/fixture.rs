@@ -264,7 +264,11 @@ pub(crate) enum SyscallPolicy {
     Guest,
 }
 
-// The guest allow-lists are the data files `guest-syscalls-*.txt`: what systemd's executor needs
+// The guest allow-lists are the data files `guest-syscalls-*.txt` (the requested names; see the
+// implicit readback additions below). Each is the union of the names that a real attempt used in the
+// #444 evidence lane (an audit trace of the launcher, the adapter and systemd's executor, per
+// architecture), the names an earlier version of the list held, and the native names of systemd's
+// default sets: what systemd's executor needs
 // between applying the filter and starting the launcher, what the static launcher needs (memory,
 // threads, signals, files, time, identity, the release channel's sockets, pidfds and the final
 // descriptor start of the adapter), and what the static evidence adapter needs. They are an
@@ -1073,13 +1077,13 @@ mod tests {
         for (text, count, digest) in [
             (
                 GUEST_SYSCALLS_X86_64,
-                134,
-                "aca43c4321137b43b089d1d08064ea1e11c989448aacb2422ccf168c22a74617",
+                139,
+                "cd49e1163a60901eec366c72607d57dceef2f6515ba14ecc17d04bc7d6dc27e5",
             ),
             (
                 GUEST_SYSCALLS_AARCH64,
-                115,
-                "4e513a364071bff1052a8dc54dbe2915778195f0c345e17c6dc97c244e5d7840",
+                120,
+                "02b0ade78c0a8b95198183ad251ede17e451f99b7e22b8301de27cc2530b4f5c",
             ),
         ] {
             // The sorted names are hashed, so that a reorder alone is no failure but any addition
