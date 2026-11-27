@@ -436,12 +436,22 @@ fn lpv1_with_eight_or_ten_fields_is_rejected() -> TestResult {
     ] {
         let mut fields = unsigned.clone();
         edit(&mut fields);
+        // The edited body gets its own correct self-digest, so only the field count can reject it.
+        let mut body = Vec::new();
+        ciborium::into_writer(&Value::Array(fields.clone()), &mut body)?;
+        let digest = blake3::hash(&[b"PiglorOS.LPV1.v1\0".as_slice(), &body].concat());
         let mut encoded = Vec::new();
         ciborium::into_writer(
-            &Value::Array(vec![Value::Array(fields), wrapper[1].clone()]),
+            &Value::Array(vec![
+                Value::Array(fields),
+                Value::Bytes(digest.as_bytes().to_vec()),
+            ]),
             &mut encoded,
         )?;
-        assert!(LaunchParameters::from_canonical_cbor(&encoded).is_err());
+        assert_eq!(
+            LaunchParameters::from_canonical_cbor(&encoded),
+            Err(SandboxProviderProtocolError::InvalidEncoding)
+        );
     }
     Ok(())
 }

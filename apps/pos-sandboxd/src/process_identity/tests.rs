@@ -93,12 +93,17 @@ fn an_identity_is_only_one_if_it_differs_from_that_of_another_process() {
 }
 
 #[test]
-fn the_provider_identity_is_this_process_on_a_kernel_with_pidfs_inodes() {
+fn the_provider_identity_is_its_own_where_the_kernel_has_pidfs_inodes_and_none_elsewhere() {
     let own = own_process_identity();
     let init = pidfd_identity(rustix::process::pidfd_open(
         rustix::process::Pid::INIT,
         rustix::process::PidfdFlags::empty(),
     ));
-    // Whatever the kernel: the probe agrees with the comparison it is built from.
-    assert_eq!(provider_identity(), distinct_from(own, init));
+    assert!(own.is_some() && init.is_some());
+    if own == init {
+        // A kernel before Linux 6.9: every pidfd has one inode, so there is no identity.
+        assert_eq!(provider_identity(), None);
+    } else {
+        assert_eq!(provider_identity(), own);
+    }
 }
