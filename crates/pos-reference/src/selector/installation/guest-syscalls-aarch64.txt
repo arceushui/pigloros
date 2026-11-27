@@ -17,6 +17,7 @@ epoll_ctl
 epoll_pwait
 eventfd2
 execve
+execveat
 exit
 exit_group
 faccessat
@@ -58,6 +59,7 @@ munmap
 nanosleep
 newfstatat
 openat
+openat2
 pidfd_open
 pipe2
 ppoll
