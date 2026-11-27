@@ -263,7 +263,7 @@ fn an_unsafe_entry_is_unavailable_not_held() -> TestResult {
 #[test]
 fn an_unsafe_entry_locked_elsewhere_is_unavailable_not_held() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     let other = fixture.acquire(&store)?;
     fs::set_permissions(&fixture.entry, fs::Permissions::from_mode(0o644))?;
     assert_eq!(fixture.generation(&store), Err(Refusal::LeaseUnavailable));
@@ -470,7 +470,7 @@ fn the_fence_accepts_exactly_the_stored_generation() -> TestResult {
 #[test]
 fn the_fence_needs_a_transaction() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     let lease = fixture.acquire(&store)?;
     assert_eq!(
         require_current_consent_lease_generation(&store.conn, lease.generation()),
