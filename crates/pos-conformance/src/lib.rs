@@ -40,6 +40,7 @@ mod non_interference;
 mod non_interference_report;
 mod plugin_trust_bridge;
 mod profile_contract;
+mod provider_adapter_plan;
 mod provider_conformance;
 mod provider_contract;
 mod report_attestation;
@@ -164,6 +165,10 @@ pub use profile_contract::{
     IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
     SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
     CONFORMANCE_PROFILE_MAGIC_V1, DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
+};
+pub use provider_adapter_plan::{
+    AdapterPlan, MEMORY_CEILING_BYTES, OUTPUT_CEILING_BYTES, OVERSHOOT, TASK_CEILING,
+    WATCHDOG_CEILING_MS, WORK_CEILING_BYTES,
 };
 pub use provider_conformance::{
     evaluate, run_suite, verify_gate, CaseRecord, CaseVerdict, ExpectedPublicOutcome,

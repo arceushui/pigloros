@@ -587,6 +587,8 @@ fn a_refusal_has_its_code_and_an_execution_has_none() -> TestResult {
         Some(SandboxProviderErrorCode::PayloadTransferTimeout)
     );
     assert_eq!(GuestTerminal::Error(vec![0xff]).refusal_code(), None);
+    let execution = test_execution(&fixture.spr1, &fixture.spy1);
+    assert_eq!(GuestTerminal::Execution(execution).refusal_code(), None);
     assert!(matches!(
         classify(GuestTerminal::Error(fixture.spe1)),
         Exchange::Refused(Some(SandboxProviderErrorCode::PayloadTransferTimeout))
@@ -825,7 +827,7 @@ fn a_provider_that_is_still_starting_is_asked_again_until_it_executes() -> TestR
         &mut input,
         &clock,
         Duration::from_mins(2),
-    )?;
+    );
     assert_eq!(lines.first().map(String::as_str), Some("execute\texecuted"));
     assert!(lines.contains(&format!("raw\tagr1\t{}", digest_hex(&fixture.agr1))));
     assert_eq!(*clock.pauses.borrow(), vec![OPEN_RETRY_INTERVAL; 2]);
@@ -859,7 +861,7 @@ fn a_refused_exchange_is_reported_as_one_outcome_line() -> TestResult {
         &mut input,
         &FakeClock::default(),
         Duration::from_mins(2),
-    )?;
+    );
     assert_eq!(lines, ["execute\trefused\tPayloadTransferTimeout"]);
     join(served)
 }
@@ -883,4 +885,107 @@ fn a_failed_exchange_has_one_line_per_class() {
     for (error, line) in lines {
         assert_eq!(failure_line(error), line);
     }
+}
+
+#[test]
+fn describe_proves_the_active_policy_through_the_one_transport() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let answer = fixture.sdy1.clone();
+    let served = serve(move |listener| {
+        let mut stream = accept(&listener)?;
+        let deadline = deadline()?;
+        read_frame(&mut stream, &deadline)
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("request frame missing")?;
+        drain(&mut stream, &deadline)?;
+        send(&mut stream, &answer, &deadline)?;
+        finish(&stream)
+    })?;
+    served.client.describe(
+        &fixture.provider,
+        fixture.describe_request_id,
+        fixture.describe_nonce,
+        Duration::from_secs(30),
+    )?;
+    join(served)
+}
+
+#[test]
+fn an_unreachable_provider_fails_describe() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let served = serve(|listener| {
+        let mut stream = accept(&listener)?;
+        let deadline = deadline()?;
+        read_frame(&mut stream, &deadline)
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("request frame missing")?;
+        drain(&mut stream, &deadline)?;
+        finish(&stream)
+    })?;
+    let described = served.client.describe(
+        &fixture.provider,
+        fixture.describe_request_id,
+        fixture.describe_nonce,
+        Duration::from_secs(30),
+    );
+    assert_eq!(described, Err(SelectorBoundaryError::SelectorUnavailable));
+    join(served)
+}
+
+/// An execution whose staged output is `file`, as the transport would hold it.
+fn execution_with_output(file: std::fs::File, length: u64) -> TestResult<GuestExecution> {
+    let fixture = authenticated_transport_fixture()?;
+    let path = tempfile::NamedTempFile::new()?.into_temp_path();
+    let descriptor = crate::sandbox_provider_protocol::PayloadDescriptor {
+        byte_length: length,
+        digest: [0; 32],
+    };
+    Ok(GuestExecution(
+        AuthenticatedProviderExecution::from_test_frames(
+            vec![1],
+            fixture.spr1.clone(),
+            fixture.spy1,
+            vec![vec![2]],
+            Some((tempfile::NamedTempFile::from_parts(file, path), descriptor)),
+        ),
+    ))
+}
+
+#[test]
+fn a_report_of_an_unreadable_output_fails_instead_of_hiding_it() -> TestResult {
+    // The output cannot be rewound (a pipe) ...
+    let (read_end, write_end) = std::io::pipe()?;
+    drop(write_end);
+    let mut unseekable =
+        execution_with_output(std::fs::File::from(std::os::fd::OwnedFd::from(read_end)), 1)?;
+    assert_eq!(unseekable.report().err(), Some(GuestReportError));
+    // ... or cannot be read (opened for writing only).
+    let directory = tempfile::tempdir()?;
+    let write_only = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(directory.path().join("output"))?;
+    let mut unreadable = execution_with_output(write_only, 1)?;
+    assert_eq!(unreadable.report().err(), Some(GuestReportError));
+    // An execution that cannot be reported is one line, never a silent success.
+    assert_eq!(
+        executed_lines(unreadable),
+        ["execute\tunreportable".to_owned()]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_readable_output_is_reported_with_its_length_and_digest() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("output");
+    std::fs::write(&path, b"output")?;
+    let mut execution = execution_with_output(std::fs::File::open(&path)?, 6)?;
+    let lines = execution.report()?;
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some(format!("output\t6\t{}", digest_hex(b"output")).as_str())
+    );
+    Ok(())
 }

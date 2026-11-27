@@ -19,11 +19,22 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use pos_reference::provider_admission::test_support::{
-    StagedImage, StagedInstallation, StagedProvider,
+    StagedImage, StagedInstallation, StagedLimits, StagedProvider,
 };
 
 use super::execute::{EVALUATION_FILE, INPUT_FILE, SPX1_FILE};
 use super::{hold, report_line, ConformanceError, HOST_ARCHITECTURE};
+
+/// The limits of the attempt that the guest runs: 128 MiB of memory, 256 tasks, a 120 s attempt
+/// watchdog, 1 MiB of output and a 16 MiB work area, with the case's exchange deadline of
+/// `StagedLimits::EXCHANGE_MS`. The default fixture's 2000-byte limits kill any real attempt.
+const GUEST_LIMITS: StagedLimits = StagedLimits::probing(
+    128 * 1024 * 1024,
+    256,
+    120_000,
+    1024 * 1024,
+    16 * 1024 * 1024,
+);
 
 /// One stager run's files, read from its arguments.
 #[derive(Debug)]
@@ -81,19 +92,22 @@ impl StageCase {
     /// is refused, and [`ConformanceError::Io`] when an export file cannot be
     /// created. The installation is removed again in that case.
     fn stage(&self) -> Result<StagedInstallation, ConformanceError> {
-        StagedInstallation::stage_provider_execution(&StagedProvider {
-            image: StagedImage {
-                architecture: HOST_ARCHITECTURE,
-                image: &self.image,
-                certificate: &self.certificate,
-                key_description: &self.key_description,
-                executable: &self.adapter,
-                arguments: &self.adapter_arguments,
+        StagedInstallation::stage_provider_execution_limited(
+            &StagedProvider {
+                image: StagedImage {
+                    architecture: HOST_ARCHITECTURE,
+                    image: &self.image,
+                    certificate: &self.certificate,
+                    key_description: &self.key_description,
+                    executable: &self.adapter,
+                    arguments: &self.adapter_arguments,
+                },
+                binary: &self.provider_binary,
+                installation: &self.spi1,
+                key_file_name: &self.key_file_name,
             },
-            binary: &self.provider_binary,
-            installation: &self.spi1,
-            key_file_name: &self.key_file_name,
-        })
+            &GUEST_LIMITS,
+        )
         .map_err(|error| ConformanceError::Stage(error.to_string()))
         .and_then(|staged| {
             write_export(

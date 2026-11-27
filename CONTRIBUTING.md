@@ -179,7 +179,7 @@ flowchart TD
     C --> R["cargo-crap"]
     R --> N["Normal checks: at most eight runners"]
     N --> M["Mutation: sixteen shards, at most eight runners"]
-    M --> A["ASan: six shards"]
+    M --> A["ASan: seven shards"]
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
     C -. "failure" .-> X
@@ -358,18 +358,20 @@ flowchart TD
 ```
 
 ASan tests run beside mutation. Their instrumented build runs on one of the eight
-normal-stage runners: `asan-build` compiles every workspace test target once
-with `cargo nextest archive` and uploads the archive, and the standard pass
-rule, `standard-gate` and `asan-gate` all require it. It compiles crates four at a time while
-`scripts/asan/serial-link.sh` admits one link at a time. Each shard downloads
-the archive and runs its tests without compiling. The archive is extracted
+normal-stage runners: `asan-build` compiles the selected test targets once
+with `cargo nextest archive` and uploads a full archive plus a filtered
+`pos-conformance` archive. The standard pass rule, `standard-gate` and
+`asan-gate` all require it. It compiles crates four at a time while
+`scripts/asan/serial-link.sh` admits one link at a time. The two remainder
+shards download the full archive; five conformance shards download the
+filtered archive. Each runs tests without compiling. The archive is extracted
 into the workspace, so `target/` sits at the path compiled into
 `CARGO_BIN_EXE_*`.
 
 The previously dominant `bundle_contract_public` target is split through
 nextest's native `slice:1/2` partitioning. The non-conformance workspace
-remainder uses the same disjoint slices, while `remainder-1` retains the
-conformance library, binaries, and profile/provider targets. Shards select
+remainder uses the same disjoint slices, while `conformance-remainder` runs
+the conformance library, binaries, and profile/provider targets. Shards select
 their tests with nextest filtersets. The selected packages, features, test
 targets, ignored-test handling, and sanitizer scope are unchanged.
 
@@ -388,12 +390,14 @@ flowchart LR
     J --> O["moat proof"]
     J --> R1["remainder-1"]
     J --> R2["remainder-2"]
+    J --> CR["conformance-remainder"]
     P1 --> G["asan-gate"]
     P2 --> G
     C --> G
     O --> G
     R1 --> G
     R2 --> G
+    CR --> G
 ```
 
 All features, ignored tests, sanitizer instrumentation, leak detection, and the

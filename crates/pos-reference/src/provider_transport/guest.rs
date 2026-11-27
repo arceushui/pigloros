@@ -1,7 +1,7 @@
 //! The guest test client's view of the selector provider transport.
 //!
 //! Compiled only with the `test-support` feature. It wraps the one selector
-//! transport (execute, SCQ1 and SRQ1) without a second protocol
+//! transport (execute, status via SDQ1, SCQ1 and SRQ1) without a second protocol
 //! implementation: the endpoint stays root-owned and every connection must
 //! come from the named provider process (ADR-069 R11 §5.0 step 8).
 //!
@@ -192,8 +192,8 @@ impl GuestProviderClient {
     /// [`Self::execute_when_open`] reported as text: the lines of [`GuestExecution::report`], or
     /// the one `execute` line of an exchange that produced no execution.
     ///
-    /// # Errors
-    /// [`GuestReportError`] when an execution's signed records cannot be reported.
+    /// An execution whose records cannot be reported is the one line `execute unreportable`, which
+    /// the guest checker refuses.
     pub fn execute_report(
         &self,
         admitted: &AdmittedSandboxProvider,
@@ -202,11 +202,29 @@ impl GuestProviderClient {
         input: &mut (impl Read + Seek),
         clock: &impl GuestClock,
         window: Duration,
-    ) -> Result<Vec<String>, GuestReportError> {
+    ) -> Vec<String> {
         match self.execute_when_open(admitted, grant, job, input, clock, window) {
-            Ok(mut execution) => execution.report(),
-            Err(error) => Ok(vec![failure_line(error)]),
+            Ok(execution) => executed_lines(execution),
+            Err(error) => vec![failure_line(error)],
         }
+    }
+
+    /// Status: one SDQ1 whose runtime-signed SDY1 proves that the provider
+    /// has activated the admitted policy (the selector's own revocation
+    /// synchronisation).
+    ///
+    /// # Errors
+    /// Fails closed when the provider is unreachable or its answer fails
+    /// authentication.
+    pub fn describe(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+        timeout: Duration,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.0
+            .synchronize_revocation(admitted, request_id, nonce, timeout)
     }
 
     /// Send one SCQ1 and authenticate its SCY1.
@@ -471,6 +489,13 @@ impl GuestExecution {
     ) -> Result<Option<T>, SelectorBoundaryError> {
         self.0.with_verified_output(compose)
     }
+}
+
+/// The report of an execution, or the one line `execute unreportable`.
+fn executed_lines(mut execution: GuestExecution) -> Vec<String> {
+    execution
+        .report()
+        .unwrap_or_else(|_| vec!["execute\tunreportable".to_owned()])
 }
 
 /// The report line of an exchange that produced no execution.

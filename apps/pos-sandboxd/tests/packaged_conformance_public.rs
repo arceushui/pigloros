@@ -208,63 +208,87 @@ impl io::Read for BrokenControl {
 /// exactly one provider executable must be installed while this is read.
 struct ObservingControl {
     seen: Arc<Mutex<Option<PathBuf>>>,
-    /// The execute mode's arguments, run once while the installation is held,
-    /// and its report, or the error it ended in.
+    /// The execute mode's arguments (`execute EXPORT_DIRECTORY MAIN_PID`), run three times while
+    /// the installation is held, and what each run reported or ended in.
     execute: Vec<OsString>,
-    executed: Arc<Mutex<Option<String>>>,
+    executed: Arc<Mutex<Vec<String>>>,
 }
 
 /// Where SIC1 names the provider's execute socket.
 const EXECUTE_SOCKET: &str = "/run/pigloros/provider-execute.sock";
 
+/// Run the conformance binary's mode for `arguments` on its own runtime and thread, and return its
+/// report, or the error it ended in.
+fn run_on_thread(arguments: Vec<OsString>) -> String {
+    std::thread::spawn(move || {
+        let mut report = Vec::new();
+        let outcome = runtime().and_then(|runtime| {
+            runtime.block_on(run_mode(
+                arguments,
+                io::empty(),
+                &mut report,
+                describe,
+                release,
+            ))
+        });
+        outcome.map_or_else(
+            |error| format!("error: {error}"),
+            |()| String::from_utf8_lossy(&report).into_owned(),
+        )
+    })
+    .join()
+    .unwrap_or_else(|_| "panicked".to_owned())
+}
+
 impl ObservingControl {
-    /// Run the execute mode on its own runtime and thread. Its provider is
-    /// this test process, whose listener accepts and closes every connection:
-    /// the exchange runs through admission, the commitment, the client and
-    /// its report, and ends before an AGR1.
+    /// Run the execute mode against this test process as the provider:
+    /// 1. no execute socket exists: the selector's client cannot be built;
+    /// 2. the exported evaluation names no sandbox requirement: no commitment exists;
+    /// 3. a listener that accepts and closes every connection: the exchange runs through
+    ///    admission, the commitment, the client and its report, and ends before an AGR1.
     fn execute(&self) -> io::Result<()> {
-        let arguments = self.execute.clone();
+        let export = self
+            .execute
+            .get(1)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::other("no export directory"))?;
+        let no_requirement = export.with_file_name("export-without-requirement");
+        fs::create_dir(&no_requirement)?;
+        for name in ["spx1", "input"] {
+            fs::copy(export.join(name), no_requirement.join(name))?;
+        }
+        let corpus = pos_reference::selector_test_support::air_gapped_corpus()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        fs::write(no_requirement.join("evaluation"), corpus.request)?;
+        let mut other = self.execute.clone();
+        other[1] = no_requirement.into_os_string();
+
+        let mut results = vec![run_on_thread(self.execute.clone()), run_on_thread(other)];
+
         fs::create_dir_all("/run/pigloros")?;
         fs::set_permissions("/run/pigloros", fs::Permissions::from_mode(0o755))?;
         let listener = UnixListener::bind(EXECUTE_SOCKET)?;
         fs::set_permissions(EXECUTE_SOCKET, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let done = AtomicBool::new(false);
-        let ran = std::thread::scope(|scope| {
+        let closed = std::thread::scope(|scope| {
             let acceptor = scope.spawn(|| {
                 while !done.load(Ordering::Relaxed) {
                     drop(listener.accept());
                     std::thread::sleep(Duration::from_millis(10));
                 }
             });
-            let ran = scope
-                .spawn(|| {
-                    let mut report = Vec::new();
-                    let outcome = runtime().and_then(|runtime| {
-                        runtime.block_on(run_mode(
-                            arguments,
-                            io::empty(),
-                            &mut report,
-                            describe,
-                            release,
-                        ))
-                    });
-                    outcome.map_or_else(
-                        |error| format!("error: {error}"),
-                        |()| String::from_utf8_lossy(&report).into_owned(),
-                    )
-                })
-                .join();
+            let closed = run_on_thread(self.execute.clone());
             done.store(true, Ordering::Relaxed);
             drop(acceptor.join());
-            ran
-        })
-        .map_err(|_| io::Error::other("the execute thread panicked"))?;
+            closed
+        });
         fs::remove_file(EXECUTE_SOCKET)?;
+        results.push(closed);
         *self
             .executed
             .lock()
-            .map_err(|_| io::Error::other("poisoned"))? = Some(ran);
+            .map_err(|_| io::Error::other("poisoned"))? = results;
         Ok(())
     }
 }
@@ -331,7 +355,7 @@ async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResul
     }
     let scratch = tempfile::tempdir()?;
     let seen = Arc::new(Mutex::new(None));
-    let executed = Arc::new(Mutex::new(None));
+    let executed = Arc::new(Mutex::new(Vec::new()));
     let control = ObservingControl {
         seen: Arc::clone(&seen),
         execute: vec![
@@ -367,9 +391,19 @@ async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResul
         assert!(metadata.len() > 0, "{name}");
         assert_eq!(metadata.permissions().mode() & 0o7777, 0o600, "{name}");
     }
+    let results = executed.lock().map_err(|_| "poisoned")?.clone();
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert!(
+        results[0].starts_with("error: the provider exchange could not be set up"),
+        "{results:?}"
+    );
+    assert!(
+        results[1].starts_with("error: the provider exchange could not be set up"),
+        "{results:?}"
+    );
     assert_eq!(
-        executed.lock().map_err(|_| "poisoned")?.as_deref(),
-        Some("execute\tfailed\tprovider execution failed before admission\n")
+        results[2],
+        "execute\tfailed\tprovider execution failed before admission\n"
     );
     Ok(())
 }
