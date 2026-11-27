@@ -1,0 +1,76 @@
+# DIAGNOSTIC (diag/444-shard3 only, never merged): run mutation shard 3 of #1518 alone and stream
+# which mutant is under test, with memory and disk, to find the mutant that takes the runner down.
+name: diag-444-shard3
+
+on:
+  push:
+    branches: [diag/444-shard3]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "1"
+
+jobs:
+  shard3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        with:
+          shared-key: mutation
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Capture the diff of the pull request
+        run: |
+          set -euo pipefail
+          git diff --relative --unified=0 origin/main...HEAD >"${RUNNER_TEMP}/changes.diff"
+          wc -l "${RUNNER_TEMP}/changes.diff"
+      - name: List the mutants of shard 3
+        run: |
+          set -euo pipefail
+          cargo mutants --workspace --all-features --in-diff "${RUNNER_TEMP}/changes.diff" \
+            --no-shuffle --shard 3/16 --list --cap-lints true --cargo-arg=--locked
+      - name: Watch memory, disk and the current mutant
+        run: |
+          nohup bash -c '
+            while true; do
+              sleep 15
+              echo "== $(date +%T) $(free -m | sed -n 2p) | $(df -h / | tail -1)"
+              latest="$(find mutants.out -type f -name "*.log" -printf "%T@ %p\n" 2>/dev/null | sort -nr | sed -n 1p | cut -d" " -f2-)"
+              echo "   latest log: ${latest}"
+              ps -eo rss,etimes,args --sort=-rss | sed -n 2,4p | cut -c1-200
+            done' >"${RUNNER_TEMP}/watch.log" 2>&1 &
+          (tail -F "${RUNNER_TEMP}/watch.log" &)
+      - name: Run shard 3
+        env:
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -uo pipefail
+          timeout --foreground 62m cargo mutants \
+            --workspace --all-features \
+            --in-diff "${RUNNER_TEMP}/changes.diff" \
+            --no-shuffle --shard 3/16 --baseline run --jobs 1 \
+            --timeout 240 --build-timeout 600 --cap-lints true \
+            --caught --unviable --cargo-arg=--locked \
+            -- -- -Zunstable-options --fail-fast --include-ignored --test-threads=4
+          status=$?
+          echo "cargo mutants exited with ${status}"
+          exit "${status}"
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shard3-report
+          path: mutants.out
+          if-no-files-found: ignore
