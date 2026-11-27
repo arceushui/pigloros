@@ -71,6 +71,29 @@ impl NetworkExchangePlan {
     }
 }
 
+impl AdmissionAuthority {
+    /// An authority block of thirteen distinct filler digests, `[1; 32]` to
+    /// `[13; 32]` in field order, for tests only.
+    #[must_use]
+    pub const fn fixture() -> Self {
+        Self {
+            evr1_digest: [1; 32],
+            fixture_contract_digest: [2; 32],
+            fixture_digest: [3; 32],
+            execution_profile_digest: [4; 32],
+            lps1_digest: [5; 32],
+            sim1_digest: [6; 32],
+            apt1_digest: [7; 32],
+            trs1_digest: [8; 32],
+            rvs1_digest: [9; 32],
+            spm1_digest: [10; 32],
+            pcf1_digest: [11; 32],
+            pcr1_digest: [12; 32],
+            hcp1_digest: [13; 32],
+        }
+    }
+}
+
 impl LocalNetworkAdmission {
     /// A Local admission over `exchanges` and `limits` bound to a grant that
     /// names `attempt_id`, `authority` and the three epochs (trust,
@@ -176,21 +199,7 @@ mod tests {
             response_bytes: 20,
             milliseconds: 30,
         };
-        let authority = AdmissionAuthority {
-            evr1_digest: [1; 32],
-            fixture_contract_digest: [2; 32],
-            fixture_digest: [3; 32],
-            execution_profile_digest: [4; 32],
-            lps1_digest: [5; 32],
-            sim1_digest: [6; 32],
-            apt1_digest: [7; 32],
-            trs1_digest: [8; 32],
-            rvs1_digest: [9; 32],
-            spm1_digest: [10; 32],
-            pcf1_digest: [11; 32],
-            pcr1_digest: [12; 32],
-            hcp1_digest: [13; 32],
-        };
+        let authority = AdmissionAuthority::fixture();
         let admission = LocalNetworkAdmission::fixture(
             [4; 16],
             authority.clone(),

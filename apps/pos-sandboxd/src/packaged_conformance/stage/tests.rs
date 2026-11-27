@@ -3,8 +3,9 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::ffi::OsStringExt as _;
 
-use super::{export_files, run_stage, write_export, StageCase};
+use super::{export_files, run_stage, write_export, StageCase, GUEST_LIMITS};
 use crate::packaged_conformance::{describe, release, run_mode, ConformanceError, Mode};
+use pos_reference::provider_admission::test_support::StagedLimits;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -337,4 +338,22 @@ fn a_failed_write_removes_the_created_files_and_a_stuck_one_is_reported() -> Tes
     assert!(!directory.path().join("three").exists());
     assert!(directory.path().join("one").is_dir());
     Ok(())
+}
+
+#[test]
+fn the_guest_case_has_the_limits_of_a_real_attempt() {
+    // Each value is written out, so that a changed operator in the constant is a failure.
+    for limits in [GUEST_LIMITS.broker, GUEST_LIMITS.launch] {
+        assert_eq!(limits[0], 134_217_728, "memory: 128 MiB");
+        assert_eq!(limits[2], 256, "tasks");
+        assert_eq!(limits[3], 1_000_000, "one whole CPU");
+        assert_eq!(limits[4], 120_000, "attempt watchdog, ms");
+        assert_eq!(limits[6], 16_777_216, "files: 16 MiB");
+        assert_eq!(limits[8], 1_048_576, "output: 1 MiB");
+        assert_eq!(limits[9], 16_777_216, "work area: 16 MiB");
+    }
+    assert_eq!(GUEST_LIMITS.budget[0], 134_217_728);
+    assert_eq!(GUEST_LIMITS.budget[4], 1_048_576);
+    assert_eq!(GUEST_LIMITS.budget[5], 16_777_216);
+    assert_eq!(GUEST_LIMITS.watchdog_ms, StagedLimits::EXCHANGE_MS);
 }
