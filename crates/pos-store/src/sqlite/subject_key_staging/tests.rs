@@ -713,7 +713,7 @@ fn the_lifecycle_distinguishes_every_p1_state_and_unlock_accepts_only_live() -> 
 fn none_pending() -> PendingKeyDestructionsV1 {
     PendingKeyDestructionsV1 {
         subject_keys: Vec::new(),
-        owner_signing: Vec::new(),
+        signing_keys: Vec::new(),
     }
 }
 
@@ -735,11 +735,11 @@ fn pend(store: &mut SqliteStore, identity: KeyIdentityV1, seed: u8) -> TestResul
     Ok(())
 }
 
-fn owner_signing(owner_id: &str, role: KeyRoleV1, epoch: u64) -> TestResult2 {
+type IdentityResult = Result<KeyIdentityV1, Box<dyn std::error::Error>>;
+
+fn key_identity(owner_id: &str, role: KeyRoleV1, epoch: u64) -> IdentityResult {
     Ok(KeyIdentityV1::new(OwnerIdV1::new(owner_id)?, role, epoch))
 }
-
-type TestResult2 = Result<KeyIdentityV1, Box<dyn std::error::Error>>;
 
 #[test]
 fn startup_destruction_recovery_lists_every_pending_subject_key() -> TestResult {
@@ -753,7 +753,7 @@ fn startup_destruction_recovery_lists_every_pending_subject_key() -> TestResult 
     // A pending request of another owner and role is neither kind.
     pend(
         &mut store,
-        owner_signing("recipient-a", KeyRoleV1::ExportRecipientEncryption, 1)?,
+        key_identity("recipient-a", KeyRoleV1::ExportRecipientEncryption, 1)?,
         44,
     )?;
     assert_eq!(store.pending_subject_key_destructions()?, none_pending());
@@ -768,52 +768,50 @@ fn startup_destruction_recovery_lists_every_pending_subject_key() -> TestResult 
         pending,
         PendingKeyDestructionsV1 {
             subject_keys: vec![first, second],
-            owner_signing: Vec::new(),
+            signing_keys: Vec::new(),
         }
     );
     Ok(())
 }
 
 #[test]
-fn startup_destruction_recovery_lists_the_owner_signing_identity() -> TestResult {
+fn startup_destruction_recovery_lists_every_pending_signing_key() -> TestResult {
     let mut store = registry_store()?;
-    let signing = owner_signing("piglor-owner", KeyRoleV1::TimelineIntegritySigning, 1)?;
-    pend(&mut store, signing, 51)?;
-    // The same role under another owner and the owner under another role are
-    // not the owner's own signing identity.
+    let first = key_identity("piglor-owner", KeyRoleV1::TimelineIntegritySigning, 1)?;
+    let second = key_identity("bundle-signer", KeyRoleV1::TimelineIntegritySigning, 2)?;
+    pend(&mut store, first, 51)?;
+    pend(&mut store, second, 52)?;
+    // Another role under either owner id is not a timeline signing key.
     pend(
         &mut store,
-        owner_signing("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 1)?,
-        52,
-    )?;
-    pend(
-        &mut store,
-        owner_signing("piglor-owner", KeyRoleV1::PluginReleaseSigning, 1)?,
+        key_identity("piglor-owner", KeyRoleV1::PluginReleaseSigning, 1)?,
         53,
     )?;
-    let pending = store.pending_subject_key_destructions()?;
+    pend(
+        &mut store,
+        key_identity("bundle-signer", KeyRoleV1::ExportRecipientEncryption, 1)?,
+        54,
+    )?;
+    let mut pending = store.pending_subject_key_destructions()?;
     assert!(pending.subject_keys.is_empty());
+    pending
+        .signing_keys
+        .sort_by_key(|request| request.identity.epoch);
     assert_eq!(
-        pending.owner_signing,
-        vec![KeyDestructionRequestV1::new(
-            signing,
-            digest(51),
-            digest(200)
-        )]
+        pending.signing_keys,
+        vec![
+            KeyDestructionRequestV1::new(first, digest(51), digest(200)),
+            KeyDestructionRequestV1::new(second, digest(52), digest(200)),
+        ]
     );
 
-    let subject = begin_destruction_of_new_subject(&mut store)?;
+    // The subject-key group is unaffected by the signing requests.
+    register_directly(&mut store, &owner(3), 1, 61)?;
+    let subject = begin_destruction(&mut store, &owner(3), 1, 61)?;
     let both = store.pending_subject_key_destructions()?;
     assert_eq!(both.subject_keys, vec![subject]);
-    assert_eq!(both.owner_signing.len(), 1);
+    assert_eq!(both.signing_keys.len(), 2);
     Ok(())
-}
-
-fn begin_destruction_of_new_subject(
-    store: &mut SqliteStore,
-) -> Result<KeyDestructionRequestV1, Box<dyn std::error::Error>> {
-    register_directly(store, &owner(3), 1, 61)?;
-    begin_destruction(store, &owner(3), 1, 61)
 }
 
 #[test]

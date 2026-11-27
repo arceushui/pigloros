@@ -19,7 +19,7 @@
 //!   [`SqliteStore::registered_subject_root_material_digest`], the P1 reads
 //!   that P5 and ADR-097 section 5 unlock use;
 //! - [`SqliteStore::pending_subject_key_destructions`], the D4 enumeration of
-//!   subject keys and the owner's own signing identity.
+//!   subject keys and timeline signing keys.
 //!
 //! The wrap and binding files, the SNL1 row, the E16 and subject-owner locks
 //! and the order of the readiness steps (R2: P5 before D4) belong to the owner
@@ -128,9 +128,6 @@ pub struct SubjectKeyStagingRecordV1 {
     pub store_file_id: Vec<u8>,
 }
 
-/// The registry owner id of the owner process's own signing identity.
-const OWNER_SIGNING_OWNER_ID: &str = "piglor-owner";
-
 /// The registry role of the owner process's own signing identity.
 const OWNER_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
 
@@ -139,8 +136,9 @@ const OWNER_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
 pub struct PendingKeyDestructionsV1 {
     /// Every `SubjectDataEncryption` request, of any subject and epoch.
     pub subject_keys: Vec<KeyDestructionRequestV1>,
-    /// Every request of the owner's own `piglor-owner` signing identity.
-    pub owner_signing: Vec<KeyDestructionRequestV1>,
+    /// Every `TimelineIntegritySigning` request, of any owner id and epoch.
+    /// The caller keeps the requests of its own signing identity.
+    pub signing_keys: Vec<KeyDestructionRequestV1>,
 }
 
 /// The P1 lifecycle of one `SubjectDataEncryption` identity.
@@ -607,8 +605,12 @@ impl SqliteStore {
     ///
     /// The owner resumes each at step 3 of D2, idempotently, after SNL1
     /// admission and P5. A failure of one identity leaves it pending and does
-    /// not block the others. Requests of every other owner and role are not
-    /// listed.
+    /// not block the others. Requests of every other role are not listed.
+    ///
+    /// ADR-137 D4 names no owner id or role for the owner's own signing
+    /// identity, so this store does not pick one: `signing_keys` holds every
+    /// pending `TimelineIntegritySigning` request and the caller must keep
+    /// only those of its own owner id.
     ///
     /// # Errors
     /// Fails closed, with a fixed message, for an absent or unreadable
@@ -622,12 +624,9 @@ impl SqliteStore {
                     .partition(|request| request.identity.role == KeyRoleV1::SubjectDataEncryption);
                 PendingKeyDestructionsV1 {
                     subject_keys,
-                    owner_signing: others
+                    signing_keys: others
                         .into_iter()
-                        .filter(|request| {
-                            request.identity.role == OWNER_SIGNING_ROLE
-                                && request.identity.owner_id.as_str() == OWNER_SIGNING_OWNER_ID
-                        })
+                        .filter(|request| request.identity.role == OWNER_SIGNING_ROLE)
                         .collect(),
                 }
             })
