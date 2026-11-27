@@ -264,8 +264,18 @@ execute_case() { # DIR EXPORT_DIRECTORY
     | { grep -vF "${RUNTIME_UNIT}.service" || true; } >"$1/attempt-journal"
 }
 
+# The directory of the stager export, removed on every way out of the script (a failing command
+# stops it with errexit before the removal at the end of the case).
+exports=""
+remove_exports() {
+  if [[ -n ${exports} ]]; then
+    rm -rf -- "${exports}"
+  fi
+}
+trap remove_exports EXIT
+
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
-  local dir="daemon/$1" fifo="${STAGE_FIFO}" exports control line binary pid status=0 start=0 stop=0
+  local dir="daemon/$1" fifo="${STAGE_FIFO}" control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
   # The fallback-tunnel sysctl the runtime starts under: it refuses step 7 below 1.
   cat "${FB_TUNNELS_SYSCTL}" >"${dir}/fb-tunnels-sysctl"

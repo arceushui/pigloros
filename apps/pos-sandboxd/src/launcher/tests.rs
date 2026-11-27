@@ -1027,11 +1027,11 @@ fn the_process_host_reads_the_real_process() -> TestResult {
     assert!(host.peer_identity(&release).is_some());
     assert_eq!(
         host.own_identity(),
-        crate::process_identity::own_process_identity()
+        super::process_identity::own_process_identity()
     );
     assert_eq!(
         host.peer_identity(&release),
-        crate::process_identity::own_process_identity()
+        super::process_identity::own_process_identity()
     );
     let probe = File::open("/")?;
     let listed = host.open_descriptors()?;

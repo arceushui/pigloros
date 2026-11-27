@@ -58,9 +58,6 @@ pub mod network_removal;
 // Public so that its crate-visible readers stay `pub(crate)` without Clippy's
 // `redundant_pub_crate`; it exports nothing.
 #[cfg(target_os = "linux")]
-#[doc(hidden)]
-pub mod process_identity;
-#[cfg(target_os = "linux")]
 mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod provider_installation;

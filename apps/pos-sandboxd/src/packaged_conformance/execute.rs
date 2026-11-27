@@ -8,8 +8,8 @@
 //! commitment ([`GuestProviderClient::commitment`]) and runs the exchange
 //! with the process `MAIN_PID` over the execute socket that SIC1 names. A
 //! provider that is still opening answers SPE1 `11`; each such answer is
-//! followed by another exchange while [`EXECUTE_WINDOW`] has not elapsed on the
-//! monotonic clock when it arrives. The window bounds when a refused exchange
+//! followed by another exchange while [`EXECUTE_WINDOW`], which starts just before the
+//! first exchange, has not elapsed on the monotonic clock when it arrives. The window bounds when a refused exchange
 //! is asked again, not the length of one exchange, which the case's own
 //! deadline bounds.
 //!
@@ -52,7 +52,8 @@ pub(super) const INPUT_FILE: &str = "input";
 /// The staged execution is the installation's case 0.
 const CASE_ORDINAL: u16 = 0;
 
-/// How long after the first exchange a provider that is still opening is asked again.
+/// How long, counted from just before the first exchange, a provider that is still opening is
+/// asked again.
 const EXECUTE_WINDOW: Duration = Duration::from_mins(2);
 
 /// One execute run's files and provider process, read from its arguments.

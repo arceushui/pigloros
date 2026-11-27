@@ -10,8 +10,8 @@ use std::{ffi::CString, fs::File, io, os::fd::OwnedFd};
 use pos_reference::sandbox_provider_protocol::FdIdentity;
 use rustix::fs::{open, Mode, OFlags};
 
+use super::process_identity::{own_process_identity, peer_process_identity};
 use super::{adapter::open_beneath, descriptors::scan_proc_self_fd, exec::replace_process_image};
-use crate::process_identity::{own_process_identity, peer_process_identity};
 
 const ROOT_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 
