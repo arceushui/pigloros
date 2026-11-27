@@ -15,8 +15,8 @@ const fn no_prf(shape: &mut ReplyShape) {
 fn enrollment_leaves_nothing(fixture: &Fixture) -> TestResult {
     assert!(fixture.names()?.is_empty());
     assert!(fixture.ledger_rows()?.is_empty());
-    assert!(fixture.staged().is_empty());
-    assert!(fixture.store.registrations().is_empty());
+    assert!(fixture.staged()?.is_empty());
+    assert!(fixture.store.registrations()?.is_empty());
     Ok(())
 }
 

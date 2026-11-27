@@ -210,8 +210,8 @@ fn an_enrollment_under_another_owner_subject_or_epoch_stages_nothing() -> TestRe
         assert_eq!(outcome, Err(REGISTRY_REFUSED), "{case}");
         assert!(fixture.names()?.is_empty(), "{case}");
         assert!(fixture.ledger_rows()?.is_empty(), "{case}");
-        assert!(fixture.staged().is_empty(), "{case}");
-        assert!(fixture.store.registrations().is_empty(), "{case}");
+        assert!(fixture.staged()?.is_empty(), "{case}");
+        assert!(fixture.store.registrations()?.is_empty(), "{case}");
     }
     // The adapter's own context enrolls: only the identity was refused.
     fixture.enroll(SUBJECT, page(SUBJECT))??;

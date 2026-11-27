@@ -2,7 +2,8 @@
 //! The #399 acceptance matrix (ADR-091 Migration step 3, ADR-110 E20 LE) end to
 //! end: `OwnerBridge::enroll` and `OwnerBridge::unlock` run over `FakeSurface`
 //! and the fixture signer, through the real enrollment and unlock adapters,
-//! the test-support store and a test directory under the E16 encryptor lock.
+//! the durable subject key staging store (an in-memory `SqliteStore` behind
+//! the adapter's store traits) and a test directory under the E16 encryptor lock.
 //! Each case lives in its own module; this root holds their shared fixture.
 //!
 //! Cargo discovers this directory's `main.rs` as a test target without a
@@ -12,6 +13,8 @@
 #![cfg(target_os = "linux")]
 
 mod already_bound;
+mod durable_store;
+mod durable_store_wrapper;
 mod missing_prf;
 mod persist_failure;
 mod rng_failure;
@@ -20,6 +23,7 @@ mod tampered_wrap;
 mod wrong_identity;
 mod wrong_prf;
 
+use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -27,13 +31,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pos_core::EntityId;
+use pos_core::{ids::TimelineId, EntityId};
 use pos_crypto::subject_key::{subject_owner_id, SubjectKeyWrapV1};
 use pos_crypto::subject_nonce_ledger::{
     SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, SubjectStoreFileIdV1,
 };
 use pos_owner_adapter::enrollment::{
-    EnrollmentStore, OwnerEnrollmentAdapter, SubjectKeyRegistration, VolatileEnrollmentStore,
+    EnrollmentStore, OwnerEnrollmentAdapter, SubjectKeyRegistration,
 };
 use pos_owner_adapter::unlock::{OwnerUnlockAdapter, SubjectKeyringEntry, UnlockStore};
 use pos_owner_bridge::encryptor_lock::linux::SubjectEncryptorLock;
@@ -49,6 +53,7 @@ use pos_owner_bridge::{
 use pos_owner_bridge_codec::{
     decode_subject_credential_binding, SubjectCredentialBindingV1, SubjectId,
 };
+use pos_store::sqlite::SqliteStore;
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
@@ -79,6 +84,9 @@ const FILE: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
     device: 7,
     inode: 9,
 };
+/// The SNL1 store-file encoding of [`FILE`]: a three-element array, the Linux
+/// tag, the device and the inode.
+const FILE_BYTES: [u8; 4] = [0x83, 0x01, 0x07, 0x09];
 const REGISTRY: OwnerError = OwnerError::new(OwnerErrorKind::Registry);
 const DURABLE_WRITE: OwnerError = OwnerError::new(OwnerErrorKind::DurableWrite);
 const REGISTRY_REFUSED: BridgeError = BridgeError::Owner(REGISTRY);
@@ -87,6 +95,18 @@ const WRITE_REFUSED: BridgeError = BridgeError::Owner(DURABLE_WRITE);
 const ALREADY_BOUND: BridgeError = BridgeError::Rejected(RejectedCode::CredentialAlreadyBound);
 const PRF_UNSUPPORTED: BridgeError = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// One registered identity: owner id, epoch and root fingerprint.
+type Registered = (String, u64, [u8; 32]);
+
+/// An in-memory `SqliteStore` that holds an empty P1 registry, bound to one
+/// store file identity and to the Timeline of each known subject.
+struct DurableEnrollmentStore {
+    store: SqliteStore,
+    file_id: SubjectStoreFileIdV1,
+    file_bytes: Vec<u8>,
+    timelines: BTreeMap<EntityId, TimelineId>,
+}
 
 /// A private test directory, removed when dropped.
 struct Sandbox(PathBuf);
@@ -116,6 +136,11 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 const fn entity(subject: SubjectId) -> EntityId {
     EntityId::from_ulid(Ulid::from_bytes(*subject.as_bytes()))
+}
+
+/// The Timeline that the durable store fences `subject` by.
+const fn timeline(subject: SubjectId) -> TimelineId {
+    TimelineId::from_ulid(Ulid::from_bytes(*subject.as_bytes()))
 }
 
 fn owner(subject: SubjectId) -> String {
@@ -234,9 +259,9 @@ enum Fail {
     Register,
 }
 
-/// The fixture's volatile store, with one P3 step made to fail.
+/// The fixture's durable store, with one P3 step made to fail.
 struct Faulty<'a> {
-    inner: &'a mut VolatileEnrollmentStore,
+    inner: &'a mut DurableEnrollmentStore,
     fail: Fail,
     blocker: PathBuf,
 }
@@ -278,10 +303,10 @@ impl EnrollmentStore for Faulty<'_> {
 }
 
 /// A held encryptor lock over a fresh test directory with an empty SNL1
-/// ledger, and the volatile store that enrollments register in.
+/// ledger, and the durable store that enrollments register in.
 struct Fixture {
     lock: SubjectEncryptorLock,
-    store: VolatileEnrollmentStore,
+    store: DurableEnrollmentStore,
     sandbox: Sandbox,
 }
 
@@ -296,7 +321,11 @@ impl Fixture {
         )?;
         Ok(Self {
             lock,
-            store: VolatileEnrollmentStore::new(FILE),
+            store: DurableEnrollmentStore::new(
+                FILE,
+                &FILE_BYTES,
+                [SUBJECT, OTHER].map(|subject| (entity(subject), timeline(subject))),
+            )?,
             sandbox,
         })
     }
@@ -351,19 +380,18 @@ impl Fixture {
     fn digest(&self, subject: SubjectId, epoch: u64) -> TestResult<[u8; 32]> {
         let owner_id = owner(subject);
         self.store
-            .registrations()
-            .iter()
-            .find(|registration| registration.owner_id == owner_id && registration.epoch == epoch)
-            .map(|registration| registration.root_material_digest)
+            .registrations()?
+            .into_iter()
+            .find(|(registered, registered_epoch, _)| {
+                *registered == owner_id && *registered_epoch == epoch
+            })
+            .map(|(_, _, digest)| digest)
             .ok_or_else(|| "no registration of that identity".into())
     }
 
     /// The staging records the store still holds.
-    fn staged(&self) -> Vec<(String, u64)> {
-        self.store
-            .staging_records()
-            .map(|(owner_id, epoch)| (owner_id.to_owned(), epoch))
-            .collect()
+    fn staged(&self) -> TestResult<Vec<(String, u64)>> {
+        Ok(self.store.staging_records()?)
     }
 
     /// The signature counter of the stored binding, zero if there is none.
