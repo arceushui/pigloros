@@ -19,8 +19,12 @@ mod memory_domain;
 mod metadata_authority;
 mod native_graph;
 mod observation;
+#[cfg(target_os = "linux")]
+mod pass_abort;
 mod pass_install;
 mod pass_planner;
+#[cfg(target_os = "linux")]
+mod pass_publish;
 #[cfg(target_os = "linux")]
 mod pass_record;
 #[cfg(target_os = "linux")]
@@ -71,6 +75,8 @@ pub use observation::{
     CommunityObservationMaterializationV1, CommunityObservationPassV1, CommunityObservationQuoteV1,
     CommunityObservationRecordsV1, CommunityObservationSourcesV1,
 };
+#[cfg(target_os = "linux")]
+pub use pass_abort::{CommunityPassAbortCallV1, CommunityPassAbortReceiptV1};
 pub use pass_install::{
     community_reservation_horizons_v1, community_reuse_horizon_v1,
     community_roster_quarantine_keys_v1, install_community_pass_profile_v1,
@@ -81,6 +87,8 @@ pub use pass_planner::{
     CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
     CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
 };
+#[cfg(target_os = "linux")]
+pub use pass_publish::{CommunityOriginalReserveV1, CommunityReservePublicationV1};
 #[cfg(target_os = "linux")]
 pub use pass_record::{
     CommunityPassCountsV1, CommunityPassMemberDigestsV1, CommunityPassStatusV1,

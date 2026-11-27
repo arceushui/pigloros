@@ -96,8 +96,10 @@ jobs:
     outputs:
       rust: ${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || steps.full.outputs.rust }}
       owner_windows: ${{ steps.owner_windows.outputs.owner_windows }}
+      owner_uhid: ${{ steps.owner_uhid.outputs.owner_uhid }}
       rust_packages: ${{ steps.rust_packages.outputs.rust_packages }}
       rust_doc_packages: ${{ steps.rust_packages.outputs.rust_doc_packages }}
+      conformance: ${{ steps.rust_packages.outputs.conformance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -180,6 +182,39 @@ jobs:
           printf 'Rust packages: %s\nDoctest packages: %s\n' "${packages}" "${doc_packages}"
           printf 'rust_packages=%s\n' "${packages}" >> "$GITHUB_OUTPUT"
           printf 'rust_doc_packages=%s\n' "${doc_packages}" >> "$GITHUB_OUTPUT"
+          if [[ " ${packages} " == *" -p pos-conformance "* || "${packages}" == --workspace ]]; then
+            printf 'conformance=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'conformance=false\n' >> "$GITHUB_OUTPUT"
+          fi
+      # The Linux owner U-tier (ADR-110 E20, Redmine #1476) is scoped the same
+      # way as the native Windows lane below: only an explicit 'false' from
+      # successful detection, with no truncated or renamed files, skips it.
+      - name: Resolve the owner U-tier scope
+        id: owner_uhid
+        env:
+          DETECTED: ${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.owner_uhid || '' }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scope=true
+          if [[ "${DETECTED}" = false ]]; then
+            if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then
+              echo '::warning::The changed-file list may be truncated; running the owner U-tier.'
+            elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo '::warning::The pull request number is unavailable; running the owner U-tier.'
+            elif ! renamed="$(gh api --method GET --paginate -f per_page=100 \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
+              --jq '.[] | select(.status == "renamed") | .filename')"; then
+              echo '::warning::Renamed files could not be listed; running the owner U-tier.'
+            elif [[ -n "${renamed}" ]]; then
+              echo 'A renamed file may move a lane input; running the owner U-tier.'
+            else
+              scope=false
+            fi
+          fi
+          printf 'owner_uhid=%s\n' "${scope}" >> "$GITHUB_OUTPUT"
       # Only an explicit 'false' from successful detection skips the native
       # Windows owner lane. paths-filter emits nothing for a key the base
       # revision's filter file lacks, and failed detection, non-pull-request
@@ -890,6 +925,18 @@ jobs:
     permissions:
       contents: read
 
+  # The Linux owner U-tier (ADR-110 E20 LG, Redmine #1476) runs a kernel uhid
+  # virtual FIDO device on a hosted runner, beside every other stage. Only
+  # cargo-crap (which merges its LCOV) and ci-gate depend on it. Pull requests
+  # run it only for Linux-owner changes; every other event always runs it.
+  owner-ctap-uhid:
+    name: owner-ctap-uhid
+    needs: [ci_change_scope]
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' && needs.ci_change_scope.outputs.owner_uhid == 'true' }}
+    uses: ./.github/workflows/owner-ctap-uhid.yml
+    permissions:
+      contents: read
+
   clippy:
     name: clippy
     needs: *preflight-stage-needs
@@ -1148,11 +1195,12 @@ jobs:
       - ci_change_scope
       - coverage
       - owner-bridge-windows
+      - owner-ctap-uhid
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
     # The native lane must succeed unless the trusted scope explicitly left it
     # out of this pull request.
-    if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.owner-ctap-uhid.result == 'success' || (needs.ci_change_scope.outputs.owner_uhid == 'false' && needs.owner-ctap-uhid.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     # Budget: the pre-steps (full-history checkout, install-action, LCOV
     # downloads), the resolver step's 45-minute bound on waiting for main's
@@ -1197,6 +1245,25 @@ jobs:
       - name: Use Linux coverage without the unmeasured native shim
         if: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' }}
         run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
+      # The owner U-tier observes the same pos-owner-ctap sources the Linux run
+      # does, so its executed-line counts are added to those records.
+      - name: Download owner U-tier LCOV
+        if: ${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: owner-uhid-lcov-${{ github.sha }}
+          path: ${{ runner.temp }}/owner-uhid-lcov
+      - name: Add owner U-tier coverage to this checkout's LCOV
+        if: ${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}
+        run: |
+          python scripts/merge_owner_uhid_lcov.py \
+            --linux "${{ runner.temp }}/cargo-crap-coverage.lcov" \
+            --uhid "${{ runner.temp }}/owner-uhid-lcov/owner-uhid.lcov" \
+            --receipt "${{ runner.temp }}/owner-uhid-lcov/owner-uhid-lcov-receipt.json" \
+            --workspace "${{ github.workspace }}" \
+            --checkout "${{ github.sha }}" \
+            --output "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov"
+          mv "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       # Polls up to 30 minutes while main's ci.yml run for the trusted base is
@@ -1230,10 +1297,24 @@ jobs:
           jq -e '.entries |= map(select(.file | gsub("\\\\"; "/") | test("(^|/)crates/pos-owner-bridge-windows/") | not))' \
             "${baseline}" > "${baseline}.scoped"
           mv "${baseline}.scoped" "${baseline}"
+      # Main always runs the owner U-tier, so the trusted baseline scores the
+      # pos-owner-ctap sources with its merged counters. A pull request that skips
+      # the lane scores them from the Linux LCOV alone, which would read as a
+      # regression at epsilon 0: hide those sources from the comparison, as for
+      # the native shim.
+      - name: Drop the unmeasured owner U-tier sources from the trusted baseline
+        if: ${{ steps.baseline.outputs.run-id != '' && needs.ci_change_scope.outputs.owner_uhid == 'false' }}
+        run: |
+          set -euo pipefail
+          baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"
+          jq -e '.entries |= map(select(.file | gsub("\\\\"; "/") | test("(^|/)crates/pos-owner-ctap/src/") | not))' \
+            "${baseline}" > "${baseline}.scoped"
+          mv "${baseline}.scoped" "${baseline}"
       - name: Generate trusted current baseline
         if: ${{ steps.baseline.outputs.bootstrap == 'true' }}
         env:
           NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
+          UHID_ALLOW: ${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && 'crates/pos-owner-ctap/**' || '' }}
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
@@ -1287,6 +1368,7 @@ jobs:
           --exclude 'src/executor/scenario_room/tests.rs'
           --exclude 'src/decision_preview/tests.rs'
           --exclude 'src/executor/decision_preview/tests.rs'
+          --exclude 'src/decision_preview/route/tests.rs'
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/local_erasure_composition/tests.rs'
           --exclude 'src/erasure/tests.rs'
@@ -1300,11 +1382,13 @@ jobs:
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
+          ${UHID_ALLOW:+--allow "${UHID_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
         env:
           NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
+          UHID_ALLOW: ${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && 'crates/pos-owner-ctap/**' || '' }}
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
@@ -1358,6 +1442,7 @@ jobs:
           --exclude 'src/executor/scenario_room/tests.rs'
           --exclude 'src/decision_preview/tests.rs'
           --exclude 'src/executor/decision_preview/tests.rs'
+          --exclude 'src/decision_preview/route/tests.rs'
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/local_erasure_composition/tests.rs'
           --exclude 'src/erasure/tests.rs'
@@ -1371,6 +1456,7 @@ jobs:
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
+          ${UHID_ALLOW:+--allow "${UHID_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
@@ -1494,9 +1580,9 @@ jobs:
   # ASan compilation took most of each ASan shard's time, so it runs once as a
   # standard-stage job. Crates compile in parallel while scripts/asan/
   # serial-link.sh admits one link at a time; the build fails unless the
-  # wrapper's lock file exists afterwards. The archive holds every
-  # workspace test binary; the shards below still run last and only execute
-  # tests from it.
+  # wrapper's lock file exists afterwards. The full archive holds the
+  # selected workspace test binaries; a filtered archive holds conformance
+  # binaries for their dedicated shards. The shards only execute archived tests.
   asan-build:
     name: asan build (nextest archive)
     needs: *core-stage-needs
@@ -1536,6 +1622,24 @@ jobs:
             --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \
             --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
           test -f "${RUNNER_TEMP}/asan-link.lock"
+      - name: cargo nextest archive for conformance shards
+        id: conformance-archive
+        if: ${{ needs.ci_change_scope.outputs.conformance == 'true' }}
+        env:
+          RUSTC_BOOTSTRAP: "1"
+          CARGO_BUILD_JOBS: "4"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/scripts/asan/serial-link.sh
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        run: |
+          set -euo pipefail
+          read -ra packages <<<"${CARGO_PACKAGES}"
+          RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly-2026-07-01 nextest archive "${packages[@]}" --all-features \
+            --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \
+            -E 'package(pos-conformance)' \
+            --archive-file "${RUNNER_TEMP}/asan-conformance-tests.tar.zst"
       - name: Upload ASan test archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1543,6 +1647,16 @@ jobs:
           path: ${{ runner.temp }}/asan-tests.tar.zst
           retention-days: 3
           if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+      - name: Upload conformance ASan test archive
+        if: ${{ steps.conformance-archive.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asan-conformance-nextest-archive
+          path: ${{ runner.temp }}/asan-conformance-tests.tar.zst
+          retention-days: 3
+          if-no-files-found: ignore
           overwrite: true
           compression-level: 0
 
@@ -1633,6 +1747,7 @@ jobs:
         shard:
           - remainder-1
           - remainder-2
+          - conformance-remainder
           - bundle-coverage
           - bundle-public-1
           - bundle-public-2
@@ -1660,6 +1775,7 @@ jobs:
       # a cleared directory follows; if it also fails, the shard fails.
       - name: Download ASan test archive
         id: download-asan-archive
+        if: ${{ matrix.shard == 'remainder-1' || matrix.shard == 'remainder-2' }}
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -1673,6 +1789,23 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: asan-nextest-archive
+          path: ${{ runner.temp }}/asan-archive
+      - name: Download conformance ASan test archive
+        id: download-conformance-archive
+        if: ${{ matrix.shard != 'remainder-1' && matrix.shard != 'remainder-2' && needs.ci_change_scope.outputs.conformance == 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: asan-conformance-nextest-archive
+          path: ${{ runner.temp }}/asan-archive
+      - name: Clear the failed conformance archive download
+        if: steps.download-conformance-archive.outcome == 'failure'
+        run: rm -rf -- "${RUNNER_TEMP}/asan-archive"
+      - name: Retry conformance ASan test archive download
+        if: steps.download-conformance-archive.outcome == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: asan-conformance-nextest-archive
           path: ${{ runner.temp }}/asan-archive
       - name: Prove unrelated leaks still fail LSan
         env:
@@ -1703,15 +1836,21 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
           CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
-        # The archive holds exactly the packages asan-build selected. A scoped
+          ASAN_CONFORMANCE: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.conformance || 'true' }}
+        # The archives hold the packages selected by asan-build; the
+        # conformance archive is filtered to pos-conformance. A scoped
         # selection may leave a partition without tests, and without
-        # pos-conformance the four conformance partitions have nothing to run.
+        # pos-conformance the five conformance shards have nothing to run.
         run: |
           set -euo pipefail
           test -x "/usr/bin/llvm-symbolizer-18"
+          archive_file="${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
+          if [[ "${ASAN_SHARD}" != remainder-1 && "${ASAN_SHARD}" != remainder-2 ]]; then
+            archive_file="${RUNNER_TEMP}/asan-archive/asan-conformance-tests.tar.zst"
+          fi
           nextest_args=(
             +nightly-2026-07-01 nextest run
-            --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
+            --archive-file "${archive_file}"
             --extract-to "${GITHUB_WORKSPACE}"
             --extract-overwrite
             --workspace-remap "${GITHUB_WORKSPACE}"
@@ -1721,12 +1860,9 @@ jobs:
             --no-output-indent
             --test-threads 2
           )
-          conformance=true
+          conformance="${ASAN_CONFORMANCE}"
           if [[ "${CARGO_PACKAGES}" != --workspace ]]; then
             nextest_args+=(--no-tests=pass)
-            if [[ " ${CARGO_PACKAGES} " != *" -p pos-conformance "* ]]; then
-              conformance=false
-            fi
           fi
           run_asan_partition() {
             ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
@@ -1761,12 +1897,14 @@ jobs:
             remainder-1)
               run_asan_partition -E 'not package(pos-conformance)' \
                 --partition slice:1/2
-              run_conformance_partition \
-                -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
               ;;
             remainder-2)
               run_asan_partition -E 'not package(pos-conformance)' \
                 --partition slice:2/2
+              ;;
+            conformance-remainder)
+              run_conformance_partition \
+                -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
               ;;
             *)
               printf 'unknown ASan shard: %s\n' "${ASAN_SHARD}" >&2
@@ -2374,6 +2512,7 @@ jobs:
       - mutation-checks
       - asan-gate
       - owner-bridge-windows
+      - owner-ctap-uhid
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -2390,6 +2529,8 @@ jobs:
           ASAN_RESULT: ${{ needs.asan-gate.result }}
           OWNER_WINDOWS_SCOPE: ${{ needs.ci_change_scope.outputs.owner_windows }}
           OWNER_WINDOWS_RESULT: ${{ needs.owner-bridge-windows.result }}
+          OWNER_UHID_SCOPE: ${{ needs.ci_change_scope.outputs.owner_uhid }}
+          OWNER_UHID_RESULT: ${{ needs.owner-ctap-uhid.result }}
         run: |
           set -euo pipefail
           failed=0
@@ -2436,6 +2577,18 @@ jobs:
           fi
           if [[ "${OWNER_WINDOWS_RESULT}" != "${expected_owner_windows}" ]]; then
             echo "OWNER_WINDOWS_RESULT=${OWNER_WINDOWS_RESULT}" >&2
+            failed=1
+          fi
+
+          # Every non-pull-request event runs the Linux owner U-tier; a pull
+          # request runs it for Rust-affecting Linux-owner changes.
+          expected_owner_uhid=skipped
+          if [[ "${EVENT_NAME}" != pull_request \
+            || ( "${RUST_SCOPE_RESULT}" = true && "${OWNER_UHID_SCOPE}" != false ) ]]; then
+            expected_owner_uhid=success
+          fi
+          if [[ "${OWNER_UHID_RESULT}" != "${expected_owner_uhid}" ]]; then
+            echo "OWNER_UHID_RESULT=${OWNER_UHID_RESULT}" >&2
             failed=1
           fi
 
