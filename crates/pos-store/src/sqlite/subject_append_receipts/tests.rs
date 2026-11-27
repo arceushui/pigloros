@@ -132,6 +132,31 @@ fn a_read_only_open_creates_nothing_and_a_missing_table_is_unreadable() -> TestR
 }
 
 #[test]
+fn a_read_only_open_answers_lookups_from_an_existing_table() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("receipts.sqlite3");
+    let path = path.to_str().ok_or("non-UTF-8 path")?;
+    raw_insert(&SqliteStore::open(path)?.conn, good_row(1))?;
+
+    let store = SqliteStore::open_read_only(path)?;
+    store.conn.execute_batch("BEGIN")?;
+    let event = EventId::from_ulid("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse::<Ulid>()?);
+    assert_eq!(
+        lookup_subject_append_receipt(&store.conn, &[1; 32], &[9; 32]),
+        Ok(SubjectAppendReceiptLookupV1::Duplicate(event))
+    );
+    assert_eq!(
+        lookup_subject_append_receipt(&store.conn, &[1; 32], &DIGEST_A),
+        Ok(SubjectAppendReceiptLookupV1::OperationConflict)
+    );
+    assert_eq!(
+        lookup_subject_append_receipt(&store.conn, &[2; 32], &[9; 32]),
+        Ok(SubjectAppendReceiptLookupV1::Absent)
+    );
+    Ok(())
+}
+
+#[test]
 fn a_writable_open_adds_the_table_to_a_store_without_it() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("receipts.sqlite3");
@@ -413,6 +438,21 @@ fn a_lookup_and_an_insert_refuse_a_connection_in_autocommit_mode() -> TestResult
         lookup_subject_append_receipt(&store.conn, &KEY_A, &DIGEST_A),
         Ok(SubjectAppendReceiptLookupV1::Absent)
     );
+    Ok(())
+}
+
+#[test]
+fn a_purge_is_maintenance_that_runs_in_its_own_transaction() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let store = open_store(directory.path())?;
+    raw_insert(&store.conn, good_row(1))?;
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        purge_expired_subject_append_receipts(&store.conn, WallTime::from_micros(8))?,
+        1,
+        "a purge needs no caller transaction"
+    );
+    assert_eq!(row_count(&store.conn)?, 0);
     Ok(())
 }
 

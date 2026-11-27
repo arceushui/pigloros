@@ -16,8 +16,8 @@
 //! Only a writable open creates and validates the table. A read-only open
 //! neither creates nor validates it: when the table is absent a lookup
 //! answers [`SubjectAppendReceiptRefusalV1::Unreadable`], but when the table
-//! exists a read-only open reads it unvalidated. The qualified owner
-//! constructor (#1438) must validate the table shape itself, and ungating in
+//! exists a lookup answers from it without validating its shape. The
+//! qualified owner constructor (#1438) must validate the table shape itself, and ungating in
 //! #1438 must remove both `cfg` gates (this module's and the writable-open
 //! call in `sqlite.rs`) together.
 
@@ -194,7 +194,9 @@ pub fn subject_append_request_digest(
 
 /// Look up the receipt for `operation_key` against the request's digest.
 ///
-/// Call it inside the caller's own `BEGIN IMMEDIATE`, after the B3 erasure
+/// The caller must hold `BEGIN IMMEDIATE`. Only "a transaction is open" is
+/// enforced here (`is_autocommit()` is false), so a deferred `BEGIN` or a
+/// `SAVEPOINT` also passes; the write lock is the caller's duty. Call it after the B3 erasure
 /// check and before either crypto callback (ADR-137 A2, A5 gate 5). It reads
 /// only. The digest comparison is constant-time.
 ///
@@ -214,6 +216,8 @@ pub fn lookup_subject_append_receipt(
 }
 
 /// Refuse a connection that is in autocommit mode: A2 needs the caller's transaction.
+///
+/// This proves a transaction exists, not that it is `BEGIN IMMEDIATE`.
 fn require_transaction(conn: &Connection) -> Result<(), SubjectAppendReceiptRefusalV1> {
     if conn.is_autocommit() {
         Err(SubjectAppendReceiptRefusalV1::NotInTransaction)
@@ -267,7 +271,9 @@ fn classify(
 
 /// Insert the receipt of a committed append, expiring after the retention horizon.
 ///
-/// Call it in the same `BEGIN IMMEDIATE` as the Event append. `admitted_at`
+/// The caller must hold `BEGIN IMMEDIATE` and call it in the same transaction
+/// as the Event append; only that a transaction is open is enforced (a
+/// deferred `BEGIN` or `SAVEPOINT` also passes). `admitted_at`
 /// is the store-owned admission clock reading; the clock governs retention
 /// only, never authority. An existing row for the operation key is never
 /// replaced.
@@ -315,6 +321,10 @@ fn insert_row(
 }
 
 /// Delete every receipt whose retention has ended at `now`, returning the count.
+///
+/// This is the asynchronous maintenance purge of ADR-137 A2, not part of the
+/// combined append: it runs in its own transaction (autocommit is fine) and
+/// takes no `require_transaction` guard, unlike lookup and insert.
 ///
 /// # Errors
 /// Returns [`SubjectAppendReceiptRefusalV1::Unreadable`] when the delete fails.
