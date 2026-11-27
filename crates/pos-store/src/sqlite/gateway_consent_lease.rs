@@ -42,7 +42,8 @@ use rustix::io::{self, Errno};
 
 use super::{sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 use crate::owner_store_interlock::{
-    open_coordination_directory, reserved_names, verify_lock_entry, CheckedNamespace, RESOLVE,
+    check_regular, open_coordination_directory, reserved_names, verify_lock_entry,
+    CheckedNamespace, OBSERVE, RESOLVE,
 };
 
 /// The L5 singleton table that holds the lease generation.
@@ -296,18 +297,23 @@ fn classify(error: Errno) -> GatewayConsentLeaseErrorV1 {
 
 /// Open the existing lease entry of the coordination child and lock it.
 ///
-/// The entry is locked first and then verified: it must be a private singly
-/// linked regular file that is still the entry of that name, so a swapped or
-/// unsafe entry refuses. A missing child or entry refuses; nothing is created
-/// or unlinked.
+/// The entry is first inspected through an `O_PATH | O_NOFOLLOW` handle, which
+/// must be a private singly linked regular file, so an unsafe entry refuses as
+/// unavailable even when another process holds its lock. It is then locked
+/// and verified to be the same object that is still the entry of that name,
+/// so a swapped entry refuses. A missing child or entry refuses; nothing is
+/// created or unlinked.
 fn lock_lease(namespace: &CheckedNamespace) -> io::Result<OwnedFd> {
     open_coordination_directory(&namespace.directory).and_then(|child| {
         let [_, name, _] = reserved_names(&namespace.main.stat);
-        fs::openat2(&child, &name, LOCK_FLAGS, Mode::empty(), RESOLVE).and_then(|descriptor| {
-            fs::flock(&descriptor, FlockOperation::NonBlockingLockExclusive)
-                .and_then(|()| verify_lock_entry(&child, &name, &descriptor))
-                .map(|()| descriptor)
-        })
+        fs::openat2(&child, &name, OBSERVE, Mode::empty(), RESOLVE)
+            .and_then(|inspected| check_regular(&inspected))
+            .and_then(|_| fs::openat2(&child, &name, LOCK_FLAGS, Mode::empty(), RESOLVE))
+            .and_then(|descriptor| {
+                fs::flock(&descriptor, FlockOperation::NonBlockingLockExclusive)
+                    .and_then(|()| verify_lock_entry(&child, &name, &descriptor))
+                    .map(|()| descriptor)
+            })
     })
 }
 

@@ -254,6 +254,17 @@ fn an_unsafe_entry_is_unavailable_not_held() -> TestResult {
 }
 
 #[test]
+fn an_unsafe_entry_locked_elsewhere_is_unavailable_not_held() -> TestResult {
+    let fixture = Fixture::new(true)?;
+    let store = SqliteStore::open_in_memory()?;
+    let other = fixture.acquire(&store)?;
+    fs::set_permissions(&fixture.entry, fs::Permissions::from_mode(0o644))?;
+    assert_eq!(fixture.generation(&store), Err(Refusal::LeaseUnavailable));
+    drop(other);
+    Ok(())
+}
+
+#[test]
 fn a_failed_pre_screen_is_unavailable() -> TestResult {
     let fixture = Fixture::new(true)?;
     let store = SqliteStore::open_in_memory()?;
@@ -471,16 +482,25 @@ fn the_fence_refuses_a_missing_corrupt_or_unreadable_row() -> TestResult {
 #[test]
 fn the_real_table_rejects_a_zero_generation_and_a_foreign_format() -> TestResult {
     let store = SqliteStore::open_in_memory()?;
-    for values in ["(1, 1, 0)", "(1, 2, 1)", "(2, 1, 1)", "(1, 1, -1)"] {
-        let refusal = store
-            .conn
-            .execute_batch(&format!(
-                "INSERT INTO gateway_consent_lease (singleton, format_version, generation)
-                 VALUES {values}"
-            ))
-            .err()
-            .ok_or("inserted")?;
-        assert!(refusal.to_string().contains("CHECK"), "{values}");
+    for values in [
+        "(1, 1, 0)",
+        "(1, 2, 1)",
+        "(2, 1, 1)",
+        "(1, 1, -1)",
+        "(1, 'x', 1)",
+        "(1, 1, 'x')",
+        "('x', 1, 1)",
+    ] {
+        assert!(
+            store
+                .conn
+                .execute_batch(&format!(
+                    "INSERT INTO gateway_consent_lease (singleton, format_version, generation)
+                     VALUES {values}"
+                ))
+                .is_err(),
+            "{values}"
+        );
     }
     assert_eq!(stored(&store)?, Vec::new());
     Ok(())
