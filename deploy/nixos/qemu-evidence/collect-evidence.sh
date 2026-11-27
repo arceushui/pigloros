@@ -257,7 +257,7 @@ execute_case() { # DIR EXPORT_DIRECTORY
   {
     ls -ln /var/lib/pigloros/sandbox/providers || true
     systemctl show 'pigloros-attempt-*.service' --all \
-      --property=Id,User,DynamicUser,ExecMainStatus,ExecMainCode,Result,ActiveState || true
+      --property=Id,User,DynamicUser,ExecMainStatus,ExecMainCode,Result,ActiveState,SystemCallFilter,SystemCallErrorNumber,SystemCallArchitectures,SystemCallLog,NoNewPrivileges,LockPersonality,MemoryDenyWriteExecute,RestrictNamespaces || true
   } >"$1/executable-diagnostics" 2>&1
   journalctl --boot --no-pager --output=short-monotonic _PID=1 \
     | { grep -F 'Deactivated successfully' || true; } \
