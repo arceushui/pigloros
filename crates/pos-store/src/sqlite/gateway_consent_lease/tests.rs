@@ -29,26 +29,42 @@ struct Fixture {
     entry: std::path::PathBuf,
 }
 
+fn private_directory() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+}
+
+fn create_main(directory: &Path) -> std::io::Result<()> {
+    let mut main = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(MAIN))?;
+    main.write_all(&MAIN_BYTES)
+}
+
+fn install_when(directory: &Path, installed: bool) -> TestResult {
+    if installed {
+        install_owner_store_namespace_v1(directory, MAIN)?;
+    }
+    Ok(())
+}
+
+fn lock_entry(directory: &Path, device: u64, inode: u64) -> std::path::PathBuf {
+    directory.join(CHILD).join(format!(
+        "gateway-consent-lease.v1.{device:016x}.{inode:016x}.lock"
+    ))
+}
+
 impl Fixture {
     fn new(installed: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        let directory = tempfile::Builder::new()
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()?;
-        let mut main = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(directory.path().join(MAIN))?;
-        main.write_all(&MAIN_BYTES)?;
-        drop(main);
-        if installed {
-            install_owner_store_namespace_v1(directory.path(), MAIN)?;
-        }
+        let directory = private_directory()?;
+        create_main(directory.path())?;
+        install_when(directory.path(), installed)?;
         let metadata = fs::metadata(directory.path().join(MAIN))?;
         let (device, inode) = (metadata.dev(), metadata.ino());
-        let entry = directory.path().join(CHILD).join(format!(
-            "gateway-consent-lease.v1.{device:016x}.{inode:016x}.lock"
-        ));
+        let entry = lock_entry(directory.path(), device, inode);
         Ok(Self {
             directory,
             identity: SubjectStoreFileIdV1::Linux { device, inode },
