@@ -37,6 +37,8 @@ const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition
 
 type TestResult = Fallible<()>;
 
+mod abort;
+
 /// The reservation identity of the first Reserve.
 const OPERATION: [u8; 16] = [0x30; 16];
 /// The reservation identity of the second Reserve.
