@@ -128,8 +128,8 @@ pub struct SubjectKeyStagingRecordV1 {
     pub store_file_id: Vec<u8>,
 }
 
-/// The registry role of the owner process's own signing identity.
-const OWNER_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
+/// The registry role that signs Timeline integrity records (ADR-137 D4 names no role for the owner's signing identity).
+const TIMELINE_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
 
 /// The `DestructionPending` requests that ADR-137 D4 resumes at owner start.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -626,7 +626,7 @@ impl SqliteStore {
                     subject_keys,
                     signing_keys: others
                         .into_iter()
-                        .filter(|request| request.identity.role == OWNER_SIGNING_ROLE)
+                        .filter(|request| request.identity.role == TIMELINE_SIGNING_ROLE)
                         .collect(),
                 }
             })
