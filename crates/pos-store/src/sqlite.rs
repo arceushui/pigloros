@@ -174,6 +174,8 @@ mod fork_replay_read;
 mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod gateway_consent_lease;
 mod gateway_mode_binding;
 mod gateway_revision;
 #[cfg(any(test, feature = "test-support"))]
@@ -2347,6 +2349,8 @@ impl SqliteStore {
                     // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_gateway_consent_lease_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
