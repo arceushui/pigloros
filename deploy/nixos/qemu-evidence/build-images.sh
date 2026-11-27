@@ -75,7 +75,7 @@ chmod 0755 "${work}/tree/adapter"
 # The hardening mounts (PrivateDevices, /proc and /sys remounts, the /work tmpfs) need their
 # mount points in the same read-only root, which systemd cannot create there either.
 mkdir -p "${work}/tree/dev" "${work}/tree/proc" "${work}/tree/sys" "${work}/tree/run" \
-  "${work}/tree/tmp" "${work}/tree/work"
+  "${work}/tree/tmp" "${work}/tree/var/tmp" "${work}/tree/work" "${work}/tree/home" "${work}/tree/root"
 mkdir -p "${work}/tree/.pigloros"
 : >"${work}/tree/.pigloros/release-launcher"
 chmod 0444 "${work}/tree/.pigloros/release-launcher"
