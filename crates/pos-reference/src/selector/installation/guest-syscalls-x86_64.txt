@@ -21,6 +21,7 @@ epoll_pwait
 epoll_wait
 eventfd2
 execve
+execveat
 exit
 exit_group
 faccessat
@@ -65,6 +66,7 @@ nanosleep
 newfstatat
 open
 openat
+openat2
 pidfd_open
 pipe
 pipe2
