@@ -23,6 +23,7 @@ use super::super::operator::tests::{
 };
 use super::{
     CommunityPassAbortFailureCallV1, CommunityPassAbortFailureV1, CommunityPassAbortScopeV1,
+    PreparedFailureV1, StagedFailureAbortV1,
 };
 use crate::community::pass_abort::failure::{
     derive_failure, CommunityObservedFailureV1 as Observed,
@@ -36,11 +37,12 @@ use crate::community::quarantine::{
 };
 use crate::community::vault::VaultKeyV1;
 use crate::community::{
-    CommunityDomainBindingV1, CommunityPassAbortReceiptV1, CommunityQuarantineContextV1,
+    CommunityDomainBindingV1, CommunityLifecycleAuthorityV1, CommunityMetadataAuthorityV1,
+    CommunityPassAbortReceiptV1, CommunityQuarantineContextV1, MemoryCommunityDomainV1,
 };
 use crate::community_initialization_fixture::{
-    hash, profile_until, target, Fallible, GENERATION, HORIZON, INCARNATION, INSTALLED_CATALOGUE,
-    NATIVE_PROFILE, NOW,
+    hash, metadata_authority, metadata_registry, profile_until, target, Fallible, GENERATION,
+    HORIZON, INCARNATION, INSTALLED_CATALOGUE, NATIVE_PROFILE, NOW,
 };
 
 /// The trust-root seal of the test composition.
@@ -246,6 +248,30 @@ fn run(
     input: Input<'_>,
     bytes: &ScopeBytes,
 ) -> Fallible<Result<CommunityPassAbortReceiptV1, Error>> {
+    with_call(
+        case,
+        input,
+        bytes,
+        |domain, context, authority, metadata, call| {
+            domain.abort_pass_failure(&SEAL, context, authority, metadata, call)
+        },
+    )
+}
+
+/// Run `run` with the installed composition and the call of `input` over
+/// `bytes`.
+fn with_call<T>(
+    case: &mut Case,
+    input: Input<'_>,
+    bytes: &ScopeBytes,
+    run: impl FnOnce(
+        &mut MemoryCommunityDomainV1,
+        CommunityQuarantineContextV1<'_>,
+        &mut CommunityLifecycleAuthorityV1,
+        &mut CommunityMetadataAuthorityV1,
+        CommunityPassAbortFailureCallV1<'_>,
+    ) -> T,
+) -> Fallible<T> {
     let rows = profile_rows(&case.roster, case.extra_plugin.as_ref())?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
     let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
@@ -259,8 +285,8 @@ fn run(
     };
     let failure = CommunityPassAbortFailureV1::new(&SEAL, input);
     let world = &mut case.domain.world;
-    Ok(world.domain.abort_pass_failure(
-        &SEAL,
+    Ok(run(
+        &mut world.domain,
         context,
         &mut world.authority,
         &mut case.domain.metadata,
@@ -889,5 +915,116 @@ fn the_failure_cohort_key_must_fit_the_pass() -> TestResult {
         Some(Error::InvalidBinding)
     );
     assert!(scene.unresolved());
+    Ok(())
+}
+
+/// Every authority failure is 12 with no effect: a denied metadata `write`.
+#[test]
+fn a_denied_metadata_write_gives_12_with_no_effect() -> TestResult {
+    let mut scene = Scene::new(true)?;
+    let mut denied = metadata_authority(&SEAL, metadata_registry(&SEAL)?, 0)?;
+    std::mem::swap(&mut scene.case.domain.metadata, &mut denied);
+    assert_eq!(
+        scene.trap_abort(MEMBER_ZERO, 0x71)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    std::mem::swap(&mut scene.case.domain.metadata, &mut denied);
+    assert!(scene.unresolved());
+    Ok(())
+}
+
+/// A pass record naming a roster row the CDP1 does not hold, and a pass
+/// whose metadata key is gone, each refuse with the pass unresolved and the
+/// cohort key back in the domain.
+#[test]
+fn a_pass_the_installed_profile_cannot_describe_refuses_the_abort() -> TestResult {
+    let mut scene = Scene::new(true)?;
+    scene
+        .case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?
+        .reserved
+        .members[1]
+        .roster_index = 9;
+    assert_eq!(
+        scene.trap_abort(MEMBER_ONE, 0x72)?.err(),
+        Some(Error::InvalidBinding)
+    );
+    assert!(scene.unresolved());
+    let mut keyless = Scene::new(true)?;
+    keyless.case.domain_mut().keys.remove(&PASS_KEY_ID);
+    assert_eq!(
+        keyless.trap_abort(MEMBER_ZERO, 0x71)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert!(keyless.unresolved());
+    Ok(())
+}
+
+/// The staged commit compares its premises again: a moved inventory
+/// generation (12), a metadata key that can no longer seal and an ARD1
+/// already catalogued each refuse it with the pass unresolved.
+#[test]
+fn a_staged_commit_that_cannot_proceed_changes_nothing() -> TestResult {
+    let failures = [trap(MEMBER_ZERO, 0x71)];
+    let staged = |scene: &mut Scene| -> Fallible<Box<StagedFailureAbortV1>> {
+        let prepared = with_call(
+            &mut scene.case,
+            input(Reason::ValidatedInvocationFailure, &failures),
+            &scene.bytes,
+            |domain, context, authority, metadata, call| {
+                domain.prepare_failure_abort(&SEAL, context, authority, metadata, call)
+            },
+        )??;
+        match prepared {
+            PreparedFailureV1::Staged(staged, ..) => Ok(staged),
+            PreparedFailureV1::Original(_) => Err("expected a first Abort".into()),
+        }
+    };
+    let mut moved = Scene::new(true)?;
+    let first = staged(&mut moved)?;
+    moved.case.domain_mut().inventory_generation += 1;
+    assert_eq!(
+        moved
+            .case
+            .domain_mut()
+            .commit_failure_abort(&SEAL, *first)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert!(moved.unresolved());
+    let mut closed = Scene::new(true)?;
+    let second = staged(&mut closed)?;
+    closed
+        .case
+        .domain_mut()
+        .keys
+        .get_mut(&PASS_KEY_ID)
+        .ok_or("no pass key")?
+        .close();
+    assert!(closed
+        .case
+        .domain_mut()
+        .commit_failure_abort(&SEAL, *second)
+        .is_err());
+    assert!(closed.unresolved());
+    let mut taken = Scene::new(true)?;
+    let third = staged(&mut taken)?;
+    taken
+        .case
+        .domain_mut()
+        .store
+        .commit_community_artifact_batch(&third.batch)?;
+    assert_eq!(
+        taken
+            .case
+            .domain_mut()
+            .commit_failure_abort(&SEAL, *third)
+            .err(),
+        Some(Error::Conflict)
+    );
+    assert!(taken.unresolved());
     Ok(())
 }

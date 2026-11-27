@@ -224,14 +224,14 @@ pub(super) fn derive_failure(
         .collect::<Result<Vec<_>, Error>>()?;
     let first = invocations.first().ok_or(Error::InvalidBinding)?;
     let digests: Vec<Hash> = invocations.iter().map(|record| record.digest).collect();
-    let record = CommunityPassFailureV1::new(CommunityPassFailureInputV1 {
+    CommunityPassFailureV1::new(CommunityPassFailureInputV1 {
         pass_key: Some(pass_key),
         invocation_evidence_digests: CommunityDigestListV1::from_digests(&digests),
         host_failure: first.host_failure,
         host_decision_provenance_digest: first.provenance,
         evidence_not_after_micros: horizon,
-    })?;
-    Ok(DerivedFailureV1 {
+    })
+    .map(|record| DerivedFailureV1 {
         invocations,
         failure: record.to_canonical_cbor(),
         failure_digest: record.digest(),

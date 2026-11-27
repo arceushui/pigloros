@@ -6,18 +6,17 @@
 //! bytes and digests.
 
 use pos_core::community_lifecycle::{
-    community_quarantine_reason_v1, community_recipient_identity_digest_v1,
-    CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityAuthorityEvidenceInputV1,
-    CommunityAuthorityEvidenceV1, CommunityClockBoundV1, CommunityCurrentViewInputV1,
-    CommunityCurrentViewV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationInputV1, CommunityMaterializationReferenceV1,
-    CommunityMaterializationV1, CommunityObjectBindingV1, CommunityPassFrontierV1,
-    CommunityPassKeyV1, CommunityProducerBindingV1, CommunityQuarantineControlInputV1,
-    CommunityQuarantineControlKindV1, CommunityQuarantineControlV1, CommunityQuarantineDeltaRowV1,
-    CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1, CommunityQuarantineOutcomeInputV1,
-    CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1,
-    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
-    CommunityQuarantineRevisionV1,
+    community_recipient_identity_digest_v1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
+    CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
+    CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyIntentV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationInputV1,
+    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityObjectBindingV1,
+    CommunityPassFrontierV1, CommunityPassKeyV1, CommunityProducerBindingV1,
+    CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
+    CommunityQuarantineControlV1, CommunityQuarantineDeltaRowV1, CommunityQuarantineDispositionV1,
+    CommunityQuarantineKeyV1, CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
+    CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1, CommunityQuarantineReasonsV1,
+    CommunityQuarantineRevisionInputV1, CommunityQuarantineRevisionV1,
 };
 use pos_core::{ArtifactChildEdgeV1, AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -189,98 +188,45 @@ impl MemoryCommunityDomainV1 {
         &self,
         facts: &QuarantineFactsV1<'_>,
         failed: &FailedMemberV1<'_>,
-        control_operation_id: [u8; 16],
+        (control_operation_id, reason): ([u8; 16], CommunityQuarantineReasonV1),
     ) -> Result<QuarantineApplyV1, Error> {
-        let reason = community_quarantine_reason_v1(failed.failure.host_failure)
-            .ok_or(Error::InvalidBinding)?;
-        let row = facts
+        facts
             .context
             .profile
             .as_input()
             .roster
             .get(failed.member.roster_index)
-            .ok_or(Error::InvalidBinding)?;
-        let key = || {
-            CommunityQuarantineKeyV1::new(facts.timeline, row.stable_entry(), row.implementation())
-        };
-        let digest = key()?.digest();
-        let current = self.quarantine_index.get(&digest);
-        let expected = current.map(|ledger| ledger.head);
-        let evidence = CommunityQuarantineReasonEvidenceV1 {
-            reason,
-            failure_evidence_digest: facts.failure_digest,
-        };
-        let (request_bytes, request_digest) =
-            set_reason_request(facts, failed, (key()?, control_operation_id, expected))?;
-        let mut reasons = current.map_or_else(Vec::new, |ledger| ledger.reasons.clone());
-        reasons.push(evidence);
-        reasons.sort_by_key(|row| row.reason.code());
-        let ordinal = current.map_or(0, |ledger| ledger.ordinal) + 1;
-        let horizon = current.map_or(facts.horizon, |ledger| {
-            ledger.evidence_not_after_micros.min(facts.horizon)
-        });
-        let revision = CommunityQuarantineRevisionV1::new(CommunityQuarantineRevisionInputV1 {
-            key: key()?,
-            ledger_ordinal: ordinal,
-            predecessor_ledger_digest: expected,
-            active_reasons: CommunityQuarantineReasonsV1::from_reasons(&reasons),
-            control_request_digest: request_digest,
-            evidence_not_after_micros: horizon,
-        })?;
-        let outcome = CommunityQuarantineOutcomeV1::new(CommunityQuarantineOutcomeInputV1 {
-            control_operation_id,
-            control_request_digest: request_digest,
-            prior_ledger_digest: expected,
-            selected_ledger_digest: revision.digest(),
-            disposition: CommunityQuarantineDispositionV1::Applied,
-            evidence_not_after_micros: horizon,
-        })?;
-        let outcome_bytes = outcome.to_canonical_cbor();
-        let revision_bytes = revision.to_canonical_cbor();
-        let head = revision.digest();
-        Ok(QuarantineApplyV1 {
-            key: digest,
-            control_operation_id,
-            request: request_bytes,
-            revision: revision_bytes,
-            outcome: outcome_bytes.clone(),
-            delta: CommunityQuarantineDeltaRowV1 {
-                quarantine_key_digest: digest,
-                ledger_digest: head,
-                outcome_digest: outcome.digest(),
-            },
-            ledger: QuarantineLedgerV1 {
-                head,
-                ordinal,
-                reasons,
-                evidence_not_after_micros: horizon,
-                states: ledger_states(
-                    current,
-                    reason.code(),
-                    QuarantineReasonStateV1 {
-                        evidence_not_after_micros: facts.horizon,
-                        share_spent: false,
-                    },
-                ),
-            },
-            bound: SetReasonBoundV1 {
-                key: digest,
-                expected_ledger: expected,
-                reason: reason.code(),
-                host_failure: failed.failure.host_failure,
-                trust_policy_snapshot_digest: failed.member.trust_policy_snapshot_digest,
-                expected_generation: facts.generation,
-                expected_head: facts.head,
-            },
-            receipt: CommunityQuarantineReceiptV1 {
-                timeline: facts.timeline,
-                control_operation_id,
-                request_digest,
-                selected_ledger_digest: head,
-                already_quarantined: false,
-                outcome: outcome_bytes,
-            },
-        })
+            .ok_or(Error::InvalidBinding)
+            .and_then(|row| {
+                CommunityQuarantineKeyV1::new(
+                    facts.timeline,
+                    row.stable_entry(),
+                    row.implementation(),
+                )
+            })
+            .and_then(|key| {
+                let digest = key.digest();
+                let current = self.quarantine_index.get(&digest);
+                let expected = current.map(|ledger| ledger.head);
+                set_reason_request(facts, failed, (key, control_operation_id, reason, expected))
+                    .and_then(|(request, request_digest)| {
+                        appended(
+                            facts,
+                            (key, current),
+                            (control_operation_id, reason),
+                            request_digest,
+                        )
+                        .map(|appended| {
+                            apply_of(
+                                (facts, failed),
+                                (digest, control_operation_id, reason),
+                                (request, request_digest),
+                                (appended, expected),
+                                current,
+                            )
+                        })
+                    })
+            })
     }
 
     /// The CAV1 of the failure Abort, read inside its guard (R15.1(5)):
@@ -296,23 +242,141 @@ impl MemoryCommunityDomainV1 {
         keys: &[&CommunityKeyIntentV1],
     ) -> Result<CommunityCurrentViewV1, Error> {
         let pass_key = record.reserved.reservation.pass_key;
-        let authority_row =
-            CommunityStoreDomainV1::authority_row(self, write.leaf_grant_id, &write.request)?;
-        let trust_rows = self.abort_trust_rows(context, lifecycle.trust_scope(), record)?;
-        let clock_latch = CommunityStoreDomainV1::clock_latch(self)?;
-        CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-            store_incarnation: self.store_incarnation,
-            timeline: pass_key.timeline(),
-            generation: pass_key.generation(),
-            inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
-            frontier: CommunityPassFrontierV1::Initial,
-            selected_head: None,
-            scope_rows: vec![],
-            authority_rows: vec![authority_row],
-            trust_rows,
-            key_rows: key_rows(keys),
-            clock_latch,
+        CommunityStoreDomainV1::authority_row(self, write.leaf_grant_id, &write.request)
+            .and_then(|authority_row| {
+                self.abort_trust_rows(context, lifecycle.trust_scope(), record)
+                    .map(|trust_rows| (authority_row, trust_rows))
+            })
+            .and_then(|(authority_row, trust_rows)| {
+                CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
+                    CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                        store_incarnation: self.store_incarnation,
+                        timeline: pass_key.timeline(),
+                        generation: pass_key.generation(),
+                        inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
+                        frontier: CommunityPassFrontierV1::Initial,
+                        selected_head: None,
+                        scope_rows: vec![],
+                        authority_rows: vec![authority_row],
+                        trust_rows,
+                        key_rows: key_rows(keys),
+                        clock_latch,
+                    })
+                })
+            })
+    }
+}
+
+/// The CQR1 and CQO1 that append a reason to a ledger, and the ledger.
+struct AppendedV1 {
+    revision: Zeroizing<Vec<u8>>,
+    head: Hash,
+    outcome: Zeroizing<Vec<u8>>,
+    outcome_digest: Hash,
+    ordinal: u64,
+    horizon: u64,
+    reasons: Vec<CommunityQuarantineReasonEvidenceV1>,
+}
+
+/// The CQR1 and CQO1 that append `reason` to the ledger `current` of `key`
+/// under the request `request_digest`, with the horizon `min(current ledger
+/// horizon, failure horizon)`.
+fn appended(
+    facts: &QuarantineFactsV1<'_>,
+    (key, current): (CommunityQuarantineKeyV1<'_>, Option<&QuarantineLedgerV1>),
+    (control_operation_id, reason): ([u8; 16], CommunityQuarantineReasonV1),
+    request_digest: Hash,
+) -> Result<AppendedV1, Error> {
+    let expected = current.map(|ledger| ledger.head);
+    let mut reasons = current.map_or_else(Vec::new, |ledger| ledger.reasons.clone());
+    reasons.push(CommunityQuarantineReasonEvidenceV1 {
+        reason,
+        failure_evidence_digest: facts.failure_digest,
+    });
+    reasons.sort_by_key(|row| row.reason.code());
+    let horizon = current.map_or(facts.horizon, |ledger| {
+        ledger.evidence_not_after_micros.min(facts.horizon)
+    });
+    let ordinal = current.map_or(0, |ledger| ledger.ordinal) + 1;
+    CommunityQuarantineRevisionV1::new(CommunityQuarantineRevisionInputV1 {
+        key,
+        ledger_ordinal: ordinal,
+        predecessor_ledger_digest: expected,
+        active_reasons: CommunityQuarantineReasonsV1::from_reasons(&reasons),
+        control_request_digest: request_digest,
+        evidence_not_after_micros: horizon,
+    })
+    .and_then(|revision| {
+        CommunityQuarantineOutcomeV1::new(CommunityQuarantineOutcomeInputV1 {
+            control_operation_id,
+            control_request_digest: request_digest,
+            prior_ledger_digest: expected,
+            selected_ledger_digest: revision.digest(),
+            disposition: CommunityQuarantineDispositionV1::Applied,
+            evidence_not_after_micros: horizon,
         })
+        .map(|outcome| AppendedV1 {
+            revision: revision.to_canonical_cbor(),
+            head: revision.digest(),
+            outcome: outcome.to_canonical_cbor(),
+            outcome_digest: outcome.digest(),
+            ordinal,
+            horizon,
+            reasons: reasons.clone(),
+        })
+    })
+}
+
+/// The staged in-Abort `SetReason` of one failure.
+fn apply_of(
+    (facts, failed): (&QuarantineFactsV1<'_>, &FailedMemberV1<'_>),
+    (key, control_operation_id, reason): (Hash, [u8; 16], CommunityQuarantineReasonV1),
+    (request, request_digest): (Zeroizing<Vec<u8>>, Hash),
+    (appended, expected): (AppendedV1, Option<Hash>),
+    current: Option<&QuarantineLedgerV1>,
+) -> QuarantineApplyV1 {
+    QuarantineApplyV1 {
+        key,
+        control_operation_id,
+        request,
+        revision: appended.revision,
+        outcome: appended.outcome.clone(),
+        delta: CommunityQuarantineDeltaRowV1 {
+            quarantine_key_digest: key,
+            ledger_digest: appended.head,
+            outcome_digest: appended.outcome_digest,
+        },
+        ledger: QuarantineLedgerV1 {
+            head: appended.head,
+            ordinal: appended.ordinal,
+            reasons: appended.reasons,
+            evidence_not_after_micros: appended.horizon,
+            states: ledger_states(
+                current,
+                reason.code(),
+                QuarantineReasonStateV1 {
+                    evidence_not_after_micros: facts.horizon,
+                    share_spent: false,
+                },
+            ),
+        },
+        bound: SetReasonBoundV1 {
+            key,
+            expected_ledger: expected,
+            reason: reason.code(),
+            host_failure: failed.failure.host_failure,
+            trust_policy_snapshot_digest: failed.member.trust_policy_snapshot_digest,
+            expected_generation: facts.generation,
+            expected_head: facts.head,
+        },
+        receipt: CommunityQuarantineReceiptV1 {
+            timeline: facts.timeline,
+            control_operation_id,
+            request_digest,
+            selected_ledger_digest: appended.head,
+            already_quarantined: false,
+            outcome: appended.outcome,
+        },
     }
 }
 
@@ -322,10 +386,13 @@ impl MemoryCommunityDomainV1 {
 fn set_reason_request(
     facts: &QuarantineFactsV1<'_>,
     failed: &FailedMemberV1<'_>,
-    (key, control_operation_id, expected): (CommunityQuarantineKeyV1<'_>, [u8; 16], Option<Hash>),
+    (key, control_operation_id, reason, expected): (
+        CommunityQuarantineKeyV1<'_>,
+        [u8; 16],
+        CommunityQuarantineReasonV1,
+        Option<Hash>,
+    ),
 ) -> Result<(Zeroizing<Vec<u8>>, Hash), Error> {
-    let reason =
-        community_quarantine_reason_v1(failed.failure.host_failure).ok_or(Error::InvalidBinding)?;
     let bound = [CommunityQuarantineReasonEvidenceV1 {
         reason,
         failure_evidence_digest: facts.failure_digest,

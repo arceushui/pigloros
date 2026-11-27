@@ -24,12 +24,12 @@
 mod records;
 
 use pos_core::community_lifecycle::{
-    community_catalogue_owner_v1, community_quarantine_delta_digest_v1, CommunityAbortReasonV1,
-    CommunityArtifactAdmissionV1, CommunityArtifactOperationV1, CommunityBudgetQuoteV1,
-    CommunityGenerationAdmissionV1, CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1,
-    CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityOriginalProvenanceV1,
-    CommunityOwnerBindingV1, CommunityQuarantineDeltaRowV1, CommunityScopeBindingV1,
-    CommunityScopeMembersV1,
+    community_catalogue_owner_v1, community_quarantine_delta_digest_v1,
+    community_quarantine_reason_v1, CommunityAbortReasonV1, CommunityArtifactAdmissionV1,
+    CommunityArtifactOperationV1, CommunityBudgetQuoteV1, CommunityGenerationAdmissionV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
+    CommunityMetadataScopeV1, CommunityOriginalProvenanceV1, CommunityOwnerBindingV1,
+    CommunityQuarantineDeltaRowV1, CommunityScopeBindingV1, CommunityScopeMembersV1,
 };
 use pos_core::trusted_clock::TrustedClockReservationV1;
 use pos_core::{
@@ -184,8 +184,10 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<PreparedFailureV1, Error> {
         let input = *call.failure.input();
         check_shape(&input)?;
-        let reservation = lifecycle.reserve_control(self)?;
-        let write = self.abort_metadata_write(context, metadata)?;
+        let (reservation, write) = lifecycle.reserve_control(self).and_then(|reservation| {
+            self.abort_metadata_write(context, metadata)
+                .map(|write| (reservation, write))
+        })?;
         check_authority(&input)?;
         let bound = reservation
             .decision_bound()
@@ -439,51 +441,58 @@ impl MemoryCommunityDomainV1 {
             .copied()
             .collect::<Option<Vec<_>>>()
             .ok_or(Error::EvidenceUnavailable)?;
-        let view = self.failure_view(
+        self.failure_view(
             facts.context,
             lifecycle,
             &facts.record,
             &facts.write,
             &intents,
-        )?;
-        let (evidence, evidence_digest) = failure_evidence(
-            &EvidenceFactsV1 {
-                store_incarnation: self.store_incarnation,
-                lifecycle,
-                record: &facts.record,
-                write: &facts.write,
-                clock: facts.clock,
-                abort_digest,
-                view_digest: view.digest(),
-                inventory_generation,
-            },
-            records,
-        )?;
-        let (admissions, mut materializations) = self.admit_failure_records(
-            seal,
-            facts,
-            records,
-            (abort_digest, evidence_digest, inventory_generation),
-        )?;
-        let mut plaintexts = vec![
-            (CommunityMetadataSchemaV1::Cab1, abort.clone()),
-            (CommunityMetadataSchemaV1::Cav1, view.to_canonical_cbor()),
-            (CommunityMetadataSchemaV1::Cau1, evidence),
-            (
-                CommunityMetadataSchemaV1::Cbq1,
-                Zeroizing::new(facts.scope.cbq1.to_vec()),
-            ),
-            (
-                CommunityMetadataSchemaV1::Csb1,
-                Zeroizing::new(facts.scope.csb1.to_vec()),
-            ),
-            (
-                CommunityMetadataSchemaV1::Cpv1,
-                Zeroizing::new(facts.scope.cpv1.to_vec()),
-            ),
-        ];
-        plaintexts.append(&mut materializations);
-        Ok((admissions, plaintexts))
+        )
+        .and_then(|view| {
+            failure_evidence(
+                &EvidenceFactsV1 {
+                    store_incarnation: self.store_incarnation,
+                    lifecycle,
+                    record: &facts.record,
+                    write: &facts.write,
+                    clock: facts.clock,
+                    abort_digest,
+                    view_digest: view.digest(),
+                    inventory_generation,
+                },
+                records,
+            )
+            .map(|(evidence, evidence_digest)| (view, evidence, evidence_digest))
+        })
+        .and_then(|(view, evidence, evidence_digest)| {
+            self.admit_failure_records(
+                seal,
+                facts,
+                records,
+                (abort_digest, evidence_digest, inventory_generation),
+            )
+            .map(|(admissions, mut materializations)| {
+                let mut plaintexts = vec![
+                    (CommunityMetadataSchemaV1::Cab1, abort.clone()),
+                    (CommunityMetadataSchemaV1::Cav1, view.to_canonical_cbor()),
+                    (CommunityMetadataSchemaV1::Cau1, evidence),
+                    (
+                        CommunityMetadataSchemaV1::Cbq1,
+                        Zeroizing::new(facts.scope.cbq1.to_vec()),
+                    ),
+                    (
+                        CommunityMetadataSchemaV1::Csb1,
+                        Zeroizing::new(facts.scope.csb1.to_vec()),
+                    ),
+                    (
+                        CommunityMetadataSchemaV1::Cpv1,
+                        Zeroizing::new(facts.scope.cpv1.to_vec()),
+                    ),
+                ];
+                plaintexts.append(&mut materializations);
+                (admissions, plaintexts)
+            })
+        })
     }
 
     /// The quarantine records, the CAB1, CAV1, CAU1, COA1s and CMI1s, and
@@ -495,16 +504,28 @@ impl MemoryCommunityDomainV1 {
         facts: &FailureFactsV1<'_>,
         (records, batch): (Vec<CommunityProtectedRecordV1>, CommunityArtifactBatchV1),
     ) -> Result<StagedFailureAbortV1, Error> {
-        let reservation = facts.record.reserved.reservation;
         let quarantine = self.quarantine_applies(facts)?;
-        let delta = quarantine_delta(&quarantine)?;
-        let (abort, abort_digest) = abort_record(&AbortFieldsV1 {
-            reservation,
-            sealed_result_digest: facts.record.sealed_result_digest,
-            reason: facts.input.reason,
-            failure_evidence_digest: Some(facts.derived.failure_digest),
-            quarantine_delta_digest: delta,
-        })?;
+        failure_abort_record(facts, &quarantine).and_then(|abort| {
+            self.finish_failure_records(
+                seal,
+                lifecycle,
+                facts,
+                (records, batch),
+                (quarantine, abort),
+            )
+        })
+    }
+
+    /// The staged commit around the CAB1, once the quarantine records exist.
+    fn finish_failure_records(
+        &self,
+        seal: &'static AuthorityTrustRootSealV1,
+        lifecycle: &CommunityLifecycleAuthorityV1,
+        facts: &FailureFactsV1<'_>,
+        (records, batch): (Vec<CommunityProtectedRecordV1>, CommunityArtifactBatchV1),
+        (quarantine, (abort, abort_digest)): (Vec<QuarantineApplyV1>, (Zeroizing<Vec<u8>>, Hash)),
+    ) -> Result<StagedFailureAbortV1, Error> {
+        let reservation = facts.record.reserved.reservation;
         let metadata_key = facts.record.reserved.metadata_key;
         let cohort_key = facts.record.reserved.failure_cohort_key;
         let inventory_generation = CommunityStoreDomainV1::inventory_generation(self);
@@ -608,6 +629,23 @@ fn check_scope(
     }
 }
 
+/// The CAB1 of the failure Abort: its CFO1 and the delta of its in-Abort
+/// `SetReason`s.
+fn failure_abort_record(
+    facts: &FailureFactsV1<'_>,
+    applies: &[QuarantineApplyV1],
+) -> Result<(Zeroizing<Vec<u8>>, Hash), Error> {
+    quarantine_delta(applies).and_then(|delta| {
+        abort_record(&AbortFieldsV1 {
+            reservation: facts.record.reserved.reservation,
+            sealed_result_digest: facts.record.sealed_result_digest,
+            reason: facts.input.reason,
+            failure_evidence_digest: Some(facts.derived.failure_digest),
+            quarantine_delta_digest: delta,
+        })
+    })
+}
+
 /// The CAB1 `quarantine_delta_digest`: the sorted rows of the in-Abort
 /// `SetReason`s, or none.
 fn quarantine_delta(applies: &[QuarantineApplyV1]) -> Result<Option<Hash>, Error> {
@@ -646,9 +684,10 @@ impl MemoryCommunityDomainV1 {
             .filter_map(|(failure, invocation)| {
                 failure
                     .control_operation_id
-                    .map(|id| (failure, invocation, id))
+                    .zip(community_quarantine_reason_v1(failure.host_failure))
+                    .map(|mapped| (failure, invocation, mapped))
             })
-            .map(|(failure, invocation, id)| {
+            .map(|(failure, invocation, mapped)| {
                 facts
                     .record
                     .reserved
@@ -664,7 +703,7 @@ impl MemoryCommunityDomainV1 {
                                 member,
                                 provenance: invocation.provenance,
                             },
-                            id,
+                            mapped,
                         )
                     })
             })
@@ -681,23 +720,25 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<AdmittedRecordsV1, Error> {
         let pass_key = facts.record.reserved.reservation.pass_key;
         let coordinates = (pass_key.timeline(), pass_key.generation());
-        let mut admissions = Vec::with_capacity(records.len());
-        let mut plaintexts = Vec::with_capacity(records.len());
-        for (record, name) in records.iter().zip(named_records(&facts.derived)) {
-            let admission = record.admission(seal, inventory_generation, evidence_digest)?;
-            plaintexts.push((
-                CommunityMetadataSchemaV1::Cmi1,
-                materialization(
-                    self.store_incarnation,
-                    coordinates,
-                    abort_digest,
-                    &name,
-                    (record, admission.digest()),
-                )?,
-            ));
-            admissions.push(admission);
-        }
-        Ok((admissions, plaintexts))
+        records
+            .iter()
+            .zip(named_records(&facts.derived))
+            .map(|(record, name)| {
+                record
+                    .admission(seal, inventory_generation, evidence_digest)
+                    .and_then(|admission| {
+                        materialization(
+                            self.store_incarnation,
+                            coordinates,
+                            abort_digest,
+                            &name,
+                            (record, admission.digest()),
+                        )
+                        .map(|record| (admission, (CommunityMetadataSchemaV1::Cmi1, record)))
+                    })
+            })
+            .collect::<Result<Vec<_>, Error>>()
+            .map(|rows| rows.into_iter().unzip())
     }
 
     /// The atomic failure Abort commit (R15.1(8)): the inventory generation

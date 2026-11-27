@@ -261,6 +261,8 @@ fn every_record_is_of_the_pass_under_its_cover() -> TestResult {
         prepare(&key, &[&text], good()?).err(),
         Some(Error::InvalidEncoding)
     );
+    let truncated = protect(&mut key, b"\x00\x00CFO1", &[])?;
+    assert!(prepare(&key, &[&truncated], good()?).is_err());
     let mut state = state_protector()?;
     let content = state.protect(
         Kind::StateContent,
