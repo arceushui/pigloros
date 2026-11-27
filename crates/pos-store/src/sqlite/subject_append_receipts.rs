@@ -360,10 +360,6 @@ fn read_key_flags() -> i32 {
         .bitor(libc::O_CLOEXEC)
         .bitor(libc::O_NONBLOCK)
 }
-/// `open(2)` flags for creating the key file: no symlinks, no inheritance.
-fn create_key_flags() -> i32 {
-    libc::O_NOFOLLOW.bitor(libc::O_CLOEXEC)
-}
 
 type Entropy = fn(&mut [u8]) -> Result<(), ()>;
 type KeyReader = fn(&Path, u32, &mut [u8; 32]) -> io::Result<()>;
@@ -511,11 +507,12 @@ fn create_key_file(
     (io.fill)(key)
         .ok()
         .and_then(|()| {
+            // `create_new` is `O_CREAT | O_EXCL`, which already refuses a symlink
+            // at the last component, and std opens with `O_CLOEXEC`.
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .custom_flags(create_key_flags())
                 .open(path)
                 .ok()
         })
