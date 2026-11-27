@@ -464,6 +464,24 @@ impl SqliteStore {
             })
     }
 
+    /// Like [`Self::require_pending_destruction`], but a request whose
+    /// tombstone is already committed also passes, so a repeated finalization
+    /// reaches the registry's `AlreadyDestroyed` outcome.
+    fn require_pending_or_destroyed(
+        &self,
+        request: &KeyDestructionRequestV1,
+    ) -> Result<(), CoreError> {
+        let destroyed = self
+            .load_key_registry()
+            .map_err(sealed)?
+            .is_some_and(|registry| registry.tombstone(request.identity).is_some());
+        if destroyed {
+            Ok(())
+        } else {
+            self.require_pending_destruction(request)
+        }
+    }
+
     /// Run one receipt write inside its own `BEGIN IMMEDIATE`.
     ///
     /// The write runs only for a `SubjectDataEncryption` request that the
@@ -591,9 +609,9 @@ impl SqliteStore {
     /// # Errors
     /// Fails closed, with a fixed message, when the request is not a
     /// `SubjectDataEncryption` request, when a receipt is missing or not
-    /// confirmed, when a kind mixes absent and present rows, or when the
-    /// registry transition refuses. Nothing is
-    /// committed on error.
+    /// confirmed, when a kind mixes absent and present rows, when the
+    /// registry holds the request as neither pending nor destroyed, or when
+    /// the registry transition fails. Nothing is committed on error.
     pub fn complete_subject_key_destruction_with_receipts(
         &mut self,
         request: KeyDestructionRequestV1,
@@ -603,6 +621,7 @@ impl SqliteStore {
         let result = self
             .validate_erasure_inventory_data_version()
             .map_err(sealed)
+            .and_then(|()| self.require_pending_or_destroyed(&request))
             .and_then(|()| read_request_rows(&self.conn, &request))
             .and_then(|rows| require_complete(&rows))
             .and_then(|()| {

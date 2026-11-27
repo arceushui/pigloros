@@ -735,7 +735,7 @@ fn a_failed_commit_never_leaks_sqlite_text() -> TestResult {
 }
 
 #[test]
-fn a_refused_registry_transition_never_leaks_registry_text() -> TestResult {
+fn finalization_of_a_request_the_registry_does_not_hold_pending_says_so() -> TestResult {
     let mut store = SqliteStore::open_in_memory()?;
     let request = request_of(encryption_identity(1), 7);
     registered(&mut store, &request)?;
@@ -751,10 +751,11 @@ fn a_refused_registry_transition_never_leaks_registry_text() -> TestResult {
         values[6] = Value::Blob(vec![2; 32]);
         insert_values(&store.conn, &values)?;
     }
-    assert_sealed(
+    refused(
         store.complete_subject_key_destruction_with_receipts(request),
-        &["ledger key destruction"],
-    )
+        "is not pending",
+    );
+    Ok(())
 }
 
 #[test]
