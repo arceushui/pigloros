@@ -29,17 +29,48 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// final step replaces its own image and creates no process.
 const LAUNCHER_EXEC: &str = "launcher/exec.rs";
 
-/// Tokens that include another file's bytes or source. Provider code could hide a forbidden call in
-/// an unscanned file this way, so only the files below (test vectors and test-support fixtures,
-/// never process creation) may use them.
-const INCLUDE_TOKENS: [&str; 2] = ["include!(", "include_bytes!("];
-const INCLUDE_ALLOWED: [&str; 5] = [
-    "pos-reference/src/lib.rs",
-    "pos-reference/src/root_selector.rs",
-    "pos-reference/src/selector/installation.rs",
-    "pos-reference/src/selector/installation/fixture.rs",
-    "pos-sandboxd/src/test_fixtures.rs",
+/// Tokens that include another file's bytes, text or source. Provider code could hide a forbidden
+/// call in an unscanned file this way, so every use is checked against [`INCLUDES`].
+const INCLUDE_TOKENS: [&str; 3] = ["include!(", "include_bytes!(", "include_str!("];
+
+/// The files that include another file, with the exact paths each may include. The included Rust
+/// support files are scanned for the forbidden tokens too (see `SUPPORT_ROOTS`), so an include of
+/// a new support file, or of a path not listed here, fails this test and needs a review. Data
+/// (test vectors and the guest syscall names) cannot create a process.
+const INCLUDES: [(&str, &[&str]); 5] = [
+    (
+        "pos-reference/src/lib.rs",
+        &[
+            "/tests/support/mod.rs",
+            "/tests/support/sandbox_admission_fixture.rs",
+        ],
+    ),
+    ("pos-reference/src/root_selector.rs", &["tests/vectors/"]),
+    (
+        "pos-reference/src/selector/installation.rs",
+        &["tests/vectors/"],
+    ),
+    (
+        "pos-reference/src/selector/installation/fixture.rs",
+        &["tests/vectors/", "guest-syscalls-"],
+    ),
+    (
+        "pos-sandboxd/src/test_fixtures.rs",
+        &[
+            "/tests/support/staged_execution.rs",
+            "/tests/support/attempt_directory.rs",
+            "pos-conformance/vectors/",
+        ],
+    ),
 ];
+
+/// The directories of the Rust support files that the sources include. They are scanned whole.
+const SUPPORT_ROOTS: [&str; 2] = ["../../crates/pos-reference/tests/support", "tests/support"];
+
+/// The one place a support file starts a process: the privileged test fixture re-runs its own test
+/// binary through `scripts/run-isolated-test.sh` (test-only, `attempt_directory.rs`).
+const SUPPORT_EXEMPT_FILE: &str = "attempt_directory.rs";
+const SUPPORT_EXEMPT_LINES: [&str; 2] = ["process::Command,", "Command::new(runner)"];
 
 /// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
 /// unchecked system-bus address (`unixexec` and `ibus` start processes), and
@@ -203,18 +234,87 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
                     number + 1
                 );
             }
-            let may_include = INCLUDE_ALLOWED
-                .iter()
-                .any(|allowed| path.ends_with(allowed));
-            for token in INCLUDE_TOKENS {
+        }
+        let lines = production_lines(path)?;
+        let allowed: &[&str] = INCLUDES
+            .iter()
+            .find(|(file, _)| path.ends_with(file))
+            .map_or(&[], |(_, allowed)| *allowed);
+        assert_includes_are_listed(path, &lines, |window| {
+            allowed.iter().any(|fragment| window.contains(fragment))
+        });
+    }
+    Ok(())
+}
+
+/// Every include token in `lines` has, in the macro call that follows it, a path that `listed`
+/// accepts.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_includes_are_listed(path: &Path, lines: &[String], listed: impl Fn(&str) -> bool) {
+    for (number, line) in lines.iter().enumerate() {
+        for token in INCLUDE_TOKENS {
+            if line.contains(token) {
+                let window = lines[number..lines.len().min(number + 4)].join("\n");
                 assert!(
-                    may_include || !line.contains(token),
-                    "{}:{}: `{token}` in provider production code",
+                    listed(&window),
+                    "{}:{}: `{token}` of an unlisted path in provider code",
                     path.display(),
                     number + 1
                 );
             }
         }
+    }
+}
+
+/// The Rust support files that the sources include hold no process creation either, apart from
+/// the one exempt site, and include only test vectors or each other.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn included_support_files_never_create_a_local_process() -> TestResult {
+    let mut sources = Vec::new();
+    let mut siblings = Vec::new();
+    for root in SUPPORT_ROOTS {
+        rust_sources(&manifest_root().join(root), &mut sources)?;
+    }
+    for path in &sources {
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            siblings.push(name.to_owned());
+        }
+    }
+    for needed in [
+        "mod.rs",
+        "sandbox_admission_fixture.rs",
+        SUPPORT_EXEMPT_FILE,
+    ] {
+        assert!(
+            siblings.iter().any(|name| name == needed),
+            "the support scan must include {needed}"
+        );
+    }
+    for path in &sources {
+        let text = fs::read_to_string(path)?;
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        for (number, line) in lines.iter().enumerate() {
+            let exempt = path.ends_with(SUPPORT_EXEMPT_FILE)
+                && SUPPORT_EXEMPT_LINES
+                    .iter()
+                    .any(|allowed| line.contains(allowed));
+            for token in FORBIDDEN {
+                assert!(
+                    exempt || !line.contains(token),
+                    "{}:{}: `{token}` in an included support file",
+                    path.display(),
+                    number + 1
+                );
+            }
+        }
+        assert_includes_are_listed(path, &lines, |window| {
+            window.contains("\"../vectors/")
+                || window.contains("\"../../../../fixtures/conformance/")
+                || siblings
+                    .iter()
+                    .any(|name| window.contains(&format!("\"{name}\"")))
+        });
     }
     Ok(())
 }
