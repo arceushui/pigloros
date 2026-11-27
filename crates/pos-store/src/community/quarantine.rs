@@ -38,13 +38,14 @@
 //!    allocated and no CSI1 row changes.
 
 mod evidence;
+mod reset;
 
 use std::collections::BTreeMap;
 
 use pos_conformance::{PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1};
 use pos_core::community_lifecycle::{
     community_catalogue_owner_v1, community_decision_provenance_digest_v1,
-    community_quarantine_reason_v1, CommunityArtifactAdmissionV1,
+    community_quarantine_reason_v1, ArtifactRefV1, CommunityArtifactAdmissionV1,
     CommunityDecisionProvenanceInputV1, CommunityDigestListV1, CommunityDurableProfileV1,
     CommunityGenerationAdmissionV1, CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1,
     CommunityMetadataAnchorV1, CommunityOwnerBindingV1, CommunityPassFailureInputV1,
@@ -75,6 +76,7 @@ use crate::plugin_trust_registry::{
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
 };
 use evidence::StagedEvidenceV1;
+pub use reset::CommunityQuarantineResetCallV1;
 
 /// The trust evidence the store re-evaluates on its own registry
 /// (R9.9(7) erratum): the same inputs `evaluate_current_release` takes.
@@ -235,6 +237,23 @@ pub(super) struct SetReasonBoundV1 {
     pub(super) expected_head: Hash,
 }
 
+/// The bound content of one `AuthenticatedReset` (annex "Reset authority
+/// and compare-and-swap"): the CQK1, every compared premise, the opaque
+/// principal and authorization refs and the authorization deadline.
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct ResetBoundV1 {
+    pub(super) key: Hash,
+    pub(super) expected_ledger: Hash,
+    /// The complete expected active set, by reason code and CFO1 digest.
+    pub(super) reasons: Vec<(u8, Hash)>,
+    pub(super) expected_generation: [u8; 16],
+    pub(super) expected_head: Hash,
+    pub(super) trust_snapshot_digest: Hash,
+    pub(super) principal_ref: ArtifactRefV1,
+    pub(super) authorization_ref: ArtifactRefV1,
+    pub(super) authorization_not_after_micros: u64,
+}
+
 /// One CQK1's current ledger head in the domain-private quarantine index
 /// (R8.6(2)), updated only in the CQR1/CQO1 transaction.
 #[derive(Clone)]
@@ -268,23 +287,71 @@ pub(super) fn ledger_states(
     states
 }
 
-/// One committed `SetReason`, retained for its retry (A5.3(5)).
-pub(super) struct CommittedQuarantineControlV1 {
-    pub(super) bound: SetReasonBoundV1,
-    /// The generation whose catalogue owner owns the CFO1's ARD1.
-    pub(super) generation: [u8; 16],
+/// The sealed metadata records of one `SetReason`.
+pub(super) struct SealedControlV1 {
     /// The protection ID of the metadata key that sealed `records`.
     pub(super) metadata_key: [u8; 16],
     /// Every sealed metadata record; the last is the CQO1.
     pub(super) records: Vec<SealedMetadataV1>,
+}
+
+/// One committed `SetReason`, retained for its retry (A5.3(5)).
+pub(super) struct RetainedSetReasonV1 {
+    pub(super) bound: SetReasonBoundV1,
+    /// The generation whose catalogue owner owns the CFO1's ARD1.
+    pub(super) generation: [u8; 16],
+    pub(super) sealed: SealedControlV1,
     /// The CFO1's COA1, absent when the reason was already active.
     pub(super) admission: Option<CommunityArtifactAdmissionV1>,
+}
+
+/// What a committed control retains for its retry, by operation kind: the
+/// key `(T, control_operation_id)` fixes the rest. A reset keeps its bound
+/// content only, since its records are R15-6's.
+pub(super) enum RetainedControlV1 {
+    /// A `SetReason`, in or out of a failure Abort.
+    SetReason(RetainedSetReasonV1),
+    /// An `AuthenticatedReset`.
+    Reset(ResetBoundV1),
+}
+
+/// One committed control, retained for its retry (A5.3(5)).
+pub(super) struct CommittedQuarantineControlV1 {
+    pub(super) kind: RetainedControlV1,
     pub(super) receipt: CommunityQuarantineReceiptV1,
+}
+
+#[cfg(test)]
+impl CommittedQuarantineControlV1 {
+    /// The retained `SetReason`, if this is one.
+    pub(super) const fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
+        match &self.kind {
+            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::Reset(_) => None,
+        }
+    }
+
+    /// The retained `SetReason`, mutably, if this is one.
+    pub(super) const fn set_reason_mut(&mut self) -> Option<&mut RetainedSetReasonV1> {
+        match &mut self.kind {
+            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::Reset(_) => None,
+        }
+    }
 }
 
 /// The validated CMA1 anchor `(T, G)`, the current CSI1 plaintext and its
 /// CNE1 address.
 type SelectionReadV1 = ((TimelineId, [u8; 16]), Zeroizing<Vec<u8>>, Hash);
+
+/// The roster member a control names: its Timeline, stable entry, IMK1 and
+/// the PMF1 digest of the release it is admitted with.
+pub(super) struct MemberRefV1<'a> {
+    pub(super) timeline: TimelineId,
+    pub(super) stable_entry: &'a str,
+    pub(super) implementation: &'a ImplementationKeyV1,
+    pub(super) pmf1_digest: [u8; 32],
+}
 
 /// The member a `SetReason` names, found in T's current generation.
 pub(super) struct MemberV1 {
@@ -446,12 +513,9 @@ impl MemoryCommunityDomainV1 {
             .quarantine_controls
             .get(&(failure.timeline, call.control_operation_id))
         {
-            return if original.bound == bound {
-                self.resolve_original(original)
-                    .map(SetReasonPreparedV1::Original)
-            } else {
-                Err(Error::Conflict)
-            };
+            return self
+                .retry_set_reason(original, &bound)
+                .map(SetReasonPreparedV1::Original);
         }
         let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
         let authority = write.with_trust(trust_snapshot_digest);
@@ -520,14 +584,29 @@ impl MemoryCommunityDomainV1 {
             .ok_or(Error::EvidenceUnavailable)
     }
 
+    /// A retry of a `SetReason`: the original outcome for identical bound
+    /// content, otherwise 4.
+    fn retry_set_reason(
+        &self,
+        original: &CommittedQuarantineControlV1,
+        bound: &SetReasonBoundV1,
+    ) -> Result<CommunityQuarantineReceiptV1, Error> {
+        match &original.kind {
+            RetainedControlV1::SetReason(held) if held.bound == *bound => {
+                self.resolve_original(held, &original.receipt)
+            }
+            _ => Err(Error::Conflict),
+        }
+    }
+
     /// A retry's original outcome: its retained CQO1 must still open under
     /// its metadata key as the receipt's, and the CFO1's ARD1, when one was
     /// published, must still resolve.
     fn resolve_original(
         &self,
-        original: &CommittedQuarantineControlV1,
+        original: &RetainedSetReasonV1,
+        receipt: &CommunityQuarantineReceiptV1,
     ) -> Result<CommunityQuarantineReceiptV1, Error> {
-        let receipt = &original.receipt;
         let published = original.admission.as_ref().is_none_or(|admission| {
             community_catalogue_owner_v1(receipt.timeline, original.generation).is_ok_and(|owner| {
                 matches!(
@@ -541,8 +620,8 @@ impl MemoryCommunityDomainV1 {
             })
         });
         self.keys
-            .get(&original.metadata_key)
-            .zip(original.records.last())
+            .get(&original.sealed.metadata_key)
+            .zip(original.sealed.records.last())
             .and_then(|(key, sealed)| key.open(sealed).ok())
             .filter(|outcome| published && outcome.as_slice() == receipt.outcome())
             .map(|_| receipt.clone())
@@ -604,22 +683,40 @@ impl MemoryCommunityDomainV1 {
         call: &CommunitySetReasonCallV1<'_>,
     ) -> Result<MemberV1, Error> {
         let failure = &call.failure.0;
+        self.member_at(
+            context,
+            &MemberRefV1 {
+                timeline: failure.timeline,
+                stable_entry: failure.stable_entry,
+                implementation: failure.implementation,
+                pmf1_digest: failure.trust.projection.pmf1_digest(),
+            },
+            (call.expected_generation, call.expected_state_head_digest),
+        )
+    }
+
+    /// [`Self::member`] for the member `reference` names and the expected
+    /// `(generation, head)`: 5 for another generation, 6 for another head.
+    pub(super) fn member_at(
+        &self,
+        context: CommunityQuarantineContextV1<'_>,
+        reference: &MemberRefV1<'_>,
+        (expected_generation, expected_head): ([u8; 16], Hash),
+    ) -> Result<MemberV1, Error> {
         self.read_selection(context)
             .and_then(|(anchor, selection, selection_address)| {
-                current_floor(&selection, failure.timeline).and_then(|(generation, head)| {
-                    match (
-                        generation == call.expected_generation,
-                        head == call.expected_state_head_digest,
-                    ) {
-                        (false, _) => Err(Error::StaleGeneration),
-                        (true, false) => Err(Error::StaleFrontier),
-                        (true, true) => self.admitted_member(
-                            context,
-                            failure,
-                            (generation, head),
-                            (anchor, selection_address),
-                        ),
-                    }
+                current_floor(&selection, reference.timeline).and_then(|(generation, head)| match (
+                    generation == expected_generation,
+                    head == expected_head,
+                ) {
+                    (false, _) => Err(Error::StaleGeneration),
+                    (true, false) => Err(Error::StaleFrontier),
+                    (true, true) => self.admitted_member(
+                        context,
+                        reference,
+                        (generation, head),
+                        (anchor, selection_address),
+                    ),
                 })
             })
     }
@@ -667,7 +764,7 @@ impl MemoryCommunityDomainV1 {
     fn admitted_member(
         &self,
         context: CommunityQuarantineContextV1<'_>,
-        failure: &CommunityPreExecutionFailureInputV1<'_>,
+        failure: &MemberRefV1<'_>,
         (generation, head): ([u8; 16], Hash),
         (anchor, selection_address): ((TimelineId, [u8; 16]), Hash),
     ) -> Result<MemberV1, Error> {
@@ -735,9 +832,7 @@ impl MemoryCommunityDomainV1 {
                             }
                         })
                     })
-                    .filter(|member| {
-                        member.pmf1_digest.as_bytes() == &failure.trust.projection.pmf1_digest()
-                    })
+                    .filter(|member| member.pmf1_digest.as_bytes() == &failure.pmf1_digest)
                     .ok_or(Error::EvidenceUnavailable)
             })
     }
