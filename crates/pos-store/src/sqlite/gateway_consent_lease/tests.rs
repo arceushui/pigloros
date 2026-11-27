@@ -376,7 +376,13 @@ fn anything_but_one_valid_row_is_corrupt() -> TestResult {
             Err(Refusal::LeaseStateCorrupt),
             "{values}"
         );
-        assert_eq!(stored(&store)?.len(), rows, "{values} was left unchanged");
+        let remaining: i64 =
+            store
+                .conn
+                .query_row("SELECT count(*) FROM gateway_consent_lease", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(remaining, rows, "{values} was left unchanged");
         assert!(store.conn.is_autocommit());
     }
     Ok(())
