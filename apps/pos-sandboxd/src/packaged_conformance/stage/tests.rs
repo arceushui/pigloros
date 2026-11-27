@@ -5,7 +5,6 @@ use std::os::unix::ffi::OsStringExt as _;
 
 use super::{export_files, run_stage, write_export, StageCase, GUEST_LIMITS};
 use crate::packaged_conformance::{describe, release, run_mode, ConformanceError, Mode};
-use pos_reference::provider_admission::test_support::StagedLimits;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -355,5 +354,8 @@ fn the_guest_case_has_the_limits_of_a_real_attempt() {
     assert_eq!(GUEST_LIMITS.budget[0], 134_217_728);
     assert_eq!(GUEST_LIMITS.budget[4], 1_048_576);
     assert_eq!(GUEST_LIMITS.budget[5], 16_777_216);
-    assert_eq!(GUEST_LIMITS.watchdog_ms, StagedLimits::EXCHANGE_MS);
+    assert_eq!(
+        GUEST_LIMITS.watchdog_ms, 300_000,
+        "exchange deadline: 5 min"
+    );
 }
