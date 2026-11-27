@@ -93,6 +93,12 @@ fn rows(conn: &Connection) -> rusqlite::Result<Vec<(String, i64, Vec<u8>)>> {
     collected
 }
 
+fn row_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT count(*) FROM subject_key_staging", [], |row| {
+        row.get(0)
+    })
+}
+
 fn row_of(owner_id: &str, epoch: i64, store: &[u8]) -> (String, i64, Vec<u8>) {
     (owner_id.to_owned(), epoch, store.to_vec())
 }
@@ -621,7 +627,7 @@ fn an_unparseable_staging_table_fails_recovery_closed_and_deletes_nothing() -> T
             .execute_batch("PRAGMA ignore_check_constraints = ON")?;
         raw_insert(&store.conn, &values)?;
         assert_refused(&store.recover_subject_key_staging(&STORE));
-        assert_eq!(rows(&store.conn)?.len(), 2, "{name}: nothing was deleted");
+        assert_eq!(row_count(&store.conn)?, 2, "{name}: nothing was deleted");
     }
     Ok(())
 }
