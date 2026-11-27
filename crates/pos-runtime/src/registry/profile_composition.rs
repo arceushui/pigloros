@@ -1,11 +1,10 @@
-//! ADR-021 Revision 3 composition-time scheduled observation profiles (#504).
+//! Host-assigned scheduled observation profiles.
 //!
-//! The host fixes each scheduled Driver's observation profile when it
-//! composes the registry. The profile comes only from the Driver's ADR-059
-//! Participant binding: a Driver bound to a Participant is participant-bound,
-//! and any other Driver is non-participant only when the host explicitly
-//! assigns it that profile. Pass contents, Driver output, Plugin
-//! self-description, subscriptions and provider responses never assign one.
+//! The host fixes each scheduled Driver's observation profile during
+//! composition. A Driver with a Participant binding is participant-bound;
+//! every other Driver is non-participant only when the host explicitly assigns
+//! that profile. Pass contents, Driver output, Plugin self-description,
+//! subscriptions and provider responses never assign one.
 //!
 //! Every scheduled staging path requires the whole composition to carry the
 //! path's profile before any Driver runs. The anchored paths
@@ -15,8 +14,7 @@
 //! Participant's view. An unassigned Driver, or a Driver of the other profile,
 //! is rejected before staging, so the pass stages and commits nothing. The
 //! unanchored `step_all` and `tick_cadenced` paths reject a participant-bound
-//! Driver. One composition never mixes the two profiles, because mixed passes
-//! are prohibited until an accepted decision defines them.
+//! Driver. One composition never mixes the two profiles.
 //! [`RuntimeError::AuthorityFenceRequired`] stays as defense in depth.
 
 use std::collections::HashMap;
@@ -30,9 +28,7 @@ use crate::error::RuntimeError;
 /// The host's composition-time binding of one scheduled Driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScheduledDriverBindingV1 {
-    /// The Driver is bound to this ADR-059 Participant. Only the planned
-    /// Wave 9 Scenario Room host composes one in production; test hosts
-    /// compose one at the runtime seam.
+    /// The Driver's bound Participant for composition.
     Participant(EntityId),
     /// The host explicitly assigns the Driver the non-participant profile.
     NonParticipant,

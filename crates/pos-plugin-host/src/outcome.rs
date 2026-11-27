@@ -15,8 +15,7 @@ use crate::runtime::trap_outcome;
 
 /// Why a Component could not be loaded.
 ///
-/// Every refusal is the closed `IncompatibleAbi`, a pre-execution rejection
-/// (owner decision of 2026-10-06): see the `From` conversion.
+/// Every refusal converts to the closed `IncompatibleAbi` before execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadError {
     /// The bytes are not a valid Component for the pinned engine.

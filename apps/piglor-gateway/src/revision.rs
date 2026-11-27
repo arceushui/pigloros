@@ -1,9 +1,9 @@
-//! The served Preference and `OptionSpec` resources (#304).
+//! The served Preference and `OptionSpec` resources.
 //!
 //! A Preference is one subject's set of named dimension weights; an
 //! `OptionSpec` is one subject's ordered set of typed alternatives. Both are
 //! user-authored, subject-scoped chains of immutable revisions that the
-//! Gateway stores itself (owner decisions on #304), outside every Timeline:
+//! Gateway stores itself, outside every Timeline:
 //!
 //! - `POST /v1/preferences` and `POST /v1/option-specs` create revision 1 of
 //!   a new resource, or with `parent` the next revision of an existing one.
@@ -464,7 +464,7 @@ pub(crate) fn content_bytes<F: GatewayRevisionFamilyV1>(
 ///
 /// The content is decoded without re-validating its bounds, so an
 /// out-of-bounds weight reaches the refusal of
-/// [`pos_runtime::match_score_v1`] (ADR-140 test plan); `None` for content
+/// [`pos_runtime::match_score_v1`]; `None` for content
 /// that does not decode.
 pub(crate) fn preview_weights(content: &[u8]) -> Option<Vec<PreferenceWeightV1>> {
     ciborium::from_reader::<ContentV1<WeightV1>, _>(content)
@@ -482,8 +482,8 @@ pub(crate) fn preview_weights(content: &[u8]) -> Option<Vec<PreferenceWeightV1>>
 
 /// The options of stored `OptionSpec` content, as the Match Score reads them.
 ///
-/// They keep their authored order and carry only their keys and tags:
-/// ADR-140 P2 leaves out the label, the lean hint and the coordinates.
+/// They keep their authored order and carry only their keys and tags. Labels,
+/// lean hints and coordinates do not enter the Match Score.
 /// `None` for content that does not decode.
 pub(crate) fn preview_options(content: &[u8]) -> Option<Vec<PreviewOptionV1>> {
     ciborium::from_reader::<ContentV1<OptionV1>, _>(content)

@@ -1,8 +1,7 @@
-//! The G-FORK capture adapter of the non-interference harness (ADR-062
-//! Revision 8 slice N4, #1232; owner note `ADR-062_R8_NonInterference_Fork`).
+//! G-FORK capture adapter for the non-interference harness.
 //!
-//! One ADR-059 row is captured here, `NI-FORK-008`: the ADR-064 Fork
-//! artifacts of slice R6 ([`crate::fork_artifacts`]).
+//! Captures the `NI-FORK-008` counterfactual Fork artifacts from
+//! [`crate::fork_artifacts`].
 //!
 //! # Subject
 //!
@@ -22,8 +21,7 @@
 //!   `SIV1` are read back and every `RCP1` and the `CFR1` recovered from the
 //!   committed Fork Events, while the `INT1` and `CFP1` are the recorded
 //!   plan. No Driver runs and no Event is appended.
-//! - Fork: the records-form Fork runs in-process. Per owner answer Q7 it is a
-//!   genuine ADR-064 Fork execution; it is re-run when #1204 lands.
+//! - Fork: the records-form Fork runs in-process.
 //!
 //! # Surfaces
 //!
@@ -36,8 +34,7 @@
 //!   array; publicly the `[ordinal, size, digest]` of each.
 //! - snapshots: empty. The records-form run makes no Snapshot: every `RCP1`
 //!   carries no Plugin state and no Projection digest.
-//! - `ReproManifest`: empty. No `ReproManifest` exists for a records-form Fork
-//!   until the ADR-064 R7 steps form (#1204).
+//! - `ReproManifest`: empty. A records-form Fork does not emit one.
 //! - exports: the whole export stream `[kind, WorldCut id, cut ordinal,
 //!   Tick, ordinal, bytes]`; publicly `[kind, ordinal, size, digest]`.
 //!
@@ -122,7 +119,7 @@ pub fn g_fork_permitted_input_v1(variant: NonInterferenceVariantV1) -> Vec<u8> {
 /// members differ only in their unauthorized value.
 ///
 /// # Errors
-/// Returns the #181 admission error of an invalid coordinate.
+/// Returns the conformance admission error of an invalid coordinate.
 pub fn g_fork_fixture_v1(
     variant: NonInterferenceVariantV1,
     mode: ExecutionModeV1,

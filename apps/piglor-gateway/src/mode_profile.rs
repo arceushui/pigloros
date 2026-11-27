@@ -89,7 +89,7 @@ const INGRESS_FORK_ADMISSION_SOCKET: u8 = 3;
 /// Revocation freshness of a mode whose single bound store makes revocation
 /// state current by construction (D10).
 const REVOCATION_CURRENT_BY_CONSTRUCTION: u8 = 1;
-/// The `epf1_field` of the security revision until #461 installs an EPF1.
+/// The `epf1_field` value for a security revision with no installed EPF1.
 const EPF1_EXPLICIT_ABSENT: u8 = 0x00;
 
 /// Closed failures of composing, binding and migrating a Gateway execution
@@ -629,8 +629,8 @@ impl GatewayProducedUnderV1 {
 }
 
 /// The store's current binding as the 32 bytes of its compiled GMP1 digest
-/// and its epoch, the binding an erasure submission records in its ELADM1
-/// (owner decision D5 of 2026-11-18 on #1413); `None` for an unbound store
+/// and its epoch, the binding an erasure submission records in its ELADM1;
+/// `None` for an unbound store
 /// or a profile this binary does not compile.
 pub(crate) fn current_binding_v1(
     port: &dyn pos_core::GatewayModeBindingPortV1,
