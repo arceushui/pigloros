@@ -1113,6 +1113,15 @@ mod tests {
             .lines()
             .collect();
         assert_eq!(defaults.len(), 70);
+        // The file is data from systemd's `seccomp-util.c`, so it is pinned whole.
+        let mut hex = String::new();
+        for byte in Sha256::digest(include_bytes!("guest-syscalls-systemd-default.txt")) {
+            write!(hex, "{byte:02x}")?;
+        }
+        assert_eq!(
+            hex,
+            "77b7a6defe8229519a0aa1c351dbb29072285441e006990fb8a2ee8a2206de5b"
+        );
         for architecture in [SandboxArchitecture::X86_64, SandboxArchitecture::Aarch64] {
             let requested = syscall_names(architecture, SyscallPolicy::Guest);
             let implicit = implicit_readback_names(architecture)?;
