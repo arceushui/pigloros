@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::ffi::OsStringExt as _;
 
-use super::{run_stage, write_export, StageCase};
+use super::{export_files, run_stage, write_export, StageCase};
 use crate::packaged_conformance::{describe, release, run_mode, ConformanceError, Mode};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -272,6 +272,63 @@ fn a_failed_export_removes_the_files_it_created_and_nothing_else() -> TestResult
     assert_eq!(
         std::fs::read_to_string(directory.path().join("three"))?,
         "third"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_write_removes_the_created_files_and_a_stuck_one_is_reported() -> TestResult {
+    use std::io::Write as _;
+
+    let files: &[(&str, &[u8])] = &[("one", b"first"), ("two", b"second")];
+    // The second write fails after its file was created: both created files are removed.
+    let directory = tempfile::tempdir()?;
+    let failing = |file: &mut std::fs::File, bytes: &[u8]| {
+        if bytes == b"second" {
+            Err(io::Error::other("disk full"))
+        } else {
+            file.write_all(bytes)
+        }
+    };
+    let refused = export_files(directory.path(), files, failing);
+    assert!(
+        matches!(&refused, Err(ConformanceError::Io(error)) if error.to_string() == "disk full")
+    );
+    assert!(!directory.path().join("one").exists());
+    assert!(!directory.path().join("two").exists());
+
+    // A created file that is already gone is no cleanup failure: the write error stays.
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().to_owned();
+    let vanishing = |file: &mut std::fs::File, bytes: &[u8]| {
+        if bytes == b"second" {
+            std::fs::remove_file(path.join("one"))?;
+            Err(io::Error::other("disk full"))
+        } else {
+            file.write_all(bytes)
+        }
+    };
+    let refused = export_files(directory.path(), files, vanishing);
+    assert!(
+        matches!(&refused, Err(ConformanceError::Io(error)) if error.to_string() == "disk full")
+    );
+
+    // A created file that cannot be removed (a directory took its place) is reported.
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().to_owned();
+    let stuck = |file: &mut std::fs::File, bytes: &[u8]| {
+        if bytes == b"second" {
+            std::fs::remove_file(path.join("one"))?;
+            std::fs::create_dir(path.join("one"))?;
+            Err(io::Error::other("disk full"))
+        } else {
+            file.write_all(bytes)
+        }
+    };
+    let refused = export_files(directory.path(), files, stuck);
+    assert!(
+        matches!(&refused, Err(ConformanceError::Stage(reason)) if reason.contains("not removed")),
+        "{refused:?}"
     );
     Ok(())
 }

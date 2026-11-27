@@ -14,7 +14,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -129,8 +129,18 @@ impl StageCase {
 ///
 /// # Errors
 /// [`ConformanceError::Io`] when `directory` is missing, or a file exists or
-/// cannot be written.
+/// cannot be written, and [`ConformanceError::Stage`] when, besides, a file this
+/// call created could not be removed again (one that is already gone is no failure).
 fn write_export(directory: &Path, files: &[(&str, &[u8])]) -> Result<(), ConformanceError> {
+    export_files(directory, files, Write::write_all)
+}
+
+/// [`write_export`] with the write of each file's bytes as a parameter.
+fn export_files(
+    directory: &Path,
+    files: &[(&str, &[u8])],
+    write: impl Fn(&mut fs::File, &[u8]) -> io::Result<()>,
+) -> Result<(), ConformanceError> {
     let mut created = Vec::new();
     let written = files.iter().try_for_each(|(name, bytes)| {
         let path = directory.join(name);
@@ -140,14 +150,20 @@ fn write_export(directory: &Path, files: &[(&str, &[u8])]) -> Result<(), Conform
             .mode(0o600)
             .open(&path)?;
         created.push(path);
-        file.write_all(bytes)
+        write(&mut file, bytes)
     });
-    if written.is_err() {
-        for path in &created {
-            drop(fs::remove_file(path));
-        }
-    }
-    written.map_err(ConformanceError::Io)
+    let Err(error) = written else {
+        return Ok(());
+    };
+    let leftover = created
+        .iter()
+        .filter_map(|path| fs::remove_file(path).err())
+        .find(|cleanup| cleanup.kind() != io::ErrorKind::NotFound);
+    Err(leftover.map_or(ConformanceError::Io(error), |cleanup| {
+        ConformanceError::Stage(format!(
+            "the export failed and a created file was not removed: {cleanup}"
+        ))
+    }))
 }
 
 /// One command-line argument as text.
