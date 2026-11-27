@@ -141,8 +141,7 @@ fn reset(
 ) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
     let rows = case.roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
-    let projection = release_one().projection()?;
-    let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
+    let (projection, policy) = release_and_policy(case)?;
     let trust = trust_of(
         (&case.domain.harness.env.anchor, &case.material),
         &projection,
@@ -160,6 +159,19 @@ fn reset(
     Ok(world
         .domain
         .reset_quarantine(&SEAL, context, &world.authority, &call))
+}
+
+/// The member release's projection and the installed metadata policy.
+fn release_and_policy(
+    case: &QuarantineCase,
+) -> Fallible<(
+    ValidatedPluginManifestProjectionV1,
+    CommunityMetadataPolicyV1,
+)> {
+    Ok((
+        release_one().projection()?,
+        CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?,
+    ))
 }
 
 /// The trust evidence of the case's gate for the release `projection`.
