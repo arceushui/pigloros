@@ -25,12 +25,48 @@ pub type Attempt = io::Result<()>;
 const NETWORK_WAIT: Duration = Duration::from_millis(300);
 /// The highest process ID the foreign-signal probe tries.
 pub const LAST_PROBED_PID: u32 = 4096;
-/// A documentation address (RFC 5737) nothing may answer at.
-const UNDECLARED_TCP: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 9);
-/// The loopback stub resolver address.
-const STUB_RESOLVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 53)), 53);
-/// The system bus socket.
-const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
+
+/// Every place the probe fixtures aim at.
+///
+/// [`Targets::GUEST`] holds the fixed in-sandbox places, all of which the
+/// sandbox must deny. A host test aims the same fixtures at a temporary
+/// directory and a local socket whose answers are known, so that no test
+/// touches the real host paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Targets<'a> {
+    /// Files the adapter must not read (host secrets, the provider's state,
+    /// physical memory).
+    pub read_denied: [&'a str; 3],
+    /// The cgroup file the adapter must not write.
+    pub write_denied: &'a str,
+    /// The work area: a mount over it is denied, and the work-area fixture
+    /// fills it.
+    pub work: &'a str,
+    /// The read-only root.
+    pub root: &'a str,
+    /// An address (RFC 5737 documentation) nothing may answer at over TCP.
+    pub tcp: SocketAddr,
+    /// The loopback stub resolver, over UDP.
+    pub resolver: SocketAddr,
+    /// The system bus socket.
+    pub bus: &'a str,
+    /// The highest process ID the foreign-signal probe tries.
+    pub last_pid: u32,
+}
+
+impl Targets<'static> {
+    /// The in-sandbox places of the evidence guest.
+    pub const GUEST: Self = Self {
+        read_denied: ["/etc/shadow", "/run/pigloros/sandbox", "/dev/mem"],
+        write_denied: "/sys/fs/cgroup/cgroup.procs",
+        work: "/work",
+        root: "/",
+        tcp: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 9),
+        resolver: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 53)), 53),
+        bus: "/run/dbus/system_bus_socket",
+        last_pid: LAST_PROBED_PID,
+    };
+}
 
 /// Whether every attempt was denied, and at least one was made.
 #[must_use]
@@ -145,13 +181,14 @@ pub fn signal_foreign(pid: u32) -> Attempt {
 
 /// The attempts of the filesystem-escape fixture.
 #[must_use]
-pub fn filesystem_escape() -> Vec<Attempt> {
+pub fn filesystem_escape(targets: &Targets<'_>) -> Vec<Attempt> {
+    let [shadow, state, memory] = targets.read_denied;
     vec![
-        open_read(Path::new("/etc/shadow")),
-        open_read(Path::new("/run/pigloros/sandbox")),
-        open_write(Path::new("/sys/fs/cgroup/cgroup.procs")),
-        open_read(Path::new("/dev/mem")),
-        mount_tmpfs(Path::new("/work")),
+        open_read(Path::new(shadow)),
+        open_read(Path::new(state)),
+        open_write(Path::new(targets.write_denied)),
+        open_read(Path::new(memory)),
+        mount_tmpfs(Path::new(targets.work)),
     ]
 }
 
@@ -168,13 +205,13 @@ pub fn read_only_root_write(root: &Path) -> Vec<Attempt> {
 
 /// The attempts of the network-escape fixture.
 #[must_use]
-pub fn network_escape() -> Vec<Attempt> {
+pub fn network_escape(targets: &Targets<'_>) -> Vec<Attempt> {
     vec![
         create_socket(AddressFamily::INET, SocketType::RAW),
         create_socket(AddressFamily::PACKET, SocketType::RAW),
-        connect_tcp(&UNDECLARED_TCP),
-        udp_exchange(&STUB_RESOLVER),
-        connect_unix(Path::new(SYSTEM_BUS)),
+        connect_tcp(&targets.tcp),
+        udp_exchange(&targets.resolver),
+        connect_unix(Path::new(targets.bus)),
     ]
 }
 

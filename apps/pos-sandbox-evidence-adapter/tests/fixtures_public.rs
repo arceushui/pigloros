@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! The #216 malicious and limit fixtures through the adapter's public
@@ -8,7 +9,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::net::{TcpListener, UdpSocket};
+use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
@@ -16,7 +17,7 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use pos_reference::adapter_transport::{read_observation, write_attempt};
+use pos_reference::adapter_transport::{read_attempt, read_observation, write_attempt};
 use pos_reference::evaluator::{
     AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectResult,
 };
@@ -27,12 +28,13 @@ use pos_sandbox_evidence_adapter::fixture::{
 };
 use pos_sandbox_evidence_adapter::probe::{
     self, connect_tcp, connect_unix, contained, create_directory, create_file, create_socket,
-    mount_tmpfs, open_read, open_write, remove_file, signal_foreign, udp_exchange,
+    mount_tmpfs, open_read, open_write, remove_file, signal_foreign, udp_exchange, Targets,
 };
 use pos_sandbox_evidence_adapter::{
     apply, exit_code, run, AdapterRunError, After, Fixture, Mode, MODES,
 };
 use rustix::net::{AddressFamily, SocketType};
+use rustix::process::{kill_process, Pid, Signal};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -78,6 +80,35 @@ fn encoded() -> TestResult<Vec<u8>> {
     let mut stream = Vec::new();
     write_attempt(&mut stream, &attempt)?;
     Ok(stream)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn attempt() -> TestResult<CaseAttempt> {
+    Ok(read_attempt(encoded()?.as_slice())?)
+}
+
+/// Targets whose every path is `missing` (nothing there, so every probe of
+/// it is denied) and whose sockets are the two given local addresses.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn aimed_at(missing: &str, tcp: SocketAddr, resolver: SocketAddr) -> Targets<'_> {
+    Targets {
+        read_denied: [missing; 3],
+        write_denied: missing,
+        work: missing,
+        root: missing,
+        tcp,
+        resolver,
+        bus: missing,
+        last_pid: 0,
+    }
+}
+
+/// A local TCP address and a local UDP address that nothing answers at.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr)> {
+    let tcp = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let udp = UdpSocket::bind("127.0.0.1:0")?.local_addr()?;
+    Ok((tcp, udp))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -195,13 +226,17 @@ fn signalling_skips_the_adapter_itself_and_reaches_other_processes() {
 
 #[test]
 fn every_probe_fixture_lists_the_attempts_it_makes() -> TestResult {
-    assert_eq!(probe::filesystem_escape().len(), 5);
-    assert_eq!(probe::network_escape().len(), 5);
+    let dir = tempfile::tempdir()?;
+    let missing = dir.path().join("missing");
+    let missing = missing.to_str().ok_or("path")?;
+    let (tcp, udp) = silent_addresses()?;
+    let targets = aimed_at(missing, tcp, udp);
+    assert_eq!(probe::filesystem_escape(&targets).len(), 5);
+    assert_eq!(probe::network_escape(&targets).len(), 5);
     assert_eq!(probe::foreign_signals(8).len(), 8);
     assert!(probe::foreign_signals(0).is_empty());
     assert_eq!(probe::LAST_PROBED_PID, 4096);
 
-    let dir = tempfile::tempdir()?;
     let writable = probe::read_only_root_write(dir.path());
     assert_eq!(writable.len(), 4);
     // The adapter file is missing, so only its two probes fail.
@@ -282,6 +317,10 @@ fn the_mode_arguments_are_one_id_and_an_optional_decimal_bound() -> TestResult {
         &["memory-exhaustion", "0"][..],
         &["memory-exhaustion", "-1"][..],
         &["memory-exhaustion", "x"][..],
+        &["memory-exhaustion", "+5"][..],
+        &["memory-exhaustion", "007"][..],
+        &["memory-exhaustion", ""][..],
+        &["memory-exhaustion", " 5"][..],
         &["memory-exhaustion", "1", "1"][..],
     ] {
         let (result, output) = run_mode(bad)?;
@@ -347,7 +386,6 @@ fn a_fixture_that_is_not_stopped_goes_on_to_report_honestly() -> TestResult {
         &["memory-exhaustion", "1048577"][..],
         &["watchdog-expiry", "1"][..],
         &["idle", "1"][..],
-        &["orphaned-child"][..],
     ] {
         let (result, output) = run_mode(values)?;
         assert_eq!(result, Ok(()), "{values:?}");
@@ -368,45 +406,114 @@ fn a_fixture_that_is_not_stopped_goes_on_to_report_honestly() -> TestResult {
 }
 
 #[test]
-fn a_probe_fixture_reports_or_escapes_never_anything_else() -> TestResult {
-    for values in [
-        &["filesystem-escape"][..],
-        &["read-only-root-write"][..],
-        &["network-escape"][..],
-        &["foreign-signals"][..],
-    ] {
-        let (result, output) = run_mode(values)?;
-        match result {
-            Ok(()) => assert!(read_observation(output.as_slice(), 1 << 10).is_ok()),
-            Err(error) => {
-                assert_eq!(error, AdapterRunError::Escaped, "{values:?}");
-                assert!(output.is_empty());
-            }
-        }
-    }
+fn a_probe_fixture_aimed_at_denied_targets_reports_and_at_open_ones_escapes() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let missing = dir.path().join("missing");
+    let missing = missing.to_str().ok_or("path")?;
+    let open = dir.path().to_str().ok_or("path")?;
+    let (tcp, udp) = silent_addresses()?;
+    let attempt = attempt()?;
+    let run_one =
+        |fixture, targets: &Targets<'_>| apply(fixture, &attempt, targets, &mut Vec::new());
+
+    let denied = aimed_at(missing, tcp, udp);
+    assert_eq!(
+        run_one(Fixture::FilesystemEscape, &denied),
+        Ok(After::Report)
+    );
+    assert_eq!(
+        run_one(Fixture::ReadOnlyRootWrite, &denied),
+        Ok(After::Report)
+    );
+    // Raw sockets are denied only without CAP_NET_RAW.
+    let expected = if has_net_raw()? {
+        Err(AdapterRunError::Escaped)
+    } else {
+        Ok(After::Report)
+    };
+    assert_eq!(run_one(Fixture::NetworkEscape, &denied), expected);
+    // No process ID is probed, so nothing was denied either.
+    assert_eq!(
+        run_one(Fixture::ForeignSignals, &denied),
+        Err(AdapterRunError::Escaped)
+    );
+
+    // One readable file, a writable root: each is an escape.
+    let readable = Targets {
+        read_denied: [missing, open, missing],
+        ..denied
+    };
+    assert_eq!(
+        run_one(Fixture::FilesystemEscape, &readable),
+        Err(AdapterRunError::Escaped)
+    );
+    let writable = Targets {
+        root: open,
+        ..denied
+    };
+    assert_eq!(
+        run_one(Fixture::ReadOnlyRootWrite, &writable),
+        Err(AdapterRunError::Escaped)
+    );
+    // A listening TCP port is an escape too.
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let reachable = Targets {
+        tcp: listener.local_addr()?,
+        ..denied
+    };
+    assert_eq!(
+        run_one(Fixture::NetworkEscape, &reachable),
+        Err(AdapterRunError::Escaped)
+    );
     Ok(())
 }
 
 #[test]
-fn apply_runs_each_effect_and_says_who_writes_the_output() {
+fn the_guest_targets_are_the_in_sandbox_places() {
+    let guest = Targets::GUEST;
+    assert_eq!(
+        guest.read_denied,
+        ["/etc/shadow", "/run/pigloros/sandbox", "/dev/mem"]
+    );
+    assert_eq!(guest.write_denied, "/sys/fs/cgroup/cgroup.procs");
+    assert_eq!((guest.work, guest.root), ("/work", "/"));
+    assert_eq!(guest.tcp.to_string(), "192.0.2.1:9");
+    assert_eq!(guest.resolver.to_string(), "127.0.0.53:53");
+    assert_eq!(guest.bus, "/run/dbus/system_bus_socket");
+    assert_eq!(guest.last_pid, probe::LAST_PROBED_PID);
+}
+
+#[test]
+fn apply_runs_each_effect_and_says_who_writes_the_output() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let work = dir.path().to_str().ok_or("path")?;
+    let (tcp, udp) = silent_addresses()?;
+    let targets = aimed_at(work, tcp, udp);
+    let attempt = attempt()?;
     for (fixture, after) in [
         (Fixture::WatchdogExpiry(1), After::Report),
         (Fixture::Idle(1), After::Report),
         (Fixture::TaskExhaustion(2), After::Report),
         (Fixture::MemoryExhaustion(1), After::Report),
         (Fixture::WorkAreaExhaustion(1), After::Report),
-        (Fixture::OrphanedChild, After::Report),
         (Fixture::MalformedOutput, After::Written),
         (Fixture::OversizedOutput(3), After::Written),
     ] {
         let mut output = Vec::new();
-        assert_eq!(apply(fixture, &mut output), Ok(after), "{fixture:?}");
+        assert_eq!(
+            apply(fixture, &attempt, &targets, &mut output),
+            Ok(after),
+            "{fixture:?}"
+        );
     }
+    // The work-area fixture wrote its bound where the targets put the area.
+    assert_eq!(fs::metadata(dir.path().join("fill"))?.len(), 1);
     let mut output = Vec::new();
     assert_eq!(
-        apply(Fixture::AdapterCrash, &mut output),
+        apply(Fixture::AdapterCrash, &attempt, &targets, &mut output),
         Err(AdapterRunError::Crashed)
     );
+    Ok(())
 }
 
 struct FlushFails;
@@ -420,7 +527,7 @@ impl Write for FlushFails {
 }
 
 #[test]
-fn a_broken_output_stream_is_an_output_failure_for_the_fixtures_that_own_it() {
+fn a_broken_output_stream_is_an_output_failure_for_the_fixtures_that_own_it() -> TestResult {
     struct Closed;
     impl Write for Closed {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -430,17 +537,26 @@ fn a_broken_output_stream_is_an_output_failure_for_the_fixtures_that_own_it() {
             Ok(())
         }
     }
+    let attempt = attempt()?;
+    let (tcp, udp) = silent_addresses()?;
+    let targets = aimed_at("/nonexistent", tcp, udp);
     for fixture in [Fixture::MalformedOutput, Fixture::OversizedOutput(1)] {
         assert_eq!(
-            apply(fixture, &mut Closed),
+            apply(fixture, &attempt, &targets, &mut Closed),
             Err(AdapterRunError::Output),
             "{fixture:?}"
         );
     }
     assert_eq!(
-        apply(Fixture::MalformedOutput, &mut FlushFails),
+        apply(
+            Fixture::MalformedOutput,
+            &attempt,
+            &targets,
+            &mut FlushFails
+        ),
         Err(AdapterRunError::Output)
     );
+    Ok(())
 }
 
 #[test]
@@ -464,15 +580,94 @@ fn the_work_area_fixture_writes_its_bound_and_stops_at_a_full_area() -> TestResu
 }
 
 #[test]
-fn the_task_memory_and_orphan_fixtures_report_what_they_held() -> TestResult {
+fn the_task_and_memory_fixtures_report_what_they_held() {
+    let lifetime = Duration::from_millis(50);
     let started = Instant::now();
-    assert_eq!(exhaust_tasks(3), 3);
-    assert!(started.elapsed() >= Duration::from_millis(1_500));
+    assert_eq!(exhaust_tasks(3, lifetime), 3);
+    assert!(started.elapsed() >= lifetime);
+    assert_eq!(exhaust_tasks(0, lifetime), 0);
     assert_eq!(exhaust_memory(3 << 20), 3 << 20);
     assert_eq!(exhaust_memory(1), 1 << 20);
     assert_eq!(exhaust_memory(0), 0);
-    let orphan = leave_orphan().ok_or("no orphan was started")?;
-    assert!(orphan > 1 && orphan != std::process::id());
+}
+
+/// The process IDs whose command line is exactly the orphan's: this binary,
+/// `idle`, and the orphan's bound.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn idle_orphans() -> TestResult<Vec<u32>> {
+    let wanted = format!("{BINARY}\0idle\0600000\0").into_bytes();
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        let name = entry?.file_name();
+        let pid = name.to_str().and_then(|name| name.parse::<u32>().ok());
+        if let Some(pid) = pid.filter(|pid| process_state(*pid) != Some('Z')) {
+            if fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|bytes| bytes == wanted) {
+                found.push(pid);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The state letter of `pid` in `/proc`, or nothing once it is gone.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn process_state(pid: u32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
+}
+
+/// Kill `pid` and wait until it is gone or a zombie.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn kill_and_wait(pid: u32) -> TestResult {
+    let target = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or("pid")?;
+    kill_process(target, Signal::KILL)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(process_state(pid), None | Some('Z')) {
+        assert!(Instant::now() < deadline, "{pid} did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+#[test]
+fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
+    assert!(idle_orphans()?.is_empty());
+
+    // Through the real binary: the adapter exits, its child does not.
+    let mut parent = Command::new(BINARY)
+        .arg("orphaned-child")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    parent
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(&encoded()?)?;
+    let output = parent.wait_with_output()?;
+    assert!(output.status.success());
+    assert!(read_observation(output.stdout.as_slice(), 1 << 10).is_ok());
+    let orphans = idle_orphans()?;
+    assert_eq!(orphans.len(), 1, "{orphans:?}");
+    // It is alive and idle: it decoded the attempt it was fed, which an
+    // adapter that failed to read it would not have survived.
+    assert!(matches!(process_state(orphans[0]), Some('S' | 'R')));
+    kill_and_wait(orphans[0])?;
+    assert!(idle_orphans()?.is_empty());
+
+    // Directly: the orphan is a child of this process, left running.
+    let direct = leave_orphan(Path::new(BINARY), &attempt()?).ok_or("no orphan")?;
+    assert_eq!(idle_orphans()?, [direct]);
+    kill_and_wait(direct)?;
+    // An executable that cannot start leaves nothing.
+    assert_eq!(
+        leave_orphan(Path::new("/nonexistent/adapter"), &attempt()?),
+        None
+    );
     Ok(())
 }
 

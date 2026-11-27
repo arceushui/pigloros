@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! Public-interface tests of the #444 evidence adapter: the real binary reads

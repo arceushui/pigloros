@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(target_os = "linux")]
 
 //! The adapter the #444 QEMU evidence DDI carries as `/adapter`.
 //!
@@ -29,6 +30,7 @@ use std::process::ExitCode;
 pub use fixture::{apply, After, Fixture};
 use pos_reference::adapter_transport::{read_attempt, write_observation};
 use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
+pub use probe::Targets;
 
 /// The behavior one argument selects.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,8 +112,13 @@ fn split_arguments(arguments: &[OsString]) -> Option<(&OsStr, Option<u64>)> {
     }
 }
 
+/// A bound is plain decimal digits without a sign or a leading zero, as the
+/// conformance table writes it.
 fn parse_bound(bound: &OsStr) -> Option<u64> {
-    bound.to_str().and_then(|text| text.parse().ok())
+    bound
+        .to_str()
+        .filter(|text| text.bytes().all(|byte| byte.is_ascii_digit()) && !text.starts_with('0'))
+        .and_then(|text| text.parse().ok())
 }
 
 /// Why the adapter wrote no observation. The discriminant is the process exit
@@ -182,17 +189,21 @@ fn conclude(
     attempt: &CaseAttempt,
     writer: &mut impl Write,
 ) -> Result<(), AdapterRunError> {
-    effect(mode, writer).and_then(|after| match after {
+    effect(mode, attempt, writer).and_then(|after| match after {
         After::Written => Ok(()),
         After::Report => report(mode, attempt, writer),
     })
 }
 
 /// The mode's effect: none for the honest mode, the fixture's otherwise.
-fn effect(mode: Mode, writer: &mut impl Write) -> Result<After, AdapterRunError> {
+fn effect(
+    mode: Mode,
+    attempt: &CaseAttempt,
+    writer: &mut impl Write,
+) -> Result<After, AdapterRunError> {
     match mode {
         Mode::Honest => Ok(After::Report),
-        Mode::Fixture(fixture) => apply(fixture, writer),
+        Mode::Fixture(fixture) => apply(fixture, attempt, &Targets::GUEST, writer),
     }
 }
 
