@@ -1405,5 +1405,36 @@ esac
         self.assertIn("error: unsupported URI", result.stderr)
 
 
+# The mount points that the attempt unit's properties (apps/pos-sandboxd/src/hardening.rs and
+# transient_unit.rs) mount onto in the provider root image. systemd cannot create a mount point in
+# the read-only erofs root, so the evidence image must hold each one.
+ROOT_MOUNT_POINTS = {
+    "dev": "PrivateDevices, PrivateIPC, ProtectKernelLogs (/dev/kmsg)",
+    "proc": "PrivatePIDs, ProtectProc, ProcSubset, ProtectKernelTunables (/proc/sys)",
+    "sys": "ProtectKernelTunables, ProtectControlGroups (/sys/fs/cgroup)",
+    "run": "ProtectSystem, ProtectHome (/run/user)",
+    "tmp": "the unit-private /tmp",
+    "var/tmp": "the unit-private /var/tmp",
+    "work": "TemporaryFileSystem /work (ELM1 WorkBytes)",
+    "home": "ProtectHome",
+    "root": "ProtectHome",
+    ".pigloros/release-launcher": "the bind-mounted launcher (LAUNCHER_DESTINATION)",
+}
+
+
+class ImageMountPointTests(unittest.TestCase):
+    def test_the_evidence_image_holds_every_mount_point_of_the_unit(self):
+        script = (ROOT / "deploy/nixos/qemu-evidence/build-images.sh").read_text()
+        created = set(re.findall(r'"\$\{work\}/tree/([^"]+)"', script))
+        for path, reason in ROOT_MOUNT_POINTS.items():
+            with self.subTest(path=path, reason=reason):
+                self.assertIn(path, created)
+
+    def test_the_unit_sources_still_name_the_launcher_destination(self):
+        source = (ROOT / "apps/pos-sandboxd/src/transient_unit.rs").read_text()
+        self.assertIn('"/.pigloros/release-launcher"', source)
+        self.assertIn('"/work"', source)
+
+
 if __name__ == "__main__":
     unittest.main()
