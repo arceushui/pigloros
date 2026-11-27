@@ -513,12 +513,9 @@ impl MemoryCommunityDomainV1 {
             .quarantine_controls
             .get(&(failure.timeline, call.control_operation_id))
         {
-            return match &original.kind {
-                RetainedControlV1::SetReason(held) if held.bound == bound => self
-                    .resolve_original(held, &original.receipt)
-                    .map(SetReasonPreparedV1::Original),
-                _ => Err(Error::Conflict),
-            };
+            return self
+                .retry_set_reason(original, &bound)
+                .map(SetReasonPreparedV1::Original);
         }
         let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
         let authority = write.with_trust(trust_snapshot_digest);
@@ -585,6 +582,21 @@ impl MemoryCommunityDomainV1 {
                 })
             })
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    /// A retry of a `SetReason`: the original outcome for identical bound
+    /// content, otherwise 4.
+    fn retry_set_reason(
+        &self,
+        original: &CommittedQuarantineControlV1,
+        bound: &SetReasonBoundV1,
+    ) -> Result<CommunityQuarantineReceiptV1, Error> {
+        match &original.kind {
+            RetainedControlV1::SetReason(held) if held.bound == *bound => {
+                self.resolve_original(held, &original.receipt)
+            }
+            _ => Err(Error::Conflict),
+        }
     }
 
     /// A retry's original outcome: its retained CQO1 must still open under
