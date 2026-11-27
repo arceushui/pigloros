@@ -165,13 +165,13 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
 }
 
 fn run_snapshot_command(program: &str, args: &[&str], timeout: Duration) -> String {
-    let mut command = Command::new(program);
-    command
+    let spawned = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    match command.spawn() {
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
         Ok(mut child) => match wait_bounded(&mut child, timeout) {
             Some(status) if status.success() => {
                 let mut bytes = Vec::new();
@@ -331,20 +331,20 @@ mod tests {
     #[test]
     fn report_if_quarantined_emits_only_on_quarantine_and_redacts_paths() {
         let snapshot_calls = Cell::new(0_u8);
-        let mut snapshot = || {
+        let snapshot = || {
             snapshot_calls.set(snapshot_calls.get() + 1);
             "stub-snapshot".to_owned()
         };
         let emitted = RefCell::new(Vec::new());
-        let mut emit = |line: &str| emitted.borrow_mut().push(line.to_owned());
+        let emit = |line: &str| emitted.borrow_mut().push(line.to_owned());
 
-        report_if_quarantined_with(None, 1, "pid=None", &mut snapshot, &mut emit);
+        report_if_quarantined_with(None, 1, "pid=None", snapshot, emit);
         report_if_quarantined_with(
             Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost)),
             2,
             "pid=Some(42)",
-            &mut snapshot,
-            &mut emit,
+            snapshot,
+            emit,
         );
         assert_eq!(snapshot_calls.get(), 0);
         assert!(emitted.borrow().is_empty());
@@ -355,8 +355,8 @@ mod tests {
             Some(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
             3,
             &with_pid,
-            &mut snapshot,
-            &mut emit,
+            snapshot,
+            emit,
         );
         assert_eq!(snapshot_calls.get(), 1);
         let first = emitted.borrow();
@@ -373,8 +373,8 @@ mod tests {
             Some(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
             4,
             "pid=None",
-            &mut snapshot,
-            &mut emit,
+            snapshot,
+            emit,
         );
         assert_eq!(snapshot_calls.get(), 2);
         let expected_no_pid =
