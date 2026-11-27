@@ -46,6 +46,29 @@ pub(super) struct HeldExecutable {
 /// Open `path` beneath `root` read-only without following any symlink or
 /// magic link and without leaving `root`.
 pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
+    // DIAGNOSTIC: the audit log shows which of these reach the kernel and what they return.
+    openat2(
+        &root,
+        ".",
+        OFlags::RDONLY.union(OFlags::DIRECTORY),
+        Mode::empty(),
+        ResolveFlags::empty(),
+    )
+    .ok();
+    rustix::fs::openat(
+        &root,
+        path.trim_start_matches('/'),
+        OFlags::RDONLY,
+        Mode::empty(),
+    )
+    .ok();
+    rustix::fs::accessat(
+        &root,
+        path.trim_start_matches('/'),
+        rustix::fs::Access::EXISTS,
+        AtFlags::empty(),
+    )
+    .ok();
     openat2(
         root,
         path.trim_start_matches('/'),
