@@ -38,13 +38,13 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 
 | Term | Module | Meaning |
 |---|---|---|
-| **Decision Preview** | external client + `plugins/persona` | The user-facing loop: client-supplied preferences and options → scoring → recommendation → calibration. It is not a bundled scenario or demo binary. |
-| **Scenario Room** | planned Wave 9 client contract | A user-configured simulation context with explicit inputs and reproducible Fork identity. No current Rust type or Gateway route is allowed to imply that this contract already exists. It is never a hard-coded product scenario. |
-| **OptionSpec** | planned external-client/persona contract | One user- or client-supplied side of a decision: a label, tags, lean hint, and optional coordinates. The current PersonaModel accepts caller-supplied preference inputs; the public client contract remains a Wave 9 deliverable. |
+| **Decision Preview** | Gateway `createDecisionPreview` / `getDecisionPreview` (#305) over `pos-runtime` | The user-facing loop: client-supplied preferences and options → scoring → recommendation → calibration, served by `createDecisionPreview` and `getDecisionPreview` (#305, ADR-140) over the `pos-runtime` Match Score. It is not a bundled scenario or demo binary. |
+| **Scenario Room** | Gateway `POST /v1/scenario-rooms` (#303), `pos-runtime` | A user-configured simulation context with explicit inputs and reproducible Fork identity, served as immutable revisions by the Scenario Room routes (#303, ADR-041 amendment). It is never a hard-coded product scenario. |
+| **OptionSpec** | Gateway `POST /v1/option-specs` (#304) | One user- or client-supplied side of a decision: a label, tags, lean hint, and optional coordinates, served as immutable revisions by the OptionSpec routes (#304). |
 | **Preference** | external client, `pos-plugin-persona` | A named dimension weight in `[-1.0, 1.0]` expressing affinity (e.g. `nature=0.8`). |
-| **PersonaModel** | `plugins/persona` | Current in-process validation primitive: scores an option string by averaging matching preference dimensions and normalizing the result. It has no public `OptionSpec` or tag contract yet. |
-| **Match Score** | `pos-plugin-persona` | The output of `PersonaModel::score_option` for one option string (a real number); the third-party client contract remains a Wave 9 deliverable. |
-| **Recommendation** | external client + `pos-plugin-persona` | The winning option determined by comparing Match Scores; "Toss-up" when margin < 0.02. |
+| **PersonaModel** | `plugins/persona` | In-process validation primitive: scores an option string by averaging matching preference dimensions and normalizing the result. It is no longer the public Match Score, which is `pigloros.match-score.v1` in `pos-runtime` (ADR-140). |
+| **Match Score** | `pos-runtime` | The `pigloros.match-score.v1` score of one OptionSpec option against one Preference (ADR-140): an integer in [-10^6, 10^6] micro-units, the mean of the weights of the option's tags that match a Preference dimension exactly, rounded half away from zero, or 0 when none matches. |
+| **Recommendation** | `pos-runtime` | The winning option determined by comparing Match Scores; "Toss-up" when `margin_micro` < 20,000 (0.02 on the signed scale), and `insufficient-evidence` when no option matches. |
 | **Fork Compare** | external client, `pos-time` | CoW Timelines, one per user-supplied option, showing diverged state side-by-side. |
 
 ---
