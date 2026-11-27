@@ -1,0 +1,44 @@
+{
+  "name": "decision-preview-profile-not-installed",
+  "operation_id": "createDecisionPreview",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-23",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "schema_version": 1,
+      "scenario_room": {
+        "id": "01JC0GATEWAYW9R00M00000001",
+        "revision": 2,
+        "digest": "fd6e6cb67f418f827eed51918ee73b195a95d0e478a85da75eb99db0145288ab"
+      },
+      "preference": {
+        "id": "01JC0GATEWAYW9PREF0000002A",
+        "revision": 1,
+        "digest": "783cea660bc4ce412fd10485f31be662bb9521343368b6b32bed2cee8b56f0b8"
+      },
+      "option_spec": {
+        "id": "01JC0GATEWAYW9QPT10N00002A",
+        "revision": 1,
+        "digest": "64041535a2bf7be712372924efbd41bfb590d6f96c4f6770f08eaa213d4657be"
+      },
+      "profile_id": "live-local-v1"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:incompatible-profile",
+      "title": "Incompatible profile",
+      "status": 409,
+      "detail": "the profile is not servable in this mode or has no installed EPF1",
+      "instance": "/v1/decision-previews",
+      "code": "incompatible-profile",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

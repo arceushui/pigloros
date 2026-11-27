@@ -55,14 +55,15 @@ production code.
 ### Merging
 
 Merge only through the Trunk merge queue, which enqueues pull requests labelled
-`ready-to-merge`. Add that label once the PR has passed its independent code
-review (re-reviewed after every later change, all High/Medium/Low findings
-fixed) and its CI is green. `/trunk merge` comments are disabled. Never press
-Merge or call the GitHub merge API. Before pushing a fix, `git fetch origin`
-and `git merge origin/main` (and the updated parent branch of a stacked PR) so
-the PR runs against the baseline the queue uses; never rebase, amend or
-force-push a pushed branch. A real fix may be pushed while the PR is queued —
-it ejects the PR, so relabel after CI is green again. See
+`ready-to-merge`. Add that label only when an explicit maintainer request or
+standing authorization covers the PR, its independent review is clean
+(re-reviewed after every later change), and required CI is green. Green checks
+alone are not merge authority. `/trunk merge` comments are disabled. Never press
+Merge or call the GitHub merge API. Never rebase, amend, or force-push a pushed
+branch. Update it against `main` or a parent branch only to resolve actual
+conflicts, not merely because the base advanced. A real fix may be pushed while
+the PR is queued; it ejects the PR, so review and verify the new head before
+relabeling within the same explicit authorization. See
 [`docs/merge-queue.md`](docs/merge-queue.md).
 
 ### Features and sizing
@@ -81,10 +82,10 @@ when it can be, and drop a rule once its mistake can no longer happen.
 | --- | --- |
 | No local Cargo except `cargo generate-lockfile` | `scripts/agent_command_guard.py` (Claude Code `PreToolUse` hook in `.claude/settings.json`) denies it; tested by `scripts/test_agent_command_guard.py` in CI |
 | Never skip git hooks (`--no-verify`, `commit -n`, overriding `core.hooksPath`) without the owner's approval for that commit | Same guard asks the owner |
-| Never rebase, amend or force-push a pushed branch; merge `origin/main` instead | Same guard asks the owner |
+| Never rebase, amend or force-push a pushed branch; merge a base only to resolve actual conflicts | Same guard asks the owner |
 | Merge only through the Trunk queue | Branch protection and the queue (`docs/merge-queue.md`) |
 | Stale `Cargo.lock` after a merge: restore main's lock before `cargo generate-lockfile` | `.githooks/pre-commit` rejects a stale lock; the restore order is a judgment call |
-| Label `ready-to-merge` only after a clean independent review and green CI | Judgment call — nothing enforces it |
+| Label `ready-to-merge` only with explicit maintainer authorization, a clean independent review, and green CI | Judgment call — nothing enforces it |
 | Root-cause the first failing job before a rerun | Judgment call — nothing enforces it |
 | No legacy or compatibility shims; replace directly | Judgment call — review finding |
 | A slow CI lane rebuilds only what its inputs changed: key a cached build by its input hash (signed when it enters a trust chain), store multi-GB results where they are not evicted (release assets, not the 10 GB Actions cache), and never cache by disabling a check | Per-lane workflow policy oracles pin the cache steps, for example `scripts/check_qemu_closure_workflow_policy.py` for the QEMU kernel cache; when to add a cache is a judgment call |

@@ -32,6 +32,15 @@ publishing or materially revising the ADR.
    the user explicitly authorizes deciding them or the architecture cannot be
    evaluated without that choice.
 
+For authority, resource budgets, recovery, or cleanup boundaries, use
+[evidence-contracts](../evidence-contracts/SKILL.md) and its lifecycle-safety
+reference. Reconcile older normative blueprints with the proposed boundary;
+record required canonical updates so competing authority models cannot coexist.
+Before multiplying platform adapters, re-check deployment requirements and
+ownership cost. Distinguish the guarantee selected for successful qualification
+from optional failed-test cleanup guarantees; do not invent infrastructure for
+an unselected failure contract.
+
 ## 2. Research before recommending
 
 Do not draft a recommendation from memory. Browse the web and record an
@@ -168,6 +177,12 @@ Before presenting the ADR, re-read it and verify:
 - [ ] Enabling prerequisites did not silently broaden the decision boundary.
 - [ ] Formal cardinalities, field labels, enum mappings, and digest dependency
       graph agree with the prose and are acyclic where required.
+- [ ] Security findings name a reachable sequence in the actual threat model;
+      callback ownership, cleanup precedence, and failure variants agree.
+- [ ] The exact native decision revision has its own review receipt, separate
+      from implementation review and delivery evidence.
+- [ ] Accepted publication names its approved revision or follows the explicit
+      status-only exception in `adr-wiki`, recording both provider versions.
 - [ ] Deterministic configurable policy is identity-bound, not only range-checked.
 - [ ] Risks include a mitigation or an explicit acceptance decision.
 - [ ] Redmine page is Markdown, parented under `ADR`, marked Proposed, and
