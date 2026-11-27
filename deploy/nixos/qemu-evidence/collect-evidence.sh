@@ -233,10 +233,21 @@ start_runtime() { # BINARY
 execute_case() { # DIR EXPORT_DIRECTORY
   local main_pid status=0
   main_pid="$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")"
+  # DIAGNOSTIC (diag/444-syscalls only): the kernel audit log records every syscall of the dynamic
+  # users (the attempt units) while the staged SCS1 allows all of them, so that the whole path of
+  # the launcher and the adapter shows which syscalls a real attempt needs.
+  auditctl -D >"$1/audit-rule-status" 2>&1 || true
+  auditctl -b 262144 -r 0 >>"$1/audit-rule-status" 2>&1 || true
+  auditctl -a always,exit -F arch=b64 -S all -F uid\>=61184 -F uid\<=65519 \
+    >>"$1/audit-rule-status" 2>&1 || true
   timeout 240 pos-sandboxd-conformance execute "$2" "${main_pid}" \
     >"$1/execute-report" 2>"$1/execute-stderr" || status=$?
   printf '%s\n' "${status}" >"$1/execute-status"
+  auditctl -D >>"$1/audit-rule-status" 2>&1 || true
   journalctl --sync
+  journalctl --boot --no-pager --output=short-monotonic _TRANSPORT=audit >"$1/audit-all" || true
+  { grep -oE 'syscall=[0-9]+ .*comm="[^"]*"' "$1/audit-all" || true; } \
+    | sed -E 's/syscall=([0-9]+) .*comm="([^"]*)"/\1 \2/' | sort -u >"$1/audit-syscalls"
   # Diagnostics for an attempt that did not complete: everything the guest logged lately.
   journalctl --boot --no-pager --output=short-monotonic --lines=800 >"$1/exchange-journal"
   # Diagnostics for an attempt unit that ended before it ran the launcher (status 203/EXEC): the

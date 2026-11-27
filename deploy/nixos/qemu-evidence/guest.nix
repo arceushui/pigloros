@@ -157,6 +157,7 @@ let
       config.systemd.package
       conformance
       pkgs.coreutils
+      pkgs.audit
       pkgs.binutils
       pkgs.findutils
       pkgs.gawk
