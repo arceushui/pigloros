@@ -2515,7 +2515,7 @@ fn run_posted_empty(
     inject: bool,
 ) -> ProcessFaultState {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::DelayedDelivery);
+    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::WithheldDelivery);
     let _zero_witness = ZeroWitness::arm();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now());
     let attempt = catch_unwind(AssertUnwindSafe(|| {
