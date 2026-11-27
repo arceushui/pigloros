@@ -58,6 +58,7 @@ munmap
 nanosleep
 newfstatat
 openat
+pidfd_open
 pipe2
 ppoll
 prctl

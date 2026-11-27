@@ -1027,13 +1027,13 @@ mod tests {
         for (text, count, digest) in [
             (
                 GUEST_SYSCALLS_X86_64,
-                109,
-                "d09ae9f647a6208703a9918da1ee9bd0385f5afcc884e196387c8f1cf069e5d3",
+                110,
+                "165a121887c64d86b2a8078e198e07e1a2c078ffec244467ca9db4505826f121",
             ),
             (
                 GUEST_SYSCALLS_AARCH64,
-                96,
-                "23bc6528c6a4ed46d6c8a9bd52e371ee946e4c785622715d350b219c35e998b5",
+                97,
+                "2f48989823a8b3b7d15299e379717bee8e29e714ba75b441e9128e07a05f1f68",
             ),
         ] {
             // The sorted names are hashed, so that a reorder alone is no failure but any addition

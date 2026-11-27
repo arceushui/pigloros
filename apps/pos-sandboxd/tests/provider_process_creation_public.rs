@@ -70,7 +70,8 @@ const SUPPORT_ROOTS: [&str; 2] = ["../../crates/pos-reference/tests/support", "t
 /// The one place a support file starts a process: the privileged test fixture re-runs its own test
 /// binary through `scripts/run-isolated-test.sh` (test-only, `attempt_directory.rs`).
 const SUPPORT_EXEMPT_FILE: &str = "attempt_directory.rs";
-const SUPPORT_EXEMPT_LINES: [&str; 2] = ["process::Command,", "Command::new(runner)"];
+/// The exempt lines, whole (after trimming), each of which must occur exactly once in the file.
+const SUPPORT_EXEMPT_LINES: [&str; 2] = ["process::Command,", "let output = Command::new(runner)"];
 
 /// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
 /// unchecked system-bus address (`unixexec` and `ibus` start processes), and
@@ -247,16 +248,34 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
     Ok(())
 }
 
-/// Every include token in `lines` has, in the macro call that follows it, a path that `listed`
-/// accepts.
+/// Every include token in `lines` has, in its own macro call (up to the closing parenthesis that
+/// matches the one after the token), a path that `listed` accepts.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_includes_are_listed(path: &Path, lines: &[String], listed: impl Fn(&str) -> bool) {
     for (number, line) in lines.iter().enumerate() {
         for token in INCLUDE_TOKENS {
-            if line.contains(token) {
-                let window = lines[number..lines.len().min(number + 4)].join("\n");
+            for (column, _) in line.match_indices(token) {
+                let rest = format!("{}\n{}", &line[column..], lines[number + 1..].join("\n"));
+                let open = token.len() - 1;
+                let mut depth = 0_usize;
+                let end = rest[open..]
+                    .char_indices()
+                    .find_map(|(offset, character)| {
+                        match character {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(open + offset + 1);
+                                }
+                            }
+                            _ => {}
+                        }
+                        None
+                    })
+                    .unwrap_or(rest.len());
                 assert!(
-                    listed(&window),
+                    listed(&rest[..end]),
                     "{}:{}: `{token}` of an unlisted path in provider code",
                     path.display(),
                     number + 1
@@ -298,13 +317,23 @@ fn included_support_files_never_create_a_local_process() -> TestResult {
             let exempt = path.ends_with(SUPPORT_EXEMPT_FILE)
                 && SUPPORT_EXEMPT_LINES
                     .iter()
-                    .any(|allowed| line.contains(allowed));
+                    .any(|allowed| line.trim() == *allowed);
             for token in FORBIDDEN {
                 assert!(
                     exempt || !line.contains(token),
                     "{}:{}: `{token}` in an included support file",
                     path.display(),
                     number + 1
+                );
+            }
+        }
+        if path.ends_with(SUPPORT_EXEMPT_FILE) {
+            for allowed in SUPPORT_EXEMPT_LINES {
+                assert_eq!(
+                    lines.iter().filter(|line| line.trim() == allowed).count(),
+                    1,
+                    "`{allowed}` must occur exactly once in {}",
+                    path.display()
                 );
             }
         }
