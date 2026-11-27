@@ -51,7 +51,8 @@
 //! needed before activation in #1438.
 
 use std::fmt;
-use std::mem::ManuallyDrop;
+#[cfg(not(test))]
+use std::mem::ManuallyDrop as Retained;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +71,9 @@ use crate::owner_store_binding::{
     OwnerStoreWitnessesV1,
 };
 use crate::owner_store_interlock::OwnerStoreFileInterlockV1;
+
+#[cfg(test)]
+use self::retained::Retained;
 
 /// The native string-length bound while the fixed diagnostic runs (ADR-123 §5).
 const DIAGNOSTIC_LENGTH_LIMIT: i32 = 65_536;
@@ -116,7 +120,7 @@ pub struct QualifiedSqliteStoreV1 {
     context: Arc<OwnerStoreContextV1>,
     main_basename: String,
     file_id: SubjectStoreFileIdV1,
-    native: ManuallyDrop<NativeOwnerV1>,
+    native: Retained<NativeOwnerV1>,
 }
 
 /// Everything retained with the native connection. The store is never
@@ -126,7 +130,7 @@ struct NativeOwnerV1 {
     /// interlock requires it to still name the retained directory (ADR-123
     /// §6): `SQLite` deletes `-wal` and `-shm` by the names it remembered.
     canonical_directory: PathBuf,
-    store: ManuallyDrop<SqliteStore>,
+    store: Retained<SqliteStore>,
     witnesses: OwnerStoreWitnessesV1,
     native_witnesses: [OwnedFd; 3],
 }
@@ -257,7 +261,7 @@ impl QualifiedSqliteStoreV1 {
             file_id: native.witnesses.store_file_id(),
             context,
             main_basename: main_basename.to_owned(),
-            native: ManuallyDrop::new(native),
+            native: Retained::new(native),
         })
     }
 
@@ -364,13 +368,13 @@ fn require_namespace<I>(interlock: I, native: &NativeOwnerV1) -> Result<I, StepV
 /// Dispose of the retained owner under the held interlock, which was taken
 /// through the retained directory. The store stays inside `ManuallyDrop`
 /// until `managed_close` owns the bare connection.
-fn close_native(native: ManuallyDrop<NativeOwnerV1>) -> bool {
+fn close_native(native: Retained<NativeOwnerV1>) -> bool {
     let NativeOwnerV1 {
         store,
         witnesses,
         native_witnesses,
         ..
-    } = ManuallyDrop::into_inner(native);
+    } = Retained::into_inner(native);
     dispose(store, witnesses, native_witnesses)
 }
 
@@ -461,7 +465,7 @@ fn setup(
 /// Open the screened main file: read-write, no create, no URI, no symlink,
 /// the standard `unix` VFS and no reservation connection. The store leaves
 /// here already inside `ManuallyDrop`, so no unwind can run its destructor.
-fn open_native(path: &Path) -> Option<ManuallyDrop<SqliteStore>> {
+fn open_native(path: &Path) -> Option<Retained<SqliteStore>> {
     #[cfg(test)]
     NATIVE_OPENS.with(|opens| opens.set(opens.get() + 1));
     Connection::open_with_flags_and_vfs(
@@ -472,7 +476,7 @@ fn open_native(path: &Path) -> Option<ManuallyDrop<SqliteStore>> {
     .ok()
     .map(|conn| {
         conn.set_prepared_statement_cache_capacity(super::SQLITE_STATEMENT_CACHE_CAPACITY);
-        ManuallyDrop::new(SqliteStore::with_connection(
+        Retained::new(SqliteStore::with_connection(
             conn,
             None,
             Box::new(pos_crypto::chain::Blake3Hasher),
@@ -486,7 +490,7 @@ fn open_native(path: &Path) -> Option<ManuallyDrop<SqliteStore>> {
 /// proved refusal. A retained connection keeps the claim. The identity check
 /// follows the proof at once.
 fn bind_native(
-    mut store: ManuallyDrop<SqliteStore>,
+    mut store: Retained<SqliteStore>,
     witnesses: OwnerStoreWitnessesV1,
     canonical_directory: PathBuf,
     pre_screen_key: SubjectStoreFileIdV1,
@@ -654,8 +658,8 @@ fn finish_sql(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
 /// witnesses and `retained` until process exit. Returns whether it closed.
 /// The store leaves `ManuallyDrop` only here, after the last step that could
 /// unwind, so a panic never runs the connection's destructor.
-fn dispose<R>(
-    store: ManuallyDrop<SqliteStore>,
+fn dispose<R: 'static>(
+    store: Retained<SqliteStore>,
     witnesses: OwnerStoreWitnessesV1,
     retained: R,
 ) -> bool {
@@ -665,7 +669,7 @@ fn dispose<R>(
         !PANIC_DISPOSE.with(std::cell::Cell::get),
         "dispose panic seam"
     );
-    let SqliteStore { conn, .. } = ManuallyDrop::into_inner(store);
+    let SqliteStore { conn, .. } = Retained::into_inner(store);
     managed_close(conn, safe)
         .map_err(|failed| retain((failed, witnesses, retained)))
         .is_ok()
@@ -687,8 +691,82 @@ fn managed_close(conn: Connection, safe: bool) -> Result<(), Box<(Connection, ru
 
 /// Retain a native owner until process exit: no destructor runs, so
 /// `SQLite` never checkpoints or deletes a companion outside the interlock.
-const fn retain<T>(value: T) -> ManuallyDrop<T> {
-    ManuallyDrop::new(value)
+#[cfg(not(test))]
+const fn retain<T>(value: T) -> Retained<T> {
+    Retained::new(value)
+}
+
+/// Test builds hand the value to the reclaim list instead of leaking it, so
+/// the fixture closes the connection after its assertions.
+#[cfg(test)]
+fn retain<T: 'static>(value: T) -> Retained<T> {
+    Retained::new(value)
+}
+
+/// Test-only stand-in for `ManuallyDrop`: dropping it parks the value on a
+/// thread-local list, which the test fixture reclaims once every assertion
+/// ran. Production keeps `ManuallyDrop` and never runs the destructor.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod retained {
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::ops::{Deref, DerefMut};
+
+    thread_local! {
+        static PARKED: RefCell<Vec<Box<dyn Any>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// One value that is parked, not dropped, when this wrapper drops.
+    pub(super) struct Retained<T: 'static>(Vec<T>);
+
+    impl<T: 'static> Retained<T> {
+        pub(super) fn new(value: T) -> Self {
+            Self(vec![value])
+        }
+
+        pub(super) fn into_inner(mut this: Self) -> T {
+            std::mem::take(&mut this.0).swap_remove(0)
+        }
+    }
+
+    impl<T: 'static> Deref for Retained<T> {
+        type Target = T;
+
+        fn deref(&self) -> &T {
+            &self.0[0]
+        }
+    }
+
+    impl<T: 'static> DerefMut for Retained<T> {
+        fn deref_mut(&mut self) -> &mut T {
+            &mut self.0[0]
+        }
+    }
+
+    impl<T: 'static> Drop for Retained<T> {
+        fn drop(&mut self) {
+            for value in std::mem::take(&mut self.0) {
+                PARKED
+                    .try_with(|parked| parked.borrow_mut().push(Box::new(value)))
+                    .unwrap_or(());
+            }
+        }
+    }
+
+    /// Really drop every parked value, closing its connection. Dropping one
+    /// value can park another, so repeat until none remain.
+    pub(super) fn reclaim() {
+        loop {
+            let batch = PARKED
+                .try_with(|parked| std::mem::take(&mut *parked.borrow_mut()))
+                .unwrap_or_default();
+            if batch.is_empty() {
+                break;
+            }
+            drop(batch);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -720,6 +798,18 @@ mod tests {
         key: SubjectStoreFileIdV1,
         other_key: SubjectStoreFileIdV1,
         context: Arc<OwnerStoreContextV1>,
+    }
+
+    impl Drop for Fixture {
+        /// Close every connection the test retained or quarantined, after
+        /// all assertions ran, and forget its claim so a reused inode is
+        /// not seen as claimed by a later test.
+        fn drop(&mut self) {
+            super::retained::reclaim();
+            if let SubjectStoreFileIdV1::Linux { device, inode } = self.key {
+                release_identity([device, inode]);
+            }
+        }
     }
 
     impl Fixture {
