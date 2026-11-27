@@ -280,6 +280,18 @@ const fn validate_host(error: Host) -> Result<()> {
     }
 }
 
+impl CommunityGuestErrorV1<'_> {
+    /// Check the bounds a CFI1 requires of its guest error: a coordinate of
+    /// at most 128 bytes and a valid capability ID.
+    ///
+    /// # Errors
+    /// Returns `BoundsExceeded` for a longer coordinate and `InvalidBinding`
+    /// for an invalid capability ID.
+    pub fn check(self) -> Result<()> {
+        validate_guest(self)
+    }
+}
+
 fn validate_guest(error: CommunityGuestErrorV1<'_>) -> Result<()> {
     if error
         .canonical_coordinate
@@ -346,7 +358,7 @@ fn encode_scalar_failure(out: &mut Vec<u8>, code: u8, value: u64) {
 }
 
 /// The closed ADR-129 host-failure code of every host error.
-const fn host_code(error: Host) -> u8 {
+pub(super) const fn host_code(error: Host) -> u8 {
     match error {
         Host::InvalidManifest => 0,
         Host::ArtifactTrustDenied { .. } => 1,

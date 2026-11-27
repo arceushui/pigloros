@@ -190,9 +190,9 @@ impl Expected {
         }
     }
 
-    /// Owner decision Q7.5: the loop device is the held image, from byte 0,
-    /// unbounded, autoclear and read-only. Its partition table is exactly
-    /// the admitted SIM1 GPT set (ADR-087 §2 step 6).
+    /// Whether the loop device uses the held image from byte 0, has no size
+    /// limit, is autoclear and read-only, and exposes exactly the admitted
+    /// SIM1 partition set.
     fn loop_matches(&self, device: &LoopDevice) -> bool {
         device.backing == Some(self.held)
             && device.offset == Some(0)

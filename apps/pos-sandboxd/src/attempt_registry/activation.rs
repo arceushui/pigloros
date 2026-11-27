@@ -1,4 +1,4 @@
-//! The durable marker of the last `MountImage` request (owner decision D2).
+//! The durable marker of the last `MountImage` request.
 //!
 //! A previous runtime's request may still be served by systemd-mountfsd after
 //! a restart's inventory, so a loop device could appear after it. Before every

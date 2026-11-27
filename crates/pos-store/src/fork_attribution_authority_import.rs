@@ -485,11 +485,10 @@ pub(crate) trait ImportBackendV1:
 ///
 /// It is the only way to install authority-origin code 2. It never routes
 /// through `import_timeline_with_id` and exposes no structural fallback.
-/// Imported code-2 rows are readable only through the code-2-aware reads of
-/// ADR-105 r6 R6.9 (`read_fork_event_suffix`, publication `read_committed`,
-/// and, once #561 lands, Replay). Every write path and every issuance or
-/// recovery read keeps the local-only validator, so an import grants no
-/// registrar, append, or publication authority.
+/// Fork suffix reads, committed publication reads, and protected Replay can
+/// read imported code-2 rows. Write, issuance, and recovery paths still
+/// require local authority. Importing rows grants no registrar, append,
+/// or publication authority.
 pub trait ForkAttributionAuthorityImportPortV1:
     ForkAttributionIssuerPolicyInstallationPortV1
 {
@@ -729,8 +728,6 @@ fn install_absent<S: ImportBackendV1>(
     })
 }
 
-/// Check the staged child: #411 for a nonempty segment, the explicit
-/// empty-segment head and range check otherwise, then the final chain hash.
 fn verify_staged<S: EventStore>(
     store: &S,
     prepared: &PreparedImportV1,
@@ -753,11 +750,6 @@ fn verify_staged<S: EventStore>(
     }
 }
 
-/// An empty child segment makes no #411 completeness claim: the staged child
-/// head equals the parent cut and its own range is empty.
-///
-/// An honest adapter always stages exactly that, so this is defence in depth
-/// that ADR-105 requires. Do not remove it as a tautology.
 fn verify_empty_segment<S: EventStore>(
     store: &S,
     child: TimelineId,
@@ -771,8 +763,6 @@ fn verify_empty_segment<S: EventStore>(
     }
 }
 
-/// Invoke #411 on the staged store view for `(cut, final_head]` and require
-/// every per-Event result `Verified` and `CompleteThroughHead`.
 fn verify_signed_segment<S: EventStore>(
     store: &S,
     child: TimelineId,

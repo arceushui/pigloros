@@ -24,9 +24,8 @@ use std::{
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// The one production file that may name the kernel's descriptor-exec call
-/// (owner decision Q9.9). ADR-087 A.3 governs the daemon mode; the launcher's
-/// final step replaces its own image and creates no process.
+/// The launcher source allowed to name the kernel's descriptor-exec call.
+/// Its final step replaces its own image without creating a process.
 const LAUNCHER_EXEC: &str = "launcher/exec.rs";
 
 /// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
