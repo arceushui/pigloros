@@ -119,15 +119,36 @@ fn prepared(directory: &tempfile::TempDir) -> Result<String, Box<dyn std::error:
     Ok(path)
 }
 
-/// Run `repair` on the prepared file and return the writable open's refusal text.
-fn refusal_after(repair: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let directory = tempfile::tempdir()?;
-    let path = prepared(&directory)?;
-    Connection::open(&path)?.execute_batch(repair)?;
-    let refusal = SqliteStore::open(&path)
+type BoxedResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Apply `repair` to the store file at `path` and hand the path back.
+fn repaired(path: String, repair: &str) -> BoxedResult<String> {
+    Connection::open(&path)
+        .and_then(|connection| connection.execute_batch(repair))
+        .map(|()| path)
+        .map_err(Into::into)
+}
+
+/// The refusal text of a writable open of `path`.
+fn open_refusal(path: &str) -> BoxedResult<String> {
+    SqliteStore::open(path)
         .err()
-        .ok_or("open accepted the schema")?;
-    Ok(refusal.to_string())
+        .map(|refusal| refusal.to_string())
+        .ok_or_else(|| "open accepted the schema".into())
+}
+
+/// Run `repair` on the prepared file and return the writable open's refusal text.
+fn refusal_after(repair: &str) -> BoxedResult<String> {
+    tempfile::tempdir()
+        .map_err(Into::into)
+        .and_then(|directory| refusal_in(&directory, repair))
+}
+
+/// Repair the prepared file inside `directory`, which must outlive the open.
+fn refusal_in(directory: &tempfile::TempDir, repair: &str) -> BoxedResult<String> {
+    prepared(directory)
+        .and_then(|path| repaired(path, repair))
+        .and_then(|path| open_refusal(&path))
 }
 
 #[test]
