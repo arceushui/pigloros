@@ -262,16 +262,13 @@ pub(crate) enum SyscallPolicy {
     Guest,
 }
 
-// The guest allow-lists are the union of what four groups need, and nothing is derived from a
-// trace: (1) systemd's executor between applying the filter and exec (socket, close_range, prctl,
-// capget, execve); (2) the static launcher, a Rust program (memory: brk, mmap, mremap, munmap,
-// mprotect, madvise; threads and signals: clone, clone3, futex, rseq, set_tid_address,
-// set_robust_list, rt_sig*, sigaltstack, tgkill; files: openat, read, write, readv, lseek,
-// newfstatat, statx, fcntl, getcwd; time and identity: clock_*, gettimeofday, get*id, uname,
-// getrandom, prlimit64); (3) the evidence adapter (read, write, exit_group and the process
-// basics); (4) IPC with the provider (the socket family, pipes, eventfd, epoll, poll). clone,
-// clone3, ioctl, prctl and the socket family are unrestricted here only because this is the
-// test-only guest installation: a production SCS1 narrows each of them by argument.
+// The guest allow-lists are the data files `guest-syscalls-*.txt`: what systemd's executor needs
+// between applying the filter and starting the launcher, what the static launcher needs (memory,
+// threads, signals, files, time, identity, the release channel's sockets, pidfds and the final
+// descriptor start of the adapter), and what the static evidence adapter needs. They are an
+// allow-list of names, not code. The call families that create threads or processes, `ioctl`,
+// `prctl` and the socket family are unrestricted here only because this is the test-only guest
+// installation: a production SCS1 narrows each of them by argument.
 const GUEST_SYSCALLS_X86_64: &str = include_str!("guest-syscalls-x86_64.txt");
 const GUEST_SYSCALLS_AARCH64: &str = include_str!("guest-syscalls-aarch64.txt");
 
