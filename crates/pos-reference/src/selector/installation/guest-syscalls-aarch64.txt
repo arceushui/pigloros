@@ -2,6 +2,7 @@ accept4
 bind
 brk
 capget
+capset
 chdir
 clock_getres
 clock_gettime
@@ -54,6 +55,7 @@ gettid
 gettimeofday
 getuid
 ioctl
+keyctl
 kill
 landlock_add_rule
 landlock_create_ruleset
@@ -74,6 +76,7 @@ nanosleep
 newfstatat
 openat
 openat2
+personality
 pidfd_open
 pipe2
 ppoll
@@ -99,6 +102,8 @@ sendmsg
 sendto
 set_robust_list
 set_tid_address
+setresuid
+setreuid
 setsockopt
 shutdown
 sigaltstack

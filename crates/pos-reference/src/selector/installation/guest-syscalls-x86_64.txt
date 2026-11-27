@@ -4,6 +4,7 @@ arch_prctl
 bind
 brk
 capget
+capset
 chdir
 clock_getres
 clock_gettime
@@ -61,6 +62,7 @@ gettid
 gettimeofday
 getuid
 ioctl
+keyctl
 kill
 landlock_add_rule
 landlock_create_ruleset
@@ -84,6 +86,7 @@ open
 openat
 openat2
 pause
+personality
 pidfd_open
 pipe
 pipe2
@@ -114,6 +117,8 @@ sendto
 set_robust_list
 set_thread_area
 set_tid_address
+setresuid
+setreuid
 setsockopt
 shutdown
 sigaltstack
