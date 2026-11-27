@@ -522,3 +522,67 @@ fn a_table_squatting_an_index_name_refuses_a_writable_open() -> TestResult {
     );
     Ok(())
 }
+
+fn fixed_refusal(kind: &str, name: &str) -> String {
+    format!("storage error: SQLite {kind} {name} is missing or has an incompatible schema")
+}
+
+#[test]
+fn a_differently_cased_view_refuses_a_writable_open() -> TestResult {
+    let refusal = refusal_after(
+        "DROP TABLE consent_revocation_journal;
+         CREATE VIEW Consent_Revocation_Journal AS SELECT 1 AS state;",
+    )?;
+    assert_eq!(refusal, fixed_refusal("table", TABLE));
+    Ok(())
+}
+
+#[test]
+fn a_differently_cased_table_squatting_an_index_name_refuses_a_writable_open() -> TestResult {
+    let refusal = refusal_after(
+        "DROP INDEX idx_events_entity_type;
+         CREATE TABLE IDX_Events_Entity_Type (value INTEGER);",
+    )?;
+    assert_eq!(refusal, fixed_refusal("index", EVENTS_INDEX));
+    Ok(())
+}
+
+#[test]
+fn a_differently_cased_index_on_another_table_refuses_a_writable_open() -> TestResult {
+    let refusal = refusal_after(
+        "DROP INDEX idx_events_entity_type;
+         CREATE INDEX IDX_EVENTS_ENTITY_TYPE ON key_registry(singleton);",
+    )?;
+    assert_eq!(refusal, fixed_refusal("index", EVENTS_INDEX));
+    Ok(())
+}
+
+#[test]
+fn a_differently_cased_index_in_place_of_the_table_refuses_a_writable_open() -> TestResult {
+    let refusal = refusal_after(
+        "DROP TABLE consent_revocation_journal;
+         CREATE TABLE other_table (value INTEGER);
+         CREATE INDEX Consent_Revocation_Journal ON other_table(value);",
+    )?;
+    assert_eq!(refusal, fixed_refusal("table", TABLE));
+    Ok(())
+}
+
+#[test]
+fn a_correct_table_stored_under_another_letter_case_is_accepted() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = prepared(&directory)?;
+    let connection = Connection::open(&path)?;
+    let sql = stored_sql(&connection, TABLE)?.ok_or("no table sql")?;
+    connection.execute_batch(&format!(
+        "DROP TABLE consent_revocation_journal; {}",
+        sql.replacen(TABLE, "Consent_Revocation_Journal", 1)
+    ))?;
+    drop(connection);
+    let store = SqliteStore::open(&path)?;
+    assert_eq!(object_count(&store.conn, TABLE)?, 1);
+    assert!(stored_sql(&store.conn, TABLE)?
+        .ok_or("no table sql")?
+        .contains("Consent_Revocation_Journal"));
+    Ok(())
+}

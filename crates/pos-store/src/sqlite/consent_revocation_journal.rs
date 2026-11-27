@@ -113,14 +113,15 @@ impl SqliteStore {
             })
     }
 
-    /// Refuse an object of that name that has another type or belongs to another table.
+    /// Refuse an object of that name, in any letter case, that has another type or belongs to another table.
     ///
+    /// `SQLite` object names are case-insensitive, so the lookup is too.
     /// This runs before the `CREATE ... IF NOT EXISTS` statements, so the
     /// refusal is this module's fixed text and not `SQLite`'s own wording.
     fn refuse_foreign_journal_object(&self, object: &JournalSchemaObject) -> Result<(), CoreError> {
         self.conn
             .query_row(
-                "SELECT type, tbl_name FROM main.sqlite_schema WHERE name = ?1",
+                "SELECT type, tbl_name FROM main.sqlite_schema WHERE name = ?1 COLLATE NOCASE",
                 params![object.name],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
@@ -141,7 +142,7 @@ impl SqliteStore {
     ) -> Result<(), CoreError> {
         self.conn
             .query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE name = ?1",
+                "SELECT sql FROM main.sqlite_schema WHERE name = ?1 COLLATE NOCASE",
                 params![object.name],
                 |row| row.get::<_, String>(0),
             )
