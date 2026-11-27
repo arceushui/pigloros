@@ -1690,10 +1690,6 @@ pub trait ConsentRevocationFoldListener: Send + Sync {
     fn on_consent_revoked(&mut self, subject_id: EntityId, fence_seq: u64);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;

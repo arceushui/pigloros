@@ -941,10 +941,6 @@ fn parse_seq(s: &str) -> Result<Seq, Box<dyn std::error::Error>> {
     Ok(Seq::from_u64(n))
 }
 
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
