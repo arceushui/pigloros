@@ -53,6 +53,36 @@ use self::{environment::LaunchEnvironment, host::ProcessHost};
 /// The one launcher-mode argument.
 pub const LAUNCH_BARRIER_MODE: &str = "launch-barrier";
 
+/// The exit status of a launcher that did not run the adapter.
+///
+/// The launcher's standard error is `/dev/null` (ADR-069 R10 section 4.2), so a failure leaves no
+/// diagnostic in the unit. A `test-support` build, which only the #444 evidence guest runs as
+/// the launcher, gives each closed failure its own status from 64, which the unit's
+/// `ExecMainStatus` then shows. Any other build exits 1.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub const fn failure_status(error: &LauncherError) -> u8 {
+    match error {
+        LauncherError::Parameters => 64,
+        LauncherError::Environment => 65,
+        LauncherError::Layout => 66,
+        LauncherError::Peer => 67,
+        LauncherError::Adapter => 68,
+        LauncherError::Identity => 69,
+        LauncherError::Ready => 70,
+        LauncherError::ReleaseUnavailable => 71,
+        LauncherError::Release(_) => 72,
+        LauncherError::Exec(_) => 73,
+    }
+}
+
+/// See the `test-support` build's function of the same name: every build but that one exits 1.
+#[cfg(not(feature = "test-support"))]
+#[must_use]
+pub const fn failure_status(_: &LauncherError) -> u8 {
+    1
+}
+
 /// Run the launcher against the real process. It never returns on success:
 /// the process image is replaced by the released adapter. The returned error
 /// is the reason the adapter was not executed.

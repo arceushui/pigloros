@@ -101,11 +101,15 @@ let
     version = "0";
     src = source;
     cargoLock.lockFile = repository + "/Cargo.lock";
+    # The test-support build gives every launcher failure its own exit status (the launcher's
+    # standard error is /dev/null), which the collector records as ExecMainStatus.
     cargoBuildFlags = [
       "--package"
       "pos-sandboxd"
       "--bin"
       "pos-sandboxd"
+      "--features"
+      "test-support"
     ];
     # As for the adapter: not buildInputs, because the wrapper would then put
     # the static libc.a ahead of libc.so for the dynamically linked build

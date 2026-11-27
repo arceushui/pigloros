@@ -1088,3 +1088,23 @@ fn the_real_entry_point_refuses_bad_parameters_and_a_missing_environment() -> Te
     ));
     Ok(())
 }
+
+#[cfg(feature = "test-support")]
+#[test]
+fn every_launcher_failure_has_its_own_exit_status() {
+    let failures = [
+        (LauncherError::Parameters, 64),
+        (LauncherError::Environment, 65),
+        (LauncherError::Layout, 66),
+        (LauncherError::Peer, 67),
+        (LauncherError::Adapter, 68),
+        (LauncherError::Identity, 69),
+        (LauncherError::Ready, 70),
+        (LauncherError::ReleaseUnavailable, 71),
+        (LauncherError::Release(ReleaseDefect::Nonce), 72),
+        (LauncherError::Exec(io::Error::other("exec")), 73),
+    ];
+    for (error, status) in failures {
+        assert_eq!(super::failure_status(&error), status);
+    }
+}
