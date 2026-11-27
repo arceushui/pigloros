@@ -236,7 +236,8 @@ execute_case() { # DIR EXPORT_DIRECTORY
   # DIAGNOSTIC (diag/444-syscalls only): the kernel audit log records every syscall of the dynamic
   # users (the attempt units) while the staged SCS1 allows all of them, so that the whole path of
   # the launcher and the adapter shows which syscalls a real attempt needs.
-  auditctl -D >"$1/audit-rule-status" 2>&1 || true
+  auditctl -e 1 >"$1/audit-rule-status" 2>&1 || true
+  auditctl -D >>"$1/audit-rule-status" 2>&1 || true
   auditctl -b 262144 -r 0 >>"$1/audit-rule-status" 2>&1 || true
   auditctl -a always,exit -F arch=b64 -S all -F uid\>=61184 -F uid\<=65519 \
     >>"$1/audit-rule-status" 2>&1 || true

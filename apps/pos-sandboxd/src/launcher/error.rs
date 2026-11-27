@@ -40,6 +40,13 @@ pub enum LauncherError {
     /// regular native ELF for this architecture.
     #[error("adapter is not a regular native ELF beneath the root")]
     Adapter,
+    /// DIAGNOSTIC: the adapter could not be opened (the OS error number).
+    #[error("adapter open failed: {0}")]
+    AdapterOpen(i32),
+    /// DIAGNOSTIC: the adapter failed this check (1 not a regular file, 2 header unreadable, 3 not
+    /// a native ELF).
+    #[error("adapter check failed: {0}")]
+    AdapterCheck(u8),
     /// A descriptor identity or digest could not be read.
     #[error("launcher or adapter identity could not be read")]
     Identity,

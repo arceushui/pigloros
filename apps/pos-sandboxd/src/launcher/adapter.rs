@@ -67,8 +67,14 @@ pub(super) fn hold_adapter(file: File) -> Result<HeldExecutable, LauncherError> 
         .metadata()
         .is_ok_and(|metadata| std::fs::Metadata::is_file(&metadata));
     let mut header = [0_u8; ELF_HEADER_BYTES];
-    if !is_regular || file.read_exact_at(&mut header, 0).is_err() || !native_elf(&header) {
-        return Err(LauncherError::Adapter);
+    if !is_regular {
+        return Err(LauncherError::AdapterCheck(1));
+    }
+    if file.read_exact_at(&mut header, 0).is_err() {
+        return Err(LauncherError::AdapterCheck(2));
+    }
+    if !native_elf(&header) {
+        return Err(LauncherError::AdapterCheck(3));
     }
     hold(file)
 }

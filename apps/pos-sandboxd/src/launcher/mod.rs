@@ -80,6 +80,9 @@ pub const fn failure_status(error: &LauncherError) -> u8 {
         LauncherError::Layout => 66,
         LauncherError::Peer => 67,
         LauncherError::Adapter => 68,
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        LauncherError::AdapterOpen(code) => 100 + (*code & 0x7f) as u8,
+        LauncherError::AdapterCheck(kind) => 74 + *kind,
         LauncherError::Identity => 69,
         LauncherError::Ready => 70,
         LauncherError::ReleaseUnavailable => 71,
