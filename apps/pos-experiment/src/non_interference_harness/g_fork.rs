@@ -22,8 +22,7 @@
 //!   `SIV1` are read back and every `RCP1` and the `CFR1` recovered from the
 //!   committed Fork Events, while the `INT1` and `CFP1` are the recorded
 //!   plan. No Driver runs and no Event is appended.
-//! - Fork: the records-form Fork runs in-process. Per owner answer Q7 it is a
-//!   genuine ADR-064 Fork execution; it is re-run when #1204 lands.
+//! - Fork: the records-form Fork runs in-process.
 //!
 //! # Surfaces
 //!
@@ -36,8 +35,7 @@
 //!   array; publicly the `[ordinal, size, digest]` of each.
 //! - snapshots: empty. The records-form run makes no Snapshot: every `RCP1`
 //!   carries no Plugin state and no Projection digest.
-//! - `ReproManifest`: empty. No `ReproManifest` exists for a records-form Fork
-//!   until the ADR-064 R7 steps form (#1204).
+//! - `ReproManifest`: empty. A records-form Fork does not emit one.
 //! - exports: the whole export stream `[kind, WorldCut id, cut ordinal,
 //!   Tick, ordinal, bytes]`; publicly `[kind, ordinal, size, digest]`.
 //!

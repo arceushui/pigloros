@@ -1,12 +1,9 @@
 //! The records form of the ADR-064 provisional Ticks (owner answer Q7).
 //!
-//! Until the ADR-064 R7 steps form lands (#1201 to #1204), no Driver
-//! declares its provisional Ticks. The host declares them instead: it builds
-//! the provisional dependency graph of every recomputation Tick from the
-//! first Tick through the plan horizon, and [`RecordsFormStagerV1`] stages,
-//! for each Tick, one draft per Driver with the nodes and edges the graph
-//! assigns to that Tick. Per Q7 a run staged this way is a genuine ADR-064
-//! Fork execution; it is re-run when #1204 lands.
+//! The host builds the provisional dependency graph from the first
+//! recomputation Tick through the plan horizon. [`RecordsFormStagerV1`] stages
+//! one draft per Driver at each Tick, with the nodes and edges assigned to
+//! that Tick.
 //!
 //! # The provisional graph
 //!

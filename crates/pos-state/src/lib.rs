@@ -148,9 +148,6 @@ fn fold_bound_event<T, E>(
 
 /// A named registry of [`Reducer`] implementations backed by per-name [`StateRegistry`]s.
 ///
-/// Plugins register reducers during Wave 3 initialisation; the registry then
-/// applies every incoming event to every registered reducer in insertion order.
-///
 /// A host serving a Fork must bind its chain from [`pos_core::fork_ancestry()`]
 /// through [`Self::bind_fork_ancestry`], [`Self::refold_events`],
 /// [`Self::restore_from_snapshot`] or [`Self::adopt_committed_fork`]; state

@@ -10,9 +10,8 @@
 //! is retained only for compatibility with stored V1 payload tooling;
 //! `PluginRegistry` rejects its reserved capability.
 //!
-//! Wave 5 uses a pure-Rust degree-grid snap ([`SpatialCloaker`]); H3/S2 are deferred.
-//! Privacy property: exact coordinates are snapped to a configurable grid resolution
-//! (e.g., 0.1 degree cells), preventing exact location tracking.
+//! [`SpatialCloaker`] snaps coordinates to a configurable degree grid.
+//! The `h3` feature also provides H3 cell conversion through `geo_cell`.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(feature = "h3")]

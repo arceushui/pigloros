@@ -808,13 +808,11 @@ pub(crate) fn without_wall_time_override(
     }
 }
 
-/// The two authority validators of ADR-105 r6 R6.9.
+/// Selects which authority origins a Fork operation accepts.
 ///
-/// Every write path and every issuance or recovery read passes
-/// [`Self::LocalOnly`]. Only a read caller (`read_fork_event_suffix`,
-/// publication `read_committed`, and, once #561 lands, Replay) passes
-/// [`Self::CodeTwoAware`].
-/// Making the local check origin-aware instead is forbidden by R6.9.
+/// Writes, issuance reads, and recovery reads require [`Self::LocalOnly`].
+/// Fork suffix reads, committed publication reads, and protected Replay
+/// accept either origin through [`Self::CodeTwoAware`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AuthorityValidatorV1 {
     /// Validator (a): `FAR1` origin exactly `Local`, an `FCC1` Fork-admission
