@@ -199,7 +199,8 @@ DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-sta
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
                         "runtime-log", "provider-sha256", "start-state", "start-journal",
                         "execute-report", "execute-stderr", "execute-status", "attempt-journal",
-                        "exchange-journal", "leftover-mounts", "leftover-umount-failures"}
+                        "exchange-journal", "leftover-mounts", "leftover-umount-failures",
+                        "executable-diagnostics"}
 # R11 5.2 gives the unit no environment, no descriptor and no credential. These environment and
 # descriptor lists must be empty or omitted (systemctl show omits some empty lists); the
 # credential lists cannot be read that way and are checked through `runtime-credentials`

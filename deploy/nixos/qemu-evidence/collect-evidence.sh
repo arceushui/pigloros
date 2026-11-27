@@ -239,6 +239,14 @@ execute_case() { # DIR EXPORT_DIRECTORY
   journalctl --sync
   # Diagnostics for an attempt that did not complete: everything the guest logged lately.
   journalctl --boot --no-pager --output=short-monotonic --lines=800 >"$1/exchange-journal"
+  # Diagnostics for an attempt unit that ended before it ran the launcher (status 203/EXEC): the
+  # installed provider executables as the guest sees them (numeric owner, group and mode), and
+  # whatever the manager still holds of the attempt units (a failed unit stays loaded).
+  {
+    ls -ln /var/lib/pigloros/sandbox/providers
+    systemctl show 'pigloros-attempt-*.service' --all \
+      --property=Id,User,DynamicUser,ExecMainStatus,ExecMainCode,Result,ActiveState || true
+  } >"$1/executable-diagnostics" 2>&1
   journalctl --boot --no-pager --output=short-monotonic _PID=1 \
     | { grep -F 'Deactivated successfully' || true; } \
     | { grep -vF "${RUNTIME_UNIT}.service" || true; } >"$1/attempt-journal"
