@@ -188,7 +188,9 @@ impl CgroupRoot {
 pub enum AttemptCgroupEmptyBasis {
     /// The retained kernel cgroup.events reported populated=0.
     Events,
-    /// The exact bound cgroup directory was removed from the retained mount.
+    /// The exact bound cgroup was removed: its link count is zero, or on kernfs
+    /// the retained events descriptor reports `ENODEV`. The kernel refuses to
+    /// remove a populated cgroup (`EBUSY`), so deletion implies emptiness.
     Deleted,
 }
 
@@ -795,6 +797,44 @@ mod tests {
         )
         .err();
         assert!(matches!(error, Some(AttemptCgroupError::Metadata(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn probe_reports_the_real_descriptor_outcome() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("events");
+        fs::write(&path, b"populated 0\n")?;
+        probe_retained_events(&File::open(&path)?)?;
+        let write_only = fs::OpenOptions::new().write(true).open(&path)?;
+        let error = probe_retained_events(&write_only).err();
+        assert_eq!(
+            error.and_then(|error| error.raw_os_error()),
+            Some(Errno::BADF.raw_os_error())
+        );
+        let error = probe_retained_events(&File::open(temporary.path())?).err();
+        assert_eq!(
+            error.and_then(|error| error.raw_os_error()),
+            Some(Errno::ISDIR.raw_os_error())
+        );
+        Ok(())
+    }
+
+    /// The real kernfs check: needs root and a cgroup2 mount at
+    /// `/sys/fs/cgroup`; run with `--ignored`.
+    #[test]
+    #[ignore = "needs root and a cgroup2 mount"]
+    fn real_kernfs_removed_node_reports_enodev() -> Result<(), Box<dyn Error>> {
+        let directory = format!("/sys/fs/cgroup/pos-sandboxd-enodev-{}", std::process::id());
+        fs::create_dir(&directory)?;
+        let events = File::open(format!("{directory}/cgroup.events"))?;
+        probe_retained_events(&events)?;
+        fs::remove_dir(&directory)?;
+        let error = probe_retained_events(&events).err();
+        assert_eq!(
+            error.and_then(|error| error.raw_os_error()),
+            Some(Errno::NODEV.raw_os_error())
+        );
         Ok(())
     }
 
