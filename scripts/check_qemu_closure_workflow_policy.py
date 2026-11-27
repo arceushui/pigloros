@@ -35,7 +35,7 @@ ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
 # imported policy modules are pinned too: they supply EXPECTED's headroom step
 # (with the CI stage conditions that module imports) and the graph comparison.
 PRODUCER_SHA256 = {
-    "scripts/check_asan_ci_policy.py": "d8f34a83538f034127fd2ee0e0e9e89aa9843741fa3228f3c30d164a5d17d2ed",
+    "scripts/check_asan_ci_policy.py": "02553383756db91981d42745e2b005d7f73f10dc9c5c2ab30437df919f6fcb5b",
     "scripts/ci_stage_policy.py": "1ff0e611958501bfef1bfb54ea4016c129ed717d01de23a51cf8f7bf2cfd373e",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "f8935b411c586d0fdebf1c24aca650459bd166593ab3025ed0df05e4e2012a72",
