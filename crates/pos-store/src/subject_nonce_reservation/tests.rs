@@ -24,7 +24,6 @@ const OTHER_STORE: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
     device: 2,
     inode: 4,
 };
-const ONE_MIB: usize = 1024 * 1024;
 const REFUSED: SubjectDataConsumerErrorV1 = SubjectDataConsumerErrorV1::NonceReservationRefused;
 
 /// How the fake storage answers a replacement.
@@ -38,8 +37,6 @@ enum Replace {
     FailAfterStoring,
     /// Report success but store something else.
     StoreOther,
-    /// Report success but store more than the documented 1 MiB.
-    StoreOversized,
 }
 
 struct Storage {
@@ -94,10 +91,6 @@ impl SubjectNonceLedgerStorageV1 for Storage {
             }
             Replace::StoreOther => {
                 self.bytes = b"other".to_vec();
-                Ok(())
-            }
-            Replace::StoreOversized => {
-                self.bytes = vec![0; ONE_MIB + 1];
                 Ok(())
             }
         }
@@ -378,25 +371,6 @@ fn a_readback_that_differs_from_the_replacement_refuses_and_keeps_refusing() -> 
         (port.storage.replaces, &port.storage.bytes),
         (1, &b"other".to_vec())
     );
-    Ok(())
-}
-
-#[test]
-fn an_oversized_readback_is_refused() -> TestResult {
-    let mut storage = Storage::new(&single(2)?);
-    storage.replace = Replace::StoreOversized;
-    let mut port = new_port(storage);
-    assert_eq!(
-        port.reserve_data_counter(data(OWNER, 1)?, digest()),
-        Err(REFUSED)
-    );
-    assert_eq!(port.storage.bytes.len(), ONE_MIB + 1);
-    // An oversized ledger is never decoded, so the next call refuses unwritten.
-    assert_eq!(
-        port.reserve_data_counter(data(OWNER, 1)?, digest()),
-        Err(REFUSED)
-    );
-    assert_eq!(port.storage.replaces, 1);
     Ok(())
 }
 

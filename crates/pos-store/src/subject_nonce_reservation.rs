@@ -2,7 +2,8 @@
 //! ADR-137 N1/N2 durable SNL1 reservation over a checked ledger storage.
 //!
 //! [`DurableSubjectNonceReservationV1`] is the production shape of
-//! [`SubjectNonceReservationPortV1`]. It owns the N1 steps and nothing else:
+//! [`SubjectNonceReservationPortV1`]. The `test-support` gate is intentional
+//! until #1438 activates it: N1's only production port is not wired yet. It owns the N1 steps and nothing else:
 //! read the bounded ledger, strictly decode it, validate the exact
 //! `(owner, role, epoch, root_material_digest, store_file_id)`, advance the
 //! counter, durably replace the ledger with a readback, and return the counter
