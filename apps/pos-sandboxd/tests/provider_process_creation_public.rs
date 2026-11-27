@@ -73,6 +73,24 @@ const SUPPORT_EXEMPT_FILE: &str = "attempt_directory.rs";
 /// The exempt lines, whole (after trimming), each of which must occur exactly once in the file.
 const SUPPORT_EXEMPT_LINES: [&str; 2] = ["process::Command,", "let output = Command::new(runner)"];
 
+/// The guest syscall allow-list data files and the process-creating names each may hold. The
+/// allow-list lets systemd's executor and the launcher start the adapter, so these names are
+/// expected; a new `fork`, `clone`, `exec` or `spawn` family name in a data file is a reviewed
+/// change to this table.
+const GUEST_SYSCALL_FILES: [(&str, &[&str]); 2] = [
+    (
+        "../../crates/pos-reference/src/selector/installation/guest-syscalls-x86_64.txt",
+        &["clone", "clone3", "execve", "execveat"],
+    ),
+    (
+        "../../crates/pos-reference/src/selector/installation/guest-syscalls-aarch64.txt",
+        &["clone", "clone3", "execve", "execveat"],
+    ),
+];
+
+/// Name fragments of every syscall that creates a process or replaces a process image.
+const PROCESS_SYSCALL_FRAGMENTS: [&str; 4] = ["fork", "clone", "exec", "spawn"];
+
 /// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
 /// unchecked system-bus address (`unixexec` and `ibus` start processes), and
 /// zlink's non-atomic Unix stream.
@@ -348,6 +366,28 @@ fn included_support_files_never_create_a_local_process() -> TestResult {
                     .iter()
                     .any(|name| window.contains(&format!("\"{name}\"")))
         });
+    }
+    Ok(())
+}
+
+/// The guest allow-list data files are data, not Rust, so the token scan never reads them. The
+/// process-related names in them are pinned here instead.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn guest_syscall_lists_hold_only_the_expected_process_names() -> TestResult {
+    for (file, expected) in GUEST_SYSCALL_FILES {
+        let text = fs::read_to_string(manifest_root().join(file))?;
+        let mut process_names: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|name| {
+                PROCESS_SYSCALL_FRAGMENTS
+                    .iter()
+                    .any(|fragment| name.contains(fragment))
+            })
+            .collect();
+        process_names.sort_unstable();
+        assert_eq!(process_names, expected, "{file}");
     }
     Ok(())
 }
