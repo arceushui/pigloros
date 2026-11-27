@@ -1273,3 +1273,5 @@ fn only_an_accept_that_produced_nothing_backs_off() {
     assert!(!missed(false, true, true));
     assert!(!missed(false, false, false));
 }
+
+mod selector_client;
