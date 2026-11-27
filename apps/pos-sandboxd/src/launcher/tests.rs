@@ -8,6 +8,7 @@ use std::{
         fd::{AsRawFd, OwnedFd},
         unix::fs::symlink,
     },
+    path::Path,
     sync::Mutex,
     thread,
     time::Duration,
@@ -18,6 +19,7 @@ use pos_reference::sandbox_provider_protocol::{
     LaunchParameters, LauncherReady, SandboxExecutionMode,
 };
 use rustix::{
+    fs::{mknodat, FileType, Mode, CWD},
     net::{
         recvmsg, send, sendmsg, socketpair, AddressFamily, RecvAncillaryBuffer,
         RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
@@ -429,20 +431,6 @@ fn directory_with(name: &str, bytes: &[u8]) -> Result<(tempfile::TempDir, File),
     fs::write(directory.path().join(name), bytes)?;
     let file = open_beneath(File::open(directory.path())?, name)?;
     Ok((directory, file))
-}
-
-#[test]
-fn open_beneath_refuses_symlinks_and_escapes() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    fs::write(directory.path().join("real"), b"x")?;
-    symlink("real", directory.path().join("link"))?;
-    let root = File::open(directory.path())?;
-    let opened = open_beneath(&root, "/real")?;
-    assert!(rustix::io::fcntl_getfd(&opened)?.contains(rustix::io::FdFlags::CLOEXEC));
-    assert!(open_beneath(&root, "link").is_err());
-    assert!(open_beneath(&root, "../escape").is_err());
-    assert!(open_beneath(&root, "missing").is_err());
-    Ok(())
 }
 
 #[test]
@@ -1014,43 +1002,99 @@ fn the_local_layout_keeps_the_proxy_open_for_the_adapter() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn open_beneath_walks_plain_names_and_refuses_every_other_path() -> TestResult {
-    let tree = tempfile::tempdir()?;
-    let root = File::open(tree.path())?;
-    std::fs::create_dir_all(tree.path().join("a/b"))?;
-    std::fs::write(tree.path().join("a/b/file"), b"x")?;
-    std::fs::write(tree.path().join("top"), b"y")?;
-    symlink("a", tree.path().join("link"))?;
-    symlink("top", tree.path().join("a/final"))?;
-    symlink("/proc/self/exe", tree.path().join("magic"))?;
+/// The files of the `open_beneath` tests: plain files and directories.
+fn beneath_files(top: &Path) -> TestResult {
+    fs::create_dir_all(top.join("a/b"))?;
+    fs::write(top.join("a/b/file"), b"x")?;
+    fs::write(top.join("top"), b"y")?;
+    Ok(())
+}
 
+/// Symlinks and a FIFO of the `open_beneath` tests.
+fn beneath_links(top: &Path) -> TestResult {
+    symlink("a", top.join("link"))?;
+    symlink("top", top.join("a/final"))?;
+    mknodat(
+        CWD,
+        top.join("fifo"),
+        FileType::Fifo,
+        Mode::RUSR | Mode::WUSR,
+        0,
+    )?;
+    Ok(())
+}
+
+fn beneath_tree() -> Result<(tempfile::TempDir, File), Box<dyn Error>> {
+    let tree = tempfile::tempdir()?;
+    beneath_files(tree.path())?;
+    beneath_links(tree.path())?;
+    let root = File::open(tree.path())?;
+    Ok((tree, root))
+}
+
+#[test]
+fn open_beneath_walks_plain_names() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
     let mut text = String::new();
-    open_beneath(&root, "/a/b/file")?.read_to_string(&mut text)?;
+    let mut opened = open_beneath(&root, "/a/b/file")?;
+    assert!(rustix::io::fcntl_getfd(&opened)?.contains(rustix::io::FdFlags::CLOEXEC));
+    opened.read_to_string(&mut text)?;
     assert_eq!(text, "x");
-    // Repeated separators name the same file.
+    // Leading and doubled separators collapse.
     assert!(open_beneath(&root, "a//b/file").is_ok());
-    assert!(open_beneath(&root, "top").is_ok());
+    assert!(open_beneath(&root, "///top").is_ok());
+    Ok(())
+}
+
+#[test]
+fn open_beneath_refuses_every_other_path() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let long = "x".repeat(256);
     for refused in [
         "",
         "/",
         ".",
         "a/./b/file",
         "..",
+        "../escape",
         "a/../top",
         "a/b/..",
         "link/b/file",
         "a/final",
-        "magic",
         "missing",
         "a/missing/file",
         "top/file",
+        "top/",
+        "a/b/file/",
+        "a/\0b",
+        long.as_str(),
     ] {
         assert!(
             open_beneath(&root, refused).is_err(),
             "{refused:?} must be refused"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn open_beneath_refuses_a_magic_link() -> TestResult {
+    // `/proc/<pid>/exe` is a magic link: it names a file without being a symlink to a path.
+    let host_root = File::open("/")?;
+    let pid = std::process::id();
+    // The control: an ordinary file of the same directory opens.
+    assert!(open_beneath(&host_root, &format!("proc/{pid}/status")).is_ok());
+    for path in [format!("proc/{pid}/exe"), format!("proc/{pid}/cwd")] {
+        assert!(open_beneath(&host_root, &path).is_err(), "{path}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_fifo_opens_without_blocking_and_is_not_an_adapter() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let fifo = open_beneath(&root, "fifo")?;
+    assert!(matches!(hold_adapter(fifo), Err(LauncherError::Adapter)));
     Ok(())
 }
 
