@@ -436,7 +436,9 @@ fn lpv1_with_eight_or_ten_fields_is_rejected() -> TestResult {
     ] {
         let mut fields = unsigned.clone();
         edit(&mut fields);
-        // The edited body gets its own correct self-digest, so only the field count can reject it.
+        // The edited body gets its own correct self-digest. The decoder checks the length of the
+        // body before its digest, so this exercises the length check only (the digest error is
+        // `lpv1_with_a_wrong_digest_is_rejected_with_the_digest_error`).
         let mut body = Vec::new();
         ciborium::into_writer(&Value::Array(fields.clone()), &mut body)?;
         let digest = blake3::hash(&[b"PiglorOS.LPV1.v1\0".as_slice(), &body].concat());
@@ -453,6 +455,20 @@ fn lpv1_with_eight_or_ten_fields_is_rejected() -> TestResult {
             Err(SandboxProviderProtocolError::InvalidEncoding)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn lpv1_with_a_wrong_digest_is_rejected_with_the_digest_error() -> TestResult {
+    let lpv = launch()?.to_canonical_cbor()?;
+    // A nine-field body with a nonzero digest that is not its own: only the digest rejects it.
+    let wrong = mutated(&lpv, &[1], Value::Bytes(vec![1; 32]))?;
+    assert_eq!(
+        LaunchParameters::from_canonical_cbor(&wrong),
+        Err(SandboxProviderProtocolError::DigestMismatch)
+    );
+    // The same body with its own digest decodes.
+    assert!(LaunchParameters::from_canonical_cbor(&lpv).is_ok());
     Ok(())
 }
 
