@@ -54,7 +54,7 @@ use super::super::vault::{fresh_identity, VaultKeyV1};
 use super::{
     control_request, failure_record, ledger_states, CommittedQuarantineControlV1,
     CommunityQuarantineReceiptV1, OperationV1, QuarantineLedgerV1, QuarantineReasonStateV1,
-    SetReasonBoundV1, StagedSetReasonV1,
+    RetainedControlV1, RetainedSetReasonV1, SealedControlV1, SetReasonBoundV1, StagedSetReasonV1,
 };
 
 /// Preferred CBOR encoding of the empty scope-member array.
@@ -490,19 +490,23 @@ impl MemoryCommunityDomainV1 {
         StagedSetReasonV1 {
             key: (failure.timeline, call.control_operation_id),
             committed: CommittedQuarantineControlV1 {
-                bound: SetReasonBoundV1 {
-                    key: operation.key,
-                    expected_ledger: call.expected_ledger_digest,
-                    reason: call.reason.code(),
-                    host_failure: failure.host_failure,
-                    trust_policy_snapshot_digest: failure.trust_policy_snapshot_digest,
-                    expected_generation: call.expected_generation,
-                    expected_head: call.expected_state_head_digest,
-                },
-                generation: operation.member.generation,
-                metadata_key,
-                records,
-                admission,
+                kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                    bound: SetReasonBoundV1 {
+                        key: operation.key,
+                        expected_ledger: call.expected_ledger_digest,
+                        reason: call.reason.code(),
+                        host_failure: failure.host_failure,
+                        trust_policy_snapshot_digest: failure.trust_policy_snapshot_digest,
+                        expected_generation: call.expected_generation,
+                        expected_head: call.expected_state_head_digest,
+                    },
+                    generation: operation.member.generation,
+                    sealed: SealedControlV1 {
+                        metadata_key,
+                        records,
+                    },
+                    admission,
+                }),
                 receipt,
             },
             keys,
