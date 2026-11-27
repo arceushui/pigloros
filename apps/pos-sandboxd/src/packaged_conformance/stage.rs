@@ -124,21 +124,30 @@ impl StageCase {
 }
 
 /// Write each of `files` as a new file of `directory`, readable and writable
-/// by its owner only. A file that exists already is never overwritten.
+/// by its owner only. A file that exists already is never overwritten, and a
+/// failure removes the files this call created, so that a rerun starts clean.
 ///
 /// # Errors
 /// [`ConformanceError::Io`] when `directory` is missing, or a file exists or
 /// cannot be written.
 fn write_export(directory: &Path, files: &[(&str, &[u8])]) -> Result<(), ConformanceError> {
-    files.iter().try_for_each(|(name, bytes)| {
-        OpenOptions::new()
+    let mut created = Vec::new();
+    let written = files.iter().try_for_each(|(name, bytes)| {
+        let path = directory.join(name);
+        let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(directory.join(name))
-            .and_then(|mut file| file.write_all(bytes))
-            .map_err(ConformanceError::Io)
-    })
+            .open(&path)?;
+        created.push(path);
+        file.write_all(bytes)
+    });
+    if written.is_err() {
+        for path in &created {
+            drop(fs::remove_file(path));
+        }
+    }
+    written.map_err(ConformanceError::Io)
 }
 
 /// One command-line argument as text.

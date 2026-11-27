@@ -7,13 +7,23 @@
 //! fixed installation as the root selector does, derives the case's grant
 //! commitment ([`GuestProviderClient::commitment`]) and runs the exchange
 //! with the process `MAIN_PID` over the execute socket that SIC1 names. A
-//! provider that is still opening answers SPE1 `11`; the exchange is asked
-//! again for [`EXECUTE_WINDOW`] on the monotonic clock.
+//! provider that is still opening answers SPE1 `11`; each such answer is
+//! followed by another exchange while [`EXECUTE_WINDOW`] has not elapsed on the
+//! monotonic clock when it arrives. The window bounds when a refused exchange
+//! is asked again, not the length of one exchange, which the case's own
+//! deadline bounds.
 //!
-//! The report is `execute executed` and one `NAME<TAB>VALUE` line of evidence per
-//! observation the selector made, or one `execute` line for an exchange that
-//! produced no execution (`GuestProviderClient::execute_report`). That is an
-//! outcome, not an error: the guest checker judges every line.
+//! The report (`GuestProviderClient::execute_report`) is, line by line, one of:
+//!
+//! - `execute<TAB>executed`, then one `NAME<TAB>VALUE` line of evidence per
+//!   observation the selector made;
+//! - `execute<TAB>refused<TAB>CODE`, the SPE1 failure code, or `undecodable`;
+//! - `execute<TAB>failed<TAB>REASON`, an exchange that failed before an AGR1;
+//! - `execute<TAB>unreportable`, an execution whose signed records cannot be
+//!   reported.
+//!
+//! A provider that does not execute is an outcome, not an error: the guest
+//! checker judges every line.
 
 use std::ffi::OsString;
 use std::fmt::Display;
@@ -42,7 +52,7 @@ pub(super) const INPUT_FILE: &str = "input";
 /// The staged execution is the installation's case 0.
 const CASE_ORDINAL: u16 = 0;
 
-/// How long a provider that is still opening is asked again.
+/// How long after the first exchange a provider that is still opening is asked again.
 const EXECUTE_WINDOW: Duration = Duration::from_mins(2);
 
 /// One execute run's files and provider process, read from its arguments.
