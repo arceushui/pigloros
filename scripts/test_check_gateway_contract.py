@@ -70,15 +70,18 @@ DATA_KEYWORDS = {"enum", "const", "default"}
 
 
 def without_annotations(value: object) -> object:
-    """`value` without its annotation keywords (`checker.ANNOTATIONS`). The compatibility
-    comparison ignores them, and a description may be updated within v1, while
-    `--append-only` keeps the baseline's frozen text: a fresh freeze then equals the baseline
-    in everything but those annotations. A schema map keyed by a property name is kept."""
+    """`value` without schema annotations and limit-source provenance. The compatibility
+    comparison ignores schema annotations, and a description may be updated within v1, while
+    `--append-only` keeps the baseline's frozen text. Limit source text does not change a
+    frozen limit's meaning. A schema map keyed by a property name is kept."""
     if isinstance(value, dict):
+        is_limit = set(value) == checker.LIMIT_MEMBERS
         return {
             key: item if key in DATA_KEYWORDS else without_annotations(item)
             for key, item in value.items()
-            if key not in checker.ANNOTATIONS or isinstance(item, dict)
+            if isinstance(item, dict) or (
+                key not in checker.ANNOTATIONS and not (is_limit and key == "source")
+            )
         }
     if isinstance(value, list):
         return [without_annotations(item) for item in value]
