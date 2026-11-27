@@ -24,6 +24,15 @@
 //! The writers read both from the mutation's own objects because the
 //! manifest that names them is opaque to adapters.
 //!
+//! The UPDATE and DELETE filter on `erasure_request_id` alone, the second
+//! primary-key column, so each scans `erasure_fence_rows`. The table holds one
+//! row per frozen Timeline and stays small, so the scan is accepted and this
+//! module adds no index (the table is owned by [`super::erasure_fence_rows`]).
+//!
+//! Requests frozen before these writers existed get no rows from them. The
+//! readiness reconciliation that covers those requests is Redmine #1560, which
+//! blocks the owner activation (#1438).
+//!
 //! Like the table in [`super::erasure_fence_rows`], this module stays
 //! test-support gated until owner activation (#1438). Ungating must remove
 //! the `cfg` gates of both modules and the call in `sqlite.rs` together.
@@ -51,15 +60,22 @@ enum FenceDisposition {
     Mirror(i64),
 }
 
-const fn disposition(lifecycle: ErasureLifecycleV1) -> FenceDisposition {
+/// The stored codes are the ADR-060 lifecycle discriminants, which ADR-097 B6
+/// fixes at 2 through 6. Reordering the enum must fail the build, not silently
+/// change what is stored.
+const _: () = assert!(
+    ErasureLifecycleV1::AccessFrozen as u8 == 2
+        && ErasureLifecycleV1::DestructionDispatched as u8 == 3
+        && ErasureLifecycleV1::AwaitingAcknowledgements as u8 == 4
+        && ErasureLifecycleV1::Complete as u8 == 5
+        && ErasureLifecycleV1::PartialFailure as u8 == 6
+);
+
+fn disposition(lifecycle: ErasureLifecycleV1) -> FenceDisposition {
     match lifecycle {
         ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => FenceDisposition::NoRow,
         ErasureLifecycleV1::Rejected => FenceDisposition::Clear,
-        ErasureLifecycleV1::AccessFrozen => FenceDisposition::Mirror(2),
-        ErasureLifecycleV1::DestructionDispatched => FenceDisposition::Mirror(3),
-        ErasureLifecycleV1::AwaitingAcknowledgements => FenceDisposition::Mirror(4),
-        ErasureLifecycleV1::Complete => FenceDisposition::Mirror(5),
-        ErasureLifecycleV1::PartialFailure => FenceDisposition::Mirror(6),
+        mirrored => FenceDisposition::Mirror(i64::from(mirrored as u8)),
     }
 }
 
