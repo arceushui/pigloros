@@ -46,21 +46,22 @@ const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition
 type TestResult = Fallible<()>;
 
 /// The aborted pass's `reservation_operation_id`.
-const OPERATION: [u8; 16] = [0x30; 16];
+pub(in crate::community::pass_abort) const OPERATION: [u8; 16] = [0x30; 16];
 
 /// The protection ID of the pass's one metadata key.
-const PASS_KEY_ID: [u8; 16] = [0x61; 16];
+pub(in crate::community::pass_abort) const PASS_KEY_ID: [u8; 16] = [0x61; 16];
 
 /// The pass's CPR1 horizon, which the CAB1 copies.
-const PASS_HORIZON: u64 = 9_000_000;
+pub(in crate::community::pass_abort) const PASS_HORIZON: u64 = 9_000_000;
 
 /// The pass's pending erasure entry.
-const ENTRY: CommunityPendingReservationV1 = CommunityPendingReservationV1 {
-    targets: 6,
-    rows: 3,
-};
+pub(in crate::community::pass_abort) const ENTRY: CommunityPendingReservationV1 =
+    CommunityPendingReservationV1 {
+        targets: 6,
+        rows: 3,
+    };
 
-fn pass_key() -> Result<CommunityPassKeyV1, Error> {
+pub(in crate::community::pass_abort) fn pass_key() -> Result<CommunityPassKeyV1, Error> {
     CommunityPassKeyV1::new(target(), GENERATION, 7)
 }
 
@@ -83,7 +84,7 @@ fn initialization_head(
 
 /// The installed CDP1 roster: the fixture's two members, and a third of a
 /// Plugin the registry holds no release of when `extra` names it.
-fn profile_rows<'a>(
+pub(in crate::community::pass_abort) fn profile_rows<'a>(
     roster: &'a Roster,
     extra: Option<&'a ImplementationKeyV1>,
 ) -> Fallible<Vec<CommunityProfileMemberV1<'a>>> {
@@ -103,17 +104,17 @@ fn profile_rows<'a>(
 }
 
 /// One initialized domain, and a pass that may be reserved on it.
-struct Case {
-    roster: Roster,
-    domain: Bootstrapped,
-    head: Hash,
+pub(in crate::community::pass_abort) struct Case {
+    pub(in crate::community::pass_abort) roster: Roster,
+    pub(in crate::community::pass_abort) domain: Bootstrapped,
+    pub(in crate::community::pass_abort) head: Hash,
     /// A third roster member of a Plugin the registry holds no release of.
-    extra_plugin: Option<ImplementationKeyV1>,
+    pub(in crate::community::pass_abort) extra_plugin: Option<ImplementationKeyV1>,
 }
 
 impl Case {
     /// An initialized domain, as a Reserve finds it.
-    fn new() -> Fallible<Self> {
+    pub(in crate::community::pass_abort) fn new() -> Fallible<Self> {
         Self::with_horizon(HORIZON)
     }
 
@@ -144,7 +145,7 @@ impl Case {
 
     /// Reserve the pass: its record, its metadata key and its pending
     /// entry, whose `run_pass` call is live when `live`.
-    fn reserve(&mut self, live: bool) -> Fallible<()> {
+    pub(in crate::community::pass_abort) fn reserve(&mut self, live: bool) -> Fallible<()> {
         let pass_key = pass_key()?;
         let reservation = CommunityReservationInputV1 {
             pass_key,
@@ -213,12 +214,14 @@ impl Case {
     }
 
     /// The domain.
-    const fn domain(&self) -> &MemoryCommunityDomainV1 {
+    pub(in crate::community::pass_abort) const fn domain(&self) -> &MemoryCommunityDomainV1 {
         &self.domain.world.domain
     }
 
     /// The domain, to change what a call reads.
-    const fn domain_mut(&mut self) -> &mut MemoryCommunityDomainV1 {
+    pub(in crate::community::pass_abort) const fn domain_mut(
+        &mut self,
+    ) -> &mut MemoryCommunityDomainV1 {
         &mut self.domain.world.domain
     }
 
@@ -272,7 +275,7 @@ impl Case {
     /// Whether the pass metadata key is still open: it seals one probe
     /// record under a CSM1 cover built like the Reserve's, and a closed key
     /// refuses.
-    fn key_seals(&mut self) -> Fallible<bool> {
+    pub(in crate::community::pass_abort) fn key_seals(&mut self) -> Fallible<bool> {
         let scope = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
             store_incarnation: INCARNATION,
             metadata_anchor_timeline: target(),
@@ -403,7 +406,7 @@ impl Case {
     }
 
     /// The plaintext of each sealed record of the committed Abort.
-    fn records(&self) -> Fallible<Vec<Vec<u8>>> {
+    pub(in crate::community::pass_abort) fn records(&self) -> Fallible<Vec<Vec<u8>>> {
         let domain = self.domain();
         let committed = domain
             .pass_aborts

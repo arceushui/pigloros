@@ -5,6 +5,11 @@ use pos_reference::sandbox_provider_protocol::{
 
 struct LocalBindingFixture {
     grant: AuthenticatedAdmissionGrant,
+    grant_bytes: Vec<u8>,
+    provider: AdmittedSandboxProvider,
+    image: AdmittedSandboxImage,
+    launch: LaunchPolicy,
+    request: SandboxExecuteRequest,
     commitment: SelectorGrantCommitment,
     policy: Vec<u8>,
     plans: Vec<NetworkExchangePlan>,
@@ -63,13 +68,29 @@ impl LocalBindingFixture {
             Value::Array(plans.iter().map(|plan| bytes(plan.plan_digest)).collect()),
             &fixture.authority.runtime,
         )?;
-        let grant = provider.authenticate_grant(&grant, &request, &image, &launch, &commitment)?;
+        let authenticated =
+            provider.authenticate_grant(&grant, &request, &image, &launch, &commitment)?;
         Ok(Self {
-            grant,
+            grant: authenticated,
+            grant_bytes: grant,
+            provider,
+            image,
+            launch,
+            request,
             commitment,
             policy: fixture.lps1,
             plans,
         })
+    }
+
+    /// The admission a provider derives while it authenticates the grant.
+    fn derive(&self) -> Result<Option<LocalNetworkAdmission>, SandboxAdmissionError> {
+        self.provider.authenticate_grant_with_local_network(
+            &self.grant_bytes,
+            &self.request,
+            (&self.image, &self.launch),
+            (&self.commitment, &self.policy),
+        )
     }
 
     fn bind(
@@ -113,6 +134,47 @@ fn local_network_binds_ordered_occurrences_endpoints_grant_and_limits() -> TestR
             assert_eq!(endpoint.response_maximum, 34);
         }
     }
+    Ok(())
+}
+
+/// A provider derives the admission of a Local grant, and of no other mode.
+#[test]
+fn local_network_is_derived_for_the_local_mode_only() -> TestResult {
+    let local = LocalBindingFixture::new(ExecutionMode::Local, vec![], vec![], [1; 3])?;
+    assert_eq!(local.derive()?, Some(local.bind()?));
+    let direct =
+        local
+            .grant
+            .local_network_if_local(&local.commitment, &local.policy, &local.plans)?;
+    assert_eq!(direct, local.derive()?);
+    for mode in [
+        ExecutionMode::AirGapped,
+        ExecutionMode::Replay,
+        ExecutionMode::Fork,
+    ] {
+        let fixture = LocalBindingFixture::new(mode, vec![], vec![], [1; 3])?;
+        assert_eq!(fixture.derive()?, None);
+    }
+    // Neither a policy that does not decode nor another commitment derives
+    // an admission, or authenticates the grant.
+    assert!(local
+        .grant
+        .local_network_if_local(&local.commitment, &[255], &local.plans)
+        .is_err());
+    let foreign = LocalBindingFixture::new(ExecutionMode::Local, vec![], vec![], [2; 3])?;
+    assert!(local
+        .grant
+        .local_network_if_local(&foreign.commitment, &local.policy, &local.plans)
+        .is_err());
+    assert!(local
+        .provider
+        .authenticate_grant_with_local_network(
+            &local.grant_bytes,
+            &local.request,
+            (&local.image, &local.launch),
+            (&foreign.commitment, &local.policy),
+        )
+        .is_err());
     Ok(())
 }
 
