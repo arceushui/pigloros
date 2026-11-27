@@ -31,8 +31,8 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
-    begin_immediate_scope, finish_immediate_scope, sqlite_schema_ddl, SqliteSchemaColumn,
-    SqliteSchemaTable, SqliteStore,
+    begin_immediate_scope, finish_immediate_scope, sqlite_schema_ddl, SqliteImmediateScopeV1,
+    SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
 
 /// The D1 table, keyed by `(request_digest, artifact, artifact_identity)`.
@@ -110,7 +110,8 @@ const SUBJECT_KEY_DELETION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[SqliteSchemaT
 /// The inventory is bounded at 4,096 directory entries, each of which yields
 /// at most one row; the SNL1 row and one absent-at-start row for the other
 /// file kind add two more, so [`MAX_RECEIPT_ROWS`] is 4,098.
-const REQUEST_ROWS_SQL: &str = "SELECT artifact, artifact_identity, state, receipt_digest
+const REQUEST_ROWS_SQL: &str = "SELECT artifact, artifact_identity, state, receipt_digest,
+            owner_id, epoch
      FROM subject_key_deletion_receipts
      WHERE request_digest = ?1
      ORDER BY artifact, artifact_identity
@@ -119,7 +120,7 @@ const REQUEST_ROWS_SQL: &str = "SELECT artifact, artifact_identity, state, recei
 /// The most rows a request may hold; more is a corrupt table and fails closed.
 const MAX_RECEIPT_ROWS: usize = 4_098;
 
-const ROW_STATE_SQL: &str = "SELECT state, receipt_digest
+const ROW_STATE_SQL: &str = "SELECT state, receipt_digest, owner_id, epoch
      FROM subject_key_deletion_receipts
      WHERE request_digest = ?1 AND artifact = ?2 AND artifact_identity = ?3";
 
@@ -221,10 +222,76 @@ fn refusal(message: &str) -> CoreError {
     CoreError::Storage(message.to_owned())
 }
 
+const STORE_FAILED: &str = "subject key deletion receipt store failed";
+const OUTCOME_UNKNOWN: &str = "subject key deletion commit outcome is unknown";
+
 /// Map a `SQLite` result to the fixed receipt-store error, never echoing
 /// paths or OS diagnostics.
 fn stored<T>(result: rusqlite::Result<T>) -> Result<T, CoreError> {
-    result.map_err(|_| refusal("subject key deletion receipt store failed"))
+    result.map_err(|_| refusal(STORE_FAILED))
+}
+
+/// Replace the text of an error from outside this module with a fixed one.
+///
+/// Typed refusals pass through, and an unknown commit outcome stays
+/// `StorageOutcomeUnknown` so the owner can still quarantine its context.
+fn sealed(error: CoreError) -> CoreError {
+    match error {
+        CoreError::Storage(_) => refusal(STORE_FAILED),
+        CoreError::StorageOutcomeUnknown(_) => {
+            CoreError::StorageOutcomeUnknown(OUTCOME_UNKNOWN.to_owned())
+        }
+        other => other,
+    }
+}
+
+/// Finish the transaction scope, sealing every error that `SQLite` text can
+/// reach: the commit or release failure and an unknown rollback outcome.
+/// The error of a failed operation was sealed or fixed by its producer.
+fn finish_scope<T>(
+    conn: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    let operation_failed = result.is_err();
+    finish_immediate_scope(conn, scope, result).map_err(|error| {
+        if operation_failed && !matches!(error, CoreError::StorageOutcomeUnknown(_)) {
+            error
+        } else {
+            sealed(error)
+        }
+    })
+}
+
+/// The identity a request binds to its rows: the digest that keys them and
+/// the owner and epoch every row must repeat.
+struct ReceiptBinding<'a> {
+    request_digest: Hash,
+    owner_id: &'a str,
+    epoch: i64,
+}
+
+impl<'a> ReceiptBinding<'a> {
+    fn of(request: &'a KeyDestructionRequestV1) -> Result<Self, CoreError> {
+        i64::try_from(request.identity.epoch)
+            .map_err(|_| refusal("subject key deletion epoch is out of range"))
+            .map(|epoch| Self {
+                request_digest: subject_key_destruction_request_digest(request),
+                owner_id: request.identity.owner_id.as_str(),
+                epoch,
+            })
+    }
+
+    /// Refuse a row stored for another owner or epoch than the request's.
+    fn check_row(&self, owner_id: &str, epoch: i64) -> Result<(), CoreError> {
+        if owner_id == self.owner_id && epoch == self.epoch {
+            Ok(())
+        } else {
+            Err(refusal(
+                "subject key deletion receipt row belongs to another owner or epoch",
+            ))
+        }
+    }
 }
 
 fn malformed_row() -> CoreError {
@@ -254,13 +321,15 @@ fn parse_state(
     }
 }
 
-type RawRowV1 = (i64, Vec<u8>, i64, Option<Vec<u8>>);
+type RawRowV1 = (i64, Vec<u8>, i64, Option<Vec<u8>>, String, i64);
 
 fn parse_row(
-    (artifact, artifact_identity, state, receipt_digest): RawRowV1,
+    binding: &ReceiptBinding<'_>,
+    (artifact, artifact_identity, state, receipt_digest, owner_id, epoch): RawRowV1,
 ) -> Result<SubjectKeyDeletionRowV1, CoreError> {
-    SubjectKeyDeletionArtifactV1::from_code(artifact)
-        .ok_or_else(malformed_row)
+    binding
+        .check_row(&owner_id, epoch)
+        .and_then(|()| SubjectKeyDeletionArtifactV1::from_code(artifact).ok_or_else(malformed_row))
         .and_then(|artifact| {
             parse_state(state, receipt_digest).map(|state| SubjectKeyDeletionRowV1 {
                 artifact,
@@ -270,7 +339,12 @@ fn parse_row(
         })
 }
 
-/// Require that every row is `Confirmed` and that each kind has a row.
+fn is_absent_at_start(row: &SubjectKeyDeletionRowV1) -> bool {
+    row.artifact_identity == ABSENT_AT_START_IDENTITY
+}
+
+/// Require that every row is `Confirmed`, that each kind has a row and that
+/// no kind holds both an absent-at-start row and a real artifact.
 fn require_complete(rows: &[SubjectKeyDeletionRowV1]) -> Result<(), CoreError> {
     if !rows
         .iter()
@@ -288,30 +362,45 @@ fn require_complete(rows: &[SubjectKeyDeletionRowV1]) -> Result<(), CoreError> {
             "subject key deletion receipts miss an artifact kind",
         ));
     }
+    let mixed = SubjectKeyDeletionArtifactV1::ALL.iter().any(|kind| {
+        let of_kind = || rows.iter().filter(|row| row.artifact == *kind);
+        of_kind().any(is_absent_at_start) && of_kind().any(|row| !is_absent_at_start(row))
+    });
+    if mixed {
+        return Err(refusal(
+            "subject key deletion receipts mix an absent and a present artifact of one kind",
+        ));
+    }
     Ok(())
 }
 
 fn read_request_rows(
     conn: &Connection,
-    request_digest: &Hash,
+    request: &KeyDestructionRequestV1,
 ) -> Result<Vec<SubjectKeyDeletionRowV1>, CoreError> {
+    let binding = ReceiptBinding::of(request)?;
     let mut statement = stored(conn.prepare(REQUEST_ROWS_SQL))?;
     let raw = stored(
         statement
-            .query_map(params![request_digest.as_bytes().as_slice()], |row| {
-                RawRowV1::try_from(row)
-            })
+            .query_map(
+                params![binding.request_digest.as_bytes().as_slice()],
+                |row| RawRowV1::try_from(row),
+            )
             .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>),
     )?;
     if raw.len() > MAX_RECEIPT_ROWS {
         return Err(refusal("subject key deletion receipts exceed the bound"));
     }
-    raw.into_iter().map(parse_row).collect()
+    raw.into_iter()
+        .map(|row| parse_row(&binding, row))
+        .collect()
 }
+
+type RawStateV1 = (i64, Option<Vec<u8>>, String, i64);
 
 fn read_row_state(
     conn: &Connection,
-    request_digest: &Hash,
+    binding: &ReceiptBinding<'_>,
     artifact: SubjectKeyDeletionArtifactV1,
     artifact_identity: &[u8],
 ) -> Result<Option<SubjectKeyDeletionStateV1>, CoreError> {
@@ -319,17 +408,21 @@ fn read_row_state(
         conn.query_row(
             ROW_STATE_SQL,
             params![
-                request_digest.as_bytes().as_slice(),
+                binding.request_digest.as_bytes().as_slice(),
                 i64::from(artifact.code()),
                 artifact_identity
             ],
-            |row| <(i64, Option<Vec<u8>>)>::try_from(row),
+            |row| RawStateV1::try_from(row),
         )
         .optional(),
     )
     .and_then(|row| {
-        row.map(|(state, receipt_digest)| parse_state(state, receipt_digest))
-            .transpose()
+        row.map(|(state, receipt_digest, owner_id, epoch)| {
+            binding
+                .check_row(&owner_id, epoch)
+                .and_then(|()| parse_state(state, receipt_digest))
+        })
+        .transpose()
     })
 }
 
@@ -355,6 +448,7 @@ impl SqliteStore {
         request: &KeyDestructionRequestV1,
     ) -> Result<(), CoreError> {
         self.load_key_registry()
+            .map_err(sealed)
             .and_then(|registry| {
                 registry.ok_or_else(|| refusal("durable key registry is unavailable"))
             })
@@ -373,21 +467,22 @@ impl SqliteStore {
     /// Run one receipt write inside its own `BEGIN IMMEDIATE`.
     ///
     /// The write runs only for a `SubjectDataEncryption` request that the
-    /// registry holds as `DestructionPending`.
+    /// registry holds as `DestructionPending`, after the inventory data
+    /// version check that every other durable write makes.
     fn write_subject_key_deletion<T>(
         &self,
         request: &KeyDestructionRequestV1,
-        write: impl FnOnce(&Self, &Hash, i64) -> Result<T, CoreError>,
+        write: impl FnOnce(&Self, &ReceiptBinding<'_>) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         require_subject_data_encryption(request)?;
-        let epoch = i64::try_from(request.identity.epoch)
-            .map_err(|_| refusal("subject key deletion epoch is out of range"))?;
-        let request_digest = subject_key_destruction_request_digest(request);
-        let scope = begin_immediate_scope(&self.conn)?;
+        let binding = ReceiptBinding::of(request)?;
+        let scope = begin_immediate_scope(&self.conn).map_err(sealed)?;
         let result = self
-            .require_pending_destruction(request)
-            .and_then(|()| write(self, &request_digest, epoch));
-        finish_immediate_scope(&self.conn, scope, result)
+            .validate_erasure_inventory_data_version()
+            .map_err(sealed)
+            .and_then(|()| self.require_pending_destruction(request))
+            .and_then(|()| write(self, &binding));
+        finish_scope(&self.conn, scope, result)
     }
 
     /// Commit the `Started` row of one artifact (D2 steps 4 and 5).
@@ -398,26 +493,28 @@ impl SqliteStore {
     ///
     /// # Errors
     /// Fails closed, with a fixed message, when the request is not a
-    /// `SubjectDataEncryption` request that the registry holds as pending, or
-    /// when the write fails. An error carrying an unknown commit outcome must
+    /// `SubjectDataEncryption` request that the registry holds as pending,
+    /// when the row exists for another owner or epoch, or when the write
+    /// fails. An error carrying an unknown commit outcome must
     /// quarantine the owner's context.
     pub fn record_subject_key_deletion_started(
-        &mut self,
+        &self,
         request: &KeyDestructionRequestV1,
         artifact: SubjectKeyDeletionArtifactV1,
         artifact_identity: &[u8],
     ) -> Result<(), CoreError> {
-        self.write_subject_key_deletion(request, |store, request_digest, epoch| {
+        self.write_subject_key_deletion(request, |store, binding| {
             stored(store.conn.execute(
                 INSERT_STARTED_SQL,
                 params![
-                    request_digest.as_bytes().as_slice(),
-                    request.identity.owner_id.as_str(),
-                    epoch,
+                    binding.request_digest.as_bytes().as_slice(),
+                    binding.owner_id,
+                    binding.epoch,
                     i64::from(artifact.code()),
                     artifact_identity
                 ],
             ))
+            .and_then(|_| read_row_state(&store.conn, binding, artifact, artifact_identity))
             .map(|_| ())
         })
     }
@@ -431,21 +528,21 @@ impl SqliteStore {
     /// when the row was never started, when it is already confirmed with
     /// different evidence, or when the write fails.
     pub fn confirm_subject_key_deletion(
-        &mut self,
+        &self,
         request: &KeyDestructionRequestV1,
         artifact: SubjectKeyDeletionArtifactV1,
         artifact_identity: &[u8],
         absence_evidence: &[u8],
     ) -> Result<Hash, CoreError> {
-        self.write_subject_key_deletion(request, |store, request_digest, _| {
+        self.write_subject_key_deletion(request, |store, binding| {
             let receipt = subject_key_deletion_receipt_digest(
-                request_digest,
+                &binding.request_digest,
                 artifact,
                 artifact_identity,
                 absence_evidence,
             );
-            read_row_state(&store.conn, request_digest, artifact, artifact_identity).and_then(
-                |state| match state {
+            read_row_state(&store.conn, binding, artifact, artifact_identity).and_then(|state| {
+                match state {
                     None => Err(refusal("subject key deletion was not started")),
                     Some(SubjectKeyDeletionStateV1::Confirmed(recorded)) if recorded == receipt => {
                         Ok(receipt)
@@ -456,15 +553,15 @@ impl SqliteStore {
                     Some(SubjectKeyDeletionStateV1::Started) => stored(store.conn.execute(
                         CONFIRM_SQL,
                         params![
-                            request_digest.as_bytes().as_slice(),
+                            binding.request_digest.as_bytes().as_slice(),
                             i64::from(artifact.code()),
                             artifact_identity,
                             receipt.as_bytes().as_slice()
                         ],
                     ))
                     .map(|_| receipt),
-                },
-            )
+                }
+            })
         })
     }
 
@@ -479,13 +576,14 @@ impl SqliteStore {
         &self,
         request: &KeyDestructionRequestV1,
     ) -> Result<Vec<SubjectKeyDeletionRowV1>, CoreError> {
-        read_request_rows(&self.conn, &subject_key_destruction_request_digest(request))
+        read_request_rows(&self.conn, request)
     }
 
     /// Finalize a subject-key destruction (D2 step 6).
     ///
     /// In one `BEGIN IMMEDIATE`, requires every receipt row of the request to
-    /// be `Confirmed` with at least one row of each kind, then applies exactly
+    /// be `Confirmed` with at least one row of each kind and no kind mixing an
+    /// absent-at-start row with a real artifact, then applies exactly
     /// the `complete_key_registry_destruction(request, deletion_receipt)`
     /// registry transition in the same commit. A repeated call after the
     /// tombstone returns the registry's `AlreadyDestroyed` outcome.
@@ -493,16 +591,19 @@ impl SqliteStore {
     /// # Errors
     /// Fails closed, with a fixed message, when the request is not a
     /// `SubjectDataEncryption` request, when a receipt is missing or not
-    /// confirmed, or when the registry transition refuses. Nothing is
+    /// confirmed, when a kind mixes absent and present rows, or when the
+    /// registry transition refuses. Nothing is
     /// committed on error.
     pub fn complete_subject_key_destruction_with_receipts(
         &mut self,
         request: KeyDestructionRequestV1,
     ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
         require_subject_data_encryption(&request)?;
-        let request_digest = subject_key_destruction_request_digest(&request);
-        let scope = begin_immediate_scope(&self.conn)?;
-        let result = read_request_rows(&self.conn, &request_digest)
+        let scope = begin_immediate_scope(&self.conn).map_err(sealed)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .map_err(sealed)
+            .and_then(|()| read_request_rows(&self.conn, &request))
             .and_then(|rows| require_complete(&rows))
             .and_then(|()| {
                 EventStore::complete_key_registry_destruction(
@@ -510,8 +611,9 @@ impl SqliteStore {
                     request,
                     deletion_receipt(&request),
                 )
+                .map_err(sealed)
             });
-        finish_immediate_scope(&self.conn, scope, result)
+        finish_scope(&self.conn, scope, result)
     }
 }
 
