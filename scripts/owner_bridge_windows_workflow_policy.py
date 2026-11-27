@@ -14,7 +14,7 @@ from check_owner_runtime_custody_policy import PolicyError, load_workflow, same_
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ".github/workflows/owner-bridge-windows.yml"
-HOST_QUIESCE_COMMAND = """# On hosted runners StorSvc, background indexers/telemetry and Windows
+HOST_QUIESCE_COMMAND = r"""# On hosted runners StorSvc, background indexers/telemetry and Windows
 # Defender scanning fresh WebView2 User Data Folders under TEMP contend
 # with timed native fixtures and BrowserProcessExited cleanup (#1468).
 # Deadlines stay fixed; the host is quiet.
@@ -23,34 +23,55 @@ foreach ($name in @('StorSvc', 'WSearch', 'SysMain', 'DiagTrack')) {
   $service = Get-Service -Name $name -ErrorAction SilentlyContinue
   if ($service) {
     $before = $service.Status
+    $disabled = $true
+    $stopped = $true
     try {
       Set-Service -Name $name -StartupType Disabled
-      Stop-Service -Name $name -Force
-      $after = (Get-Service -Name $name).Status
-      Write-Output "HOST_QUIESCE service=$name before=$before after=$after"
     } catch {
       if ($name -eq 'StorSvc') { throw }
-      Write-Output "HOST_QUIESCE service=$name before=$before unavailable"
+      $disabled = $false
     }
+    try {
+      Stop-Service -Name $name -Force
+    } catch {
+      if ($name -eq 'StorSvc') { throw }
+      $stopped = $false
+    }
+    $after = (Get-Service -Name $name).Status
+    Write-Output "HOST_QUIESCE service=$name before=$before after=$after disabled=$disabled stopped=$stopped"
   } else {
     Write-Output "HOST_QUIESCE service=$name absent"
   }
 }
 if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-  try {
-    $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
-    $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
-    $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
-    $paths = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP) |
+  $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+  $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
+  $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
+  $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
+  $candidates = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP, [System.IO.Path]::GetTempPath())
+  if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Temp') }
+  $paths = @(
+    $candidates |
       Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
-      ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+      ForEach-Object {
+        $full = [System.IO.Path]::GetFullPath($_).TrimEnd('\', '/')
+        $full
+        if ($null -ne $fso) {
+          try { $fso.GetFolder($full).Path.TrimEnd('\', '/') } catch {}
+        }
+      } |
       Sort-Object -Unique
+  )
+  $excluded = 0
+  try {
     foreach ($path in $paths) {
       Add-MpPreference -ExclusionPath $path
+      $excluded++
     }
-    Write-Output "HOST_QUIESCE defender=excluded rtp=$rtp tamper=$tamper count=$($paths.Count)"
+    $state = if ($excluded -gt 0) { 'excluded' } else { 'none' }
+    Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper count=$excluded/$($paths.Count)"
   } catch {
-    Write-Output 'HOST_QUIESCE defender=unavailable'
+    Write-Output "HOST_QUIESCE defender=unavailable rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
   }
 } else {
   Write-Output 'HOST_QUIESCE defender=absent'
@@ -374,7 +395,7 @@ EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
     ],
 }
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'a7d7687c805ccc1e4c6cc5f7188005fe08ab071e0c902173945907b801f98f5e',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '76935328a2729570fcd05fda1b70d76e22bef0797c866aaff3945f2b19d1e69d',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 

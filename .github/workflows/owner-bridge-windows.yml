@@ -66,34 +66,55 @@ jobs:
             $service = Get-Service -Name $name -ErrorAction SilentlyContinue
             if ($service) {
               $before = $service.Status
+              $disabled = $true
+              $stopped = $true
               try {
                 Set-Service -Name $name -StartupType Disabled
-                Stop-Service -Name $name -Force
-                $after = (Get-Service -Name $name).Status
-                Write-Output "HOST_QUIESCE service=$name before=$before after=$after"
               } catch {
                 if ($name -eq 'StorSvc') { throw }
-                Write-Output "HOST_QUIESCE service=$name before=$before unavailable"
+                $disabled = $false
               }
+              try {
+                Stop-Service -Name $name -Force
+              } catch {
+                if ($name -eq 'StorSvc') { throw }
+                $stopped = $false
+              }
+              $after = (Get-Service -Name $name).Status
+              Write-Output "HOST_QUIESCE service=$name before=$before after=$after disabled=$disabled stopped=$stopped"
             } else {
               Write-Output "HOST_QUIESCE service=$name absent"
             }
           }
           if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-            try {
-              $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
-              $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
-              $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
-              $paths = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP) |
+            $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+            $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
+            $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
+            $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
+            $candidates = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP, [System.IO.Path]::GetTempPath())
+            if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Temp') }
+            $paths = @(
+              $candidates |
                 Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
-                ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+                ForEach-Object {
+                  $full = [System.IO.Path]::GetFullPath($_).TrimEnd('\', '/')
+                  $full
+                  if ($null -ne $fso) {
+                    try { $fso.GetFolder($full).Path.TrimEnd('\', '/') } catch {}
+                  }
+                } |
                 Sort-Object -Unique
+            )
+            $excluded = 0
+            try {
               foreach ($path in $paths) {
                 Add-MpPreference -ExclusionPath $path
+                $excluded++
               }
-              Write-Output "HOST_QUIESCE defender=excluded rtp=$rtp tamper=$tamper count=$($paths.Count)"
+              $state = if ($excluded -gt 0) { 'excluded' } else { 'none' }
+              Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper count=$excluded/$($paths.Count)"
             } catch {
-              Write-Output 'HOST_QUIESCE defender=unavailable'
+              Write-Output "HOST_QUIESCE defender=unavailable rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
             }
           } else {
             Write-Output 'HOST_QUIESCE defender=absent'
@@ -305,34 +326,55 @@ jobs:
             $service = Get-Service -Name $name -ErrorAction SilentlyContinue
             if ($service) {
               $before = $service.Status
+              $disabled = $true
+              $stopped = $true
               try {
                 Set-Service -Name $name -StartupType Disabled
-                Stop-Service -Name $name -Force
-                $after = (Get-Service -Name $name).Status
-                Write-Output "HOST_QUIESCE service=$name before=$before after=$after"
               } catch {
                 if ($name -eq 'StorSvc') { throw }
-                Write-Output "HOST_QUIESCE service=$name before=$before unavailable"
+                $disabled = $false
               }
+              try {
+                Stop-Service -Name $name -Force
+              } catch {
+                if ($name -eq 'StorSvc') { throw }
+                $stopped = $false
+              }
+              $after = (Get-Service -Name $name).Status
+              Write-Output "HOST_QUIESCE service=$name before=$before after=$after disabled=$disabled stopped=$stopped"
             } else {
               Write-Output "HOST_QUIESCE service=$name absent"
             }
           }
           if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-            try {
-              $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
-              $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
-              $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
-              $paths = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP) |
+            $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+            $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
+            $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
+            $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
+            $candidates = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP, [System.IO.Path]::GetTempPath())
+            if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Temp') }
+            $paths = @(
+              $candidates |
                 Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
-                ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+                ForEach-Object {
+                  $full = [System.IO.Path]::GetFullPath($_).TrimEnd('\', '/')
+                  $full
+                  if ($null -ne $fso) {
+                    try { $fso.GetFolder($full).Path.TrimEnd('\', '/') } catch {}
+                  }
+                } |
                 Sort-Object -Unique
+            )
+            $excluded = 0
+            try {
               foreach ($path in $paths) {
                 Add-MpPreference -ExclusionPath $path
+                $excluded++
               }
-              Write-Output "HOST_QUIESCE defender=excluded rtp=$rtp tamper=$tamper count=$($paths.Count)"
+              $state = if ($excluded -gt 0) { 'excluded' } else { 'none' }
+              Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper count=$excluded/$($paths.Count)"
             } catch {
-              Write-Output 'HOST_QUIESCE defender=unavailable'
+              Write-Output "HOST_QUIESCE defender=unavailable rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
             }
           } else {
             Write-Output 'HOST_QUIESCE defender=absent'

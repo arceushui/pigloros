@@ -279,7 +279,7 @@ fn run_ceremony(
     };
     let result_error = result.as_ref().err().copied();
     trace.update("caller-complete", surface, &driver, loopback);
-    super::trace::report_if_quarantined(result_error, number, &surface.fixture_progress());
+    trace.report_if_quarantined(result_error);
     retirement::retire(
         surface,
         loopback,

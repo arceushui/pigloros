@@ -1,8 +1,8 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use std::io::Write as _;
-use std::process::Command;
+use std::io::{Read as _, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use pos_owner_bridge::ceremony::driver::CeremonyDriver;
@@ -88,22 +88,36 @@ impl Trace {
             self.reported = now;
         }
     }
+
+    pub(super) fn report_if_quarantined(&self, result_error: Option<BridgeError>) {
+        report_if_quarantined(result_error, self.case, &self.previous);
+    }
 }
 
-/// Read-only snapshot of live WebView2 processes (roles only, no user paths)
+/// Upper bound for the read-only stall snapshot command so a wedged host or
+/// WMI service cannot delay retirement abort or block sibling workers (#1468).
+const STALL_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Read-only snapshot of live `WebView2` processes (roles only, no user paths)
 /// and top CPU consumers, emitted only on a cleanup or retirement stall (#1468).
 const STALL_PROCESS_SNAPSHOT_SCRIPT: &str = concat!(
     "$ErrorActionPreference = 'SilentlyContinue'; ",
-    "$wv = @(Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" ",
+    "$wv = try { ",
+    "@(Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" -ErrorAction Stop ",
     "| Sort-Object ProcessId | ForEach-Object { ",
     "$cmd = [string]$_.CommandLine; ",
-    "$role = if ($cmd -match '--type=([A-Za-z0-9_-]+)') { $Matches[1] } else { 'browser' }; ",
+    "$role = if ([string]::IsNullOrWhiteSpace($cmd)) { 'unknown' } ",
+    "elseif ($cmd -match '--type=([A-Za-z0-9_-]+)') { $Matches[1] } else { 'browser' }; ",
     "if ($cmd -match '--utility-sub-type=([A-Za-z0-9_.-]+)') { $role = \"$role/$($Matches[1])\" }; ",
     "\"$($_.ProcessId)(ppid=$($_.ParentProcessId),role=$role,threads=$($_.ThreadCount))\" ",
-    "}); ",
-    "$top = @(Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 | ForEach-Object { ",
+    "}) } catch { @('cim-error') }; ",
+    "$top = @(Get-Process | Sort-Object CPU -Descending ",
+    "| Select-Object -First 8 | ForEach-Object { ",
+    "$name = [string]$_.ProcessName; ",
+    "if ($name -notmatch '^[A-Za-z0-9_.-]{1,80}$') { $name = 'unknown' }; ",
     "$cpu = if ($null -ne $_.CPU) { [math]::Round($_.CPU, 1) } else { 0 }; ",
-    "\"$($_.ProcessName):$($_.Id)(cpu=${cpu}s,threads=$($_.Threads.Count))\" ",
+    "$threads = if ($null -ne $_.Threads) { $_.Threads.Count } else { 'unknown' }; ",
+    "\"${name}:$($_.Id)(cpu=${cpu}s,threads=$threads)\" ",
     "}); ",
     "Write-Output (\"webview2=[$($wv -join ', ')] top_cpu=[$($top -join ', ')]\")",
 );
@@ -115,26 +129,57 @@ fn parse_progress_pid(progress: &str) -> Option<u32> {
         .and_then(|(digits, _)| digits.parse().ok())
 }
 
-fn run_snapshot_command(program: &str, args: &[&str]) -> String {
-    match Command::new(program).args(args).output() {
-        Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                "empty".to_owned()
-            } else {
-                trimmed.to_owned()
-            }
+fn format_snapshot_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        "empty".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
         }
-        Ok(output) => format!("exit={:?}", output.status.code()),
+        if Instant::now() >= deadline {
+            let _killed_or_exited = child.kill();
+            let _reaped_or_failed = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn run_snapshot_command(program: &str, args: &[&str], timeout: Duration) -> String {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    match command.spawn() {
+        Ok(mut child) => match wait_bounded(&mut child, timeout) {
+            Some(status) if status.success() => {
+                let mut bytes = Vec::new();
+                let _read_or_failed = child
+                    .stdout
+                    .take()
+                    .map(|mut stdout| stdout.read_to_end(&mut bytes));
+                format_snapshot_output(&bytes)
+            }
+            Some(status) => format!("exit={:?}", status.code()),
+            None => "timeout".to_owned(),
+        },
         Err(error) => format!("unavailable({:?})", error.kind()),
     }
 }
 
-/// Emit one bounded read-only process snapshot while a stalled browser is still owned.
-pub(super) fn report_stalled_processes(context: &str, pid: Option<u32>) {
-    let browser = pid.map(|id| (id, crate::Native::inspect_process_with_image(id)));
-    let snapshot = run_snapshot_command(
+fn live_process_snapshot() -> String {
+    run_snapshot_command(
         "pwsh",
         &[
             "-NoLogo",
@@ -143,30 +188,68 @@ pub(super) fn report_stalled_processes(context: &str, pid: Option<u32>) {
             "-Command",
             STALL_PROCESS_SNAPSHOT_SCRIPT,
         ],
-    );
-    let mut stderr = std::io::stderr().lock();
+        STALL_SNAPSHOT_TIMEOUT,
+    )
+}
+
+fn write_stalled_processes(
+    out: &mut dyn Write,
+    context: &str,
+    pid: Option<u32>,
+    snapshot: impl FnOnce() -> String,
+) {
+    let browser = pid.map(|id| (id, crate::Native::inspect_process(id)));
+    let snapshot = snapshot();
     let _logged_or_unavailable = writeln!(
-        stderr,
+        out,
         "NATIVE_STALL_PROCESSES context={context} browser={browser:?} {snapshot}",
     );
-    let _flushed_or_unavailable = stderr.flush();
+    let _flushed_or_unavailable = out.flush();
+}
+
+/// Emit one bounded read-only process snapshot while a stalled browser is still owned.
+pub(super) fn report_stalled_processes(context: &str, pid: Option<u32>) {
+    let mut stderr = std::io::stderr().lock();
+    write_stalled_processes(&mut stderr, context, pid, live_process_snapshot);
+}
+
+fn report_if_quarantined_to(
+    out: &mut dyn Write,
+    result_error: Option<BridgeError>,
+    case: u64,
+    progress: &str,
+    snapshot: impl FnOnce() -> String,
+) -> bool {
+    if matches!(result_error, Some(BridgeError::Quarantine(_))) {
+        let context = format!("readiness-case-{case}");
+        write_stalled_processes(out, &context, parse_progress_pid(progress), snapshot);
+        true
+    } else {
+        false
+    }
 }
 
 /// Emit the process snapshot only when a readiness case ended in quarantine.
-pub(super) fn report_if_quarantined(result_error: Option<BridgeError>, case: u64, progress: &str) {
-    if matches!(result_error, Some(BridgeError::Quarantine(_))) {
-        let context = format!("readiness-case-{case}");
-        report_stalled_processes(&context, parse_progress_pid(progress));
-    }
+fn report_if_quarantined(result_error: Option<BridgeError>, case: u64, progress: &str) {
+    let _reported = report_if_quarantined_to(
+        &mut std::io::stderr().lock(),
+        result_error,
+        case,
+        progress,
+        live_process_snapshot,
+    );
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
     use pos_owner_bridge::{BridgeError, LifecycleCode, QuarantineCode};
 
     use super::{
-        parse_progress_pid, report_if_quarantined, run_snapshot_command,
-        STALL_PROCESS_SNAPSHOT_SCRIPT,
+        parse_progress_pid, report_if_quarantined_to, report_stalled_processes,
+        run_snapshot_command, Trace, STALL_PROCESS_SNAPSHOT_SCRIPT, STALL_SNAPSHOT_TIMEOUT,
     };
 
     #[test]
@@ -181,7 +264,8 @@ mod tests {
     }
 
     #[test]
-    fn run_snapshot_command_reports_live_empty_nonzero_and_missing() {
+    fn run_snapshot_command_reports_live_empty_nonzero_timeout_and_missing() {
+        let _port = crate::Native::fixed_port_fixture();
         let live = run_snapshot_command(
             "pwsh",
             &[
@@ -191,13 +275,15 @@ mod tests {
                 "-Command",
                 STALL_PROCESS_SNAPSHOT_SCRIPT,
             ],
+            STALL_SNAPSHOT_TIMEOUT,
         );
-        assert!(live.contains("webview2=["), "unexpected snapshot: {live}");
-        assert!(live.contains("top_cpu=["), "unexpected snapshot: {live}");
+        assert!(live.contains("webview2=["));
+        assert!(live.contains("top_cpu=["));
 
         let empty = run_snapshot_command(
             "pwsh",
             &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ""],
+            STALL_SNAPSHOT_TIMEOUT,
         );
         assert_eq!(empty, "empty");
 
@@ -210,33 +296,83 @@ mod tests {
                 "-Command",
                 "exit 1",
             ],
+            STALL_SNAPSHOT_TIMEOUT,
         );
         assert_eq!(failed, "exit=Some(1)");
 
-        let missing = run_snapshot_command("pigloros-nonexistent-stall-snapshot", &[]);
-        assert!(
-            missing.starts_with("unavailable("),
-            "unexpected missing result: {missing}"
+        let timed_out = run_snapshot_command(
+            "pwsh",
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 10",
+            ],
+            Duration::from_millis(50),
         );
+        assert_eq!(timed_out, "timeout");
+
+        let missing = run_snapshot_command(
+            "pigloros-nonexistent-stall-snapshot",
+            &[],
+            STALL_SNAPSHOT_TIMEOUT,
+        );
+        assert!(missing.starts_with("unavailable("));
+
+        report_stalled_processes("modeled-qualified-false", None);
     }
 
     #[test]
-    fn report_if_quarantined_exercises_non_quarantine_and_quarantine_paths() {
-        report_if_quarantined(None, 1, "pid=None");
-        report_if_quarantined(
+    fn report_if_quarantined_emits_only_on_quarantine_and_redacts_paths() {
+        let snapshot_calls = Cell::new(0_u8);
+        let mut snapshot = || {
+            snapshot_calls.set(snapshot_calls.get() + 1);
+            "stub-snapshot".to_owned()
+        };
+        let mut out = Vec::new();
+        assert!(!report_if_quarantined_to(&mut out, None, 1, "pid=None", &mut snapshot));
+        assert!(!report_if_quarantined_to(
+            &mut out,
             Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost)),
             2,
             "pid=Some(42)",
-        );
-        report_if_quarantined(
+            &mut snapshot,
+        ));
+        assert_eq!(snapshot_calls.get(), 0);
+        assert!(out.is_empty());
+
+        let current_pid = std::process::id();
+        let with_pid = format!("pid=Some({current_pid}) exited=None");
+        assert!(report_if_quarantined_to(
+            &mut out,
             Some(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
             3,
-            "pid=Some(42) exited=None",
-        );
-        report_if_quarantined(
+            &with_pid,
+            &mut snapshot,
+        ));
+        assert_eq!(snapshot_calls.get(), 1);
+        let text = String::from_utf8_lossy(&out);
+        let expected_browser = format!("browser=Some(({current_pid}, Ok(Some(");
+        assert!(text.contains("NATIVE_STALL_PROCESSES context=readiness-case-3 "));
+        assert!(text.contains(&expected_browser));
+        assert!(text.contains("stub-snapshot"));
+        assert!(!text.contains('\\'));
+
+        out.clear();
+        assert!(report_if_quarantined_to(
+            &mut out,
             Some(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
             4,
             "pid=None",
-        );
+            &mut snapshot,
+        ));
+        assert_eq!(snapshot_calls.get(), 2);
+        let no_pid = String::from_utf8_lossy(&out);
+        let expected_no_pid =
+            "NATIVE_STALL_PROCESSES context=readiness-case-4 browser=None stub-snapshot";
+        assert!(no_pid.contains(expected_no_pid));
+
+        Trace::new(5, Instant::now()).report_if_quarantined(None);
     }
 }
