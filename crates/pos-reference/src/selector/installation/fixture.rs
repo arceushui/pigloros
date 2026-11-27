@@ -1227,7 +1227,7 @@ mod tests {
             }
         }
         // The whole of each list is pinned, so that any growth is a reviewed change: the count and
-        // the SHA-256 of the names, one per line.
+        // the SHA-256 of the sorted names, one per line.
         for (names, count, digest) in [
             (
                 GUEST_SYSCALLS_X86_64,
@@ -1240,7 +1240,11 @@ mod tests {
                 "23bc6528c6a4ed46d6c8a9bd52e371ee946e4c785622715d350b219c35e998b5",
             ),
         ] {
-            let text = format!("{}\n", names.join("\n"));
+            // The sorted names are hashed, so that a reorder alone is no failure but any addition
+            // or removal is.
+            let mut sorted = names.to_vec();
+            sorted.sort_unstable();
+            let text = format!("{}\n", sorted.join("\n"));
             assert_eq!(names.len(), count);
             let mut hex = String::new();
             for byte in Sha256::digest(text.as_bytes()) {

@@ -308,6 +308,14 @@ and monotonic deadline), closes the release channel and replaces its process
 image with the held adapter descriptor through `nix`'s safe `execveat`
 wrapper (`src/launcher/exec.rs`, the only file allowed to name it). Any other
 outcome, including EOF, ends the process without running adapter bytes.
+The launcher's standard error is `/dev/null` in the unit, so its exit status is
+the trace of why it did not run the adapter. Each closed failure has its own
+status (`launcher::failure_status`): 64 launch parameters not a valid LPV1, 65
+launch environment invalid, 66 inherited descriptor layout invalid, 67 release
+channel peer not the provider, 68 adapter not a regular native ELF beneath the
+root, 69 launcher or adapter identity unreadable, 70 `ReadyV1` not sent, 71
+`ReleaseV1` not received, 72 `ReleaseV1` rejected, 73 adapter exec failed. Any
+other mode failure exits 1 and a usage error 2.
 
 The launcher code path never calls admission or the verifier (a hosted source
 test enforces it). CI builds the binary for `x86_64` and `aarch64`

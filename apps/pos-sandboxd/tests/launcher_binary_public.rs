@@ -80,7 +80,7 @@ fn a_malformed_or_non_utf8_lpv1_is_refused() -> TestResult {
             .arg("launch-barrier")
             .arg(argument)
             .output()?;
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(64));
         assert_eq!(
             stderr(&output),
             "pos-sandboxd: launch parameters are not a valid LPV1\n"
@@ -95,7 +95,7 @@ fn a_launch_without_the_systemd_environment_is_refused() -> TestResult {
         .args(["launch-barrier", &lpv1_hex()?])
         .env_clear()
         .output()?;
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(65));
     assert_eq!(
         stderr(&output),
         "pos-sandboxd: launch environment is invalid\n"
@@ -113,7 +113,7 @@ fn a_launch_for_another_pid_is_refused() -> TestResult {
         .env("LISTEN_FDNAMES", "piglor-release-v1")
         .env("INVOCATION_ID", "0123456789abcdef0123456789abcdef")
         .output()?;
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(65));
     assert_eq!(
         stderr(&output),
         "pos-sandboxd: launch environment is invalid\n"
@@ -151,7 +151,14 @@ INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
         .arg(lpv1_hex()?)
         .stdin(Stdio::from(launcher))
         .output()?;
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    // Exit status 67 is the peer refusal and 68 the missing adapter (the launcher exit table in
+    // the README).
+    let status = if rustix::process::getuid().is_root() {
+        68
+    } else {
+        67
+    };
+    assert_eq!(output.status.code(), Some(status), "{}", stderr(&output));
     // The release channel is a valid adopted descriptor, so the refusal is the
     // peer check for a non-root user; as root the launch proceeds to the
     // adapter, which does not exist in the unit's root here.

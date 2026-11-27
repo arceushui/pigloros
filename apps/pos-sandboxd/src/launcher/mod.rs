@@ -58,7 +58,20 @@ pub const LAUNCH_BARRIER_MODE: &str = "launch-barrier";
 ///
 /// The launcher's standard error is `/dev/null` (ADR-069 R10 section 4.2), so a failure leaves no
 /// diagnostic in the unit. The status is the only trace of the reason, and the unit's
-/// `ExecMainStatus` shows it. The set is closed and carries no path, descriptor or record byte.
+/// `ExecMainStatus` shows it. The set is closed and carries no path, descriptor or record byte:
+///
+/// | Status | Failure |
+/// |---|---|
+/// | 64 | the launch parameters are not a valid LPV1 |
+/// | 65 | the launch environment is invalid |
+/// | 66 | the inherited descriptor layout is invalid |
+/// | 67 | the release channel peer is not the provider |
+/// | 68 | the adapter is not a regular native ELF beneath the root |
+/// | 69 | the launcher or adapter identity could not be read |
+/// | 70 | `ReadyV1` could not be sent |
+/// | 71 | `ReleaseV1` was not received |
+/// | 72 | `ReleaseV1` was rejected |
+/// | 73 | the adapter exec failed |
 #[must_use]
 pub const fn failure_status(error: &LauncherError) -> u8 {
     match error {
