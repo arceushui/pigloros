@@ -14872,15 +14872,9 @@ fn with_fork_authority_transaction<T>(
 ///
 /// Persisted grants and revocations are immutable, so once a mutation is
 /// `Unchanged` it stays `Unchanged`. An exact retry is therefore answered from
-/// one committed read without taking the write lock (#491). Any other outcome,
+/// one committed read without taking the write lock. Any other outcome,
 /// including an error, is decided again under `BEGIN IMMEDIATE`, and only a
 /// `Committed` outcome rewrites the authority state there.
-///
-/// Before #491 every outcome rewrote the state. That never failed another
-/// connection closed: the canonical bytes were identical, `SQLite` wrote no
-/// page, and `PRAGMA data_version` did not move. The real cost was write-lock
-/// contention, since each replay waited up to the 4 s busy timeout behind
-/// another writer and then failed as `Unavailable`.
 ///
 /// A read-only store answers an exact retry as `Unchanged`, because no write is
 /// needed; any mutation that must write still fails. A first-time record pays

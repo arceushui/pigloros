@@ -71,7 +71,7 @@ pub enum OutputAdmissionErrorV1 {
     #[error("{kind} callback is not the installed implementation")]
     CallbackMismatch { kind: &'static str },
     /// A closed composition failure found while building a binding, such as
-    /// a declaration that lists one Event type twice (ADR-024 Revision 1).
+    /// a declaration that lists one Event type twice.
     /// [`crate::RuntimeError`] reports it as [`crate::RuntimeError::Composition`].
     #[error(transparent)]
     Composition(crate::PluginCompositionErrorV1),
@@ -81,7 +81,7 @@ pub enum OutputAdmissionErrorV1 {
 ///
 /// Two binding constructors run this before they build an output policy, so
 /// a duplicate declaration fails with the closed ownership error instead of
-/// as a malformed policy (ADR-024 Revision 1):
+/// as a malformed policy:
 /// - `OutputPolicyBindingV1::from_source`, which builds the bindings the
 ///   verified and test-support Driver registration paths take;
 /// - the registry's generated binding
@@ -90,8 +90,7 @@ pub enum OutputAdmissionErrorV1 {
 ///   pinned-with-approver, local and generated test-Driver paths.
 ///
 /// The installed and manifest-slot registration stubs fail closed with
-/// `EPF1` before using any binding, until #467 (Wave 9) wires this check
-/// into installed registration.
+/// `EPF1` before using any binding.
 pub(crate) fn reject_duplicate_declaration<P: Plugin + ?Sized>(
     plugin: &P,
 ) -> Result<(), OutputAdmissionErrorV1> {
@@ -719,9 +718,8 @@ pub struct OutputPolicyBindingV1 {
     source: OutputPolicySourceV1,
     plugin_name: &'static str,
     owner_token: PluginOwnerTokenV1,
-    /// Validated installed callbacks. They stay inert until installed
-    /// registration returns with Wave 9 (#467/#462); see
-    /// [`Self::with_installed_driver`].
+    /// Validated installed callbacks. The installed registration entrypoints
+    /// return an `EPF1` artifact error before using this binding.
     driver: Option<Box<dyn Driver>>,
     approver: Option<(Box<dyn ActionApprover>, Vec<Kind>)>,
 }
@@ -810,12 +808,9 @@ impl OutputPolicyBindingV1 {
 
     /// Attach only the concrete Driver compiled into this installed source.
     ///
-    /// The attached Driver stays inert until installed registration returns
-    /// with Wave 9 (#467/#462): no Wave 8 path consumes a binding's callbacks,
-    /// because installed registration fails closed. The method still checks
-    /// the Driver against the reviewed source descriptor now, so a foreign
-    /// or duplicate callback can never be bound to an installed source and
-    /// the Wave 9 consumer inherits an already-validated binding.
+    /// The Driver is retained after descriptor validation. Installed
+    /// registration entrypoints currently return an `EPF1` artifact error
+    /// before using this binding, so they do not execute it.
     ///
     /// # Errors
     /// Rejects a foreign or duplicate Driver before registration can mutate state.
@@ -832,8 +827,9 @@ impl OutputPolicyBindingV1 {
 
     /// Attach only the concrete `ActionApprover` compiled into this installed source.
     ///
-    /// Like [`Self::with_installed_driver`], the approver and its routes stay
-    /// inert until installed registration returns with Wave 9 (#467/#462).
+    /// The approver and its routes are retained after validation. Installed
+    /// registration entrypoints currently return an `EPF1` artifact error
+    /// before using this binding, so they do not execute it.
     /// The reviewed approver type and the route bound are validated now so
     /// that a foreign, duplicate, or unbounded approver is rejected at the
     /// binding boundary rather than at a later consumer.

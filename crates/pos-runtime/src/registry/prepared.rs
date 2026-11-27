@@ -179,8 +179,6 @@ impl PluginRegistry {
         candidate: PluginId,
         replacing: Option<PluginId>,
     ) -> Result<(), RuntimeError> {
-        // A prepared manifest batch admits only installed manifest-slot
-        // registrations, which stay closed until Wave 9.
         if self.manifest_batch.is_some() {
             return Err(ManifestRegistrationErrorV1::BatchState.into());
         }

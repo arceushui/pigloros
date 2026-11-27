@@ -1,9 +1,8 @@
-//! Protected Timeline snapshots: `Unavailable` until #502.
+//! Protected Timeline snapshots.
 //!
-//! Protected Snapshot capture, verification and reuse need a PSS1 Snapshot
-//! commit whose placement under ADR-112's guard is deferred to #502
-//! (ADR-113 §9). Until then both entry points return `Unavailable` before any
-//! read or fold, and change nothing.
+//! Protected Snapshot capture, verification and reuse are unavailable. Both
+//! entry points return `Unavailable` before any read or fold, and change
+//! nothing.
 
 use std::collections::HashMap;
 
@@ -19,12 +18,8 @@ use pos_state::ProjectionRegistry;
 /// serialisable so snapshots can be persisted and loaded without re-running
 /// every registered reducer.
 ///
-/// Protected Snapshot capture, verification and reuse are `Unavailable`
-/// (ADR-113 §9), so nothing constructs a `Snapshot` in this release. The
-/// type, including its `registry` and `inventory_generation` fields, is
-/// retained deliberately for #502 (protected Snapshot PSS1 placement), which
-/// owns its future shape; this unsupported contract is deferred explicitly,
-/// not dead.
+/// Protected Snapshot capture, verification and reuse are currently
+/// unavailable, so this value is not produced by the protected entry points.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     /// The timeline this snapshot was taken from.
@@ -40,8 +35,7 @@ pub struct Snapshot {
 
 /// Take a protected snapshot of the current head of `timeline`.
 ///
-/// Protected Snapshot capture is unavailable until #502 decides where its
-/// PSS1 commit happens under the guard (ADR-113 §9).
+/// Protected Snapshot capture is unavailable.
 ///
 /// # Errors
 /// Always returns [`CoreError::ArtifactUnavailable`], before any read or
@@ -57,14 +51,11 @@ pub const fn snapshot(
 
 /// Error type for snapshot consistency checks.
 ///
-/// While protected Snapshots are `Unavailable` (ADR-113 §9), this module's
-/// checks return only [`Self::ArtifactUnavailable`]; [`Self::Store`] arises
-/// only from the `From<CoreError>` conversion. The other variants are
-/// retained deliberately for #502 (protected Snapshot PSS1 placement), which
-/// owns them; this unsupported contract is deferred explicitly, not dead.
+/// Protected Snapshot checks return [`Self::ArtifactUnavailable`].
+/// [`Self::Store`] wraps other errors converted from [`CoreError`].
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
-    /// ADR-060 no longer permits the snapshot as authoritative state.
+    /// The snapshot is unavailable for authoritative use.
     #[error("snapshot artifact is unavailable for authoritative use")]
     ArtifactUnavailable,
     /// The host inventory changed after this snapshot was captured.
@@ -96,8 +87,7 @@ impl From<CoreError> for SnapshotError {
 
 /// Verify a protected snapshot against a full replay.
 ///
-/// Protected Snapshot verification and reuse are unavailable until #502
-/// (ADR-113 §9).
+/// Protected Snapshot verification and reuse are unavailable.
 ///
 /// # Errors
 /// Always returns [`SnapshotError::ArtifactUnavailable`], before any read or

@@ -7,16 +7,15 @@
 //! `migrate-state`. Any mismatch or bound violation is `InvalidGuestOutput`.
 //! Fields are checked in WIT order, so the lowest failing ordinal wins.
 //!
-//! Two owner decisions (ADR-061 revision 6) fix the remaining fields:
+//! The descriptor uses these rules for the remaining fields:
 //! - `manifest-digest` and `release-digest` must be 32 zero bytes. Both real
 //!   digests cover the Component's own digest (PMF1 field 9), so no Component
 //!   can declare the values of its own release.
 //! - `capabilities` and `dependencies` are only count-bounded; the manifest,
 //!   not `describe`, is their authority.
 //!
-//! `release-semver` is only lifted as text: ADR-061 revision 6 item 2 lists
-//! exactly what `describe` is checked against, and the manifest (PMF1 field 3)
-//! is the authority for the release version.
+//! `release-semver` is lifted as text; the manifest (PMF1 field 3) is the
+//! authority for the release version.
 
 use pos_runtime::community_plugin_host::{NegotiatedCommunityPluginV1, PluginDescriptorV1};
 use wasmtime::component::Val;

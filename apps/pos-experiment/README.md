@@ -70,12 +70,11 @@ address `fixtures/conformance/non-interference/executions/<digest>.nia1`. The
 Local runner spawns a fresh host process per run under a host kill timeout (a
 killed run is non-executed `Unavailable`); the Replay runner rebuilds Projection
 State from the recorded Events; the Fork runner runs the subject in an ordinary
-Fork cut at a Tick Boundary. That F-mode evidence is engineering evidence for
-every row except `NI-FORK-008`, which needs the ADR-064 records-form artifact
-path of slice R6 (#1225) in slice N4 (#1232); F cases are re-run when #1204
-lands (wiki `ADR-062_R8_NonInterference_Harness`). `WarmCache` cases are primed once before the pair,
+Fork cut at a Tick Boundary. F-mode evidence is engineering evidence. The
+G-FORK adapter captures `NI-FORK-008` from records-form artifact exports.
+`WarmCache` cases are primed once before the pair,
 every other variant runs cold. The Air-Gapped runner returns the typed
-non-executed `Unavailable` until slice N7, and every non-executed case has no
+non-executed `Unavailable` for each run, and every non-executed case has no
 artifact and no claim. An `NIR1` is built only from exactly 192 trusted `NIA1`.
 The harness flips no inventory: `execution-matrix.json` changes only when the
 capture adapters of slices N1 to N4 supply verifier-accepted executions. The
@@ -110,13 +109,13 @@ Fork artifact exports below:
   (`replay_recorded_fork_v1`): `RCF1`/`SIV1` are read back and `RCP1`/`CFR1`
   recovered from the committed Fork Events, with `INT1`/`CFP1` from the recorded
   plan. No Driver runs and no Event is appended.
-- Fork runs the records-form Fork in-process (owner answer Q7: a genuine ADR-064
-  Fork execution, re-run when #1204 lands).
+- Fork runs the records-form Fork in-process.
 
 The host places the unauthorized value in the factual Timeline after the cut:
 in the factual suffix inputs and in the participant Driver's hidden participant
 field. The nine byte-exact surfaces are captured from the exported artifacts;
-snapshots and ReproManifest are empty until #1204. The shared executor key and
+snapshots and ReproManifest are empty because the records-form run emits
+neither. The shared executor key and
 capture helpers live in `non_interference_harness::fixture_evidence` and the
 private `capture` module.
 
@@ -151,9 +150,8 @@ result through their public encodings, each at the run's `WorldCut`
 coordinate. `compare_fork_artifacts_v1` compares two exports with the R1
 comparator, so a mismatching artifact is one `DVR1` at its coordinate. The
 provisional Ticks come from the records form: the host declares the
-provisional graph and a records-form stager stages it. Per owner answer Q7 such
-a run is a genuine ADR-064 Fork execution, re-run when the ADR-064 R7 steps form
-(#1204) lands. A factual suffix after the cut never reaches an artifact. Local
+provisional graph and a records-form stager stages it. A factual suffix after
+the cut never reaches an artifact. Local
 and Air-Gapped runs export the same bytes; an Air-Gapped run refuses an EPF1
 that allows network (the run is in-process; no isolation is claimed). The module needs the `test-support` feature (the open
 fixture erasure gate and the generated Plugin registration) and Linux (the

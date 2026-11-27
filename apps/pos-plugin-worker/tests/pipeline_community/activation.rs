@@ -1,13 +1,11 @@
-//! PCF-CPH-019 of `PCH1` version 2: the ADR-119 composition boundary transaction on the real
-//! worker (#667, ADR-119 section 6 cases 1, 2, 3 and 13).
+//! PCF-CPH-019 of `PCH1` version 2: the composition boundary transaction on the real worker.
 //!
 //! The entry's primary and its one declared candidate are real signed releases of the Rust
 //! guest, composed through the supervisor's restart composer and declared through the runtime
-//! `declare`. A trap is a `ComponentTrap` the host reports `Unverified`, so it activates
-//! nothing until FU-7 (owner decision Q2 (c)). A revoked primary refuses the pass at its gate
-//! (code 4, Q6 (a)); the boundary then commits the activation, swaps the registry entry and the
-//! host member, and the next pass commits the candidate's Event: the relief from the revision 7
-//! deadlock. An owner return to the revoked primary is refused at the trust gate. Each step
+//! `declare`. A `ComponentTrap` reported as `Unverified` does not activate a candidate. A
+//! revoked primary refuses the pass at its gate; the boundary then commits the activation,
+//! swaps the registry entry and host member, and the next pass commits the candidate's Event.
+//! Returning to the revoked primary is refused at the trust gate. Each step
 //! runs in Local and Air-Gapped mode on both stores; the Air-Gapped results must equal the
 //! Local ones.
 
@@ -544,7 +542,6 @@ fn observe(kind: StoreKind, mode: Mode) -> BoxResult<Vec<(&'static str, String)>
     Ok(seen)
 }
 
-/// PCF-CPH-019: the ADR-119 composition boundary transaction on the real worker.
 #[must_use]
 pub fn boundary_activation() -> Capture {
     on_every_store(activation)

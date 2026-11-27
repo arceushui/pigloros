@@ -771,9 +771,6 @@ fn file_mount() -> Result<QuarantinedRootMount, BoxError> {
     )))
 }
 
-// ---------------------------------------------------------------------------
-// Kernel command line (owner decision Q7.8, B3)
-
 #[test]
 fn only_one_plain_veto_word_disables_userspace_verity() {
     for accepted in [

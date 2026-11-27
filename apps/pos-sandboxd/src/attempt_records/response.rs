@@ -207,7 +207,7 @@ impl Sent {
     /// The `ReleaseV1` sent, the network transcripts and the output
     /// descriptor of an executed attempt. No other attempt sent anything a
     /// signed response names: one that failed after its `ReleaseV1` has no
-    /// records, so it is never signed (owner decision 2026-11-19, Q2).
+    /// records, so it is never signed.
     fn of<S>(progress: &AttemptProgress<S>) -> Self {
         match progress {
             AttemptProgress::Executed {
