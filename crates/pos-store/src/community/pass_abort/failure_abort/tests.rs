@@ -33,7 +33,8 @@ use crate::community::pass_record::{CommunityPassMemberDigestsV1, CommunityPassS
 use crate::community::private_hash::scope_set_digest;
 use crate::community::quarantine::{
     CommittedQuarantineControlV1, CommunityQuarantineReceiptV1, QuarantineLedgerV1,
-    QuarantineReasonStateV1, SetReasonBoundV1,
+    QuarantineReasonStateV1, RetainedControlV1, RetainedSetReasonV1, SealedControlV1,
+    SetReasonBoundV1,
 };
 use crate::community::vault::VaultKeyV1;
 use crate::community::{
@@ -505,15 +506,16 @@ fn a_trap_seals_its_records_under_the_pass_key() -> TestResult {
             committed.admissions[index - 6].digest()
         );
     }
+    let retained = &control.set_reason().ok_or("no SetReason")?.sealed;
     let vault = scene
         .case
         .domain()
         .keys
-        .get(&control.metadata_key)
+        .get(&retained.metadata_key)
         .ok_or("no pass key")?;
-    assert_eq!(control.records.len(), 1);
+    assert_eq!(retained.records.len(), 1);
     assert_eq!(
-        vault.open(&control.records[0])?.as_slice(),
+        vault.open(&retained.records[0])?.as_slice(),
         records[10].as_slice()
     );
     let owner = community_catalogue_owner_v1(target(), GENERATION)?;
@@ -850,19 +852,23 @@ fn a_used_control_identity_conflicts() -> TestResult {
     scene.case.domain_mut().quarantine_controls.insert(
         (target(), [0x71; 16]),
         CommittedQuarantineControlV1 {
-            bound: SetReasonBoundV1 {
-                key: hash(1),
-                expected_ledger: None,
-                reason: 0,
-                host_failure: TRAP,
-                trust_policy_snapshot_digest: hash(2),
-                expected_generation: GENERATION,
-                expected_head: hash(3),
-            },
-            generation: GENERATION,
-            metadata_key: PASS_KEY_ID,
-            records: Vec::new(),
-            admission: None,
+            kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                bound: SetReasonBoundV1 {
+                    key: hash(1),
+                    expected_ledger: None,
+                    reason: 0,
+                    host_failure: TRAP,
+                    trust_policy_snapshot_digest: hash(2),
+                    expected_generation: GENERATION,
+                    expected_head: hash(3),
+                },
+                generation: GENERATION,
+                sealed: SealedControlV1 {
+                    metadata_key: PASS_KEY_ID,
+                    records: Vec::new(),
+                },
+                admission: None,
+            }),
             receipt: CommunityQuarantineReceiptV1 {
                 timeline: target(),
                 control_operation_id: [0x71; 16],
