@@ -1202,6 +1202,8 @@ pub(crate) fn execution_state(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::sandbox_provider_protocol::SandboxSyscallSet;
 
@@ -1223,6 +1225,28 @@ mod tests {
             for needed in ["execve", "exit_group", "read", "write", "socket"] {
                 assert!(names.contains(&needed), "{needed}");
             }
+        }
+        // The whole of each list is pinned, so that any growth is a reviewed change: the count and
+        // the SHA-256 of the names, one per line.
+        for (names, count, digest) in [
+            (
+                GUEST_SYSCALLS_X86_64,
+                109,
+                "d09ae9f647a6208703a9918da1ee9bd0385f5afcc884e196387c8f1cf069e5d3",
+            ),
+            (
+                GUEST_SYSCALLS_AARCH64,
+                96,
+                "23bc6528c6a4ed46d6c8a9bd52e371ee946e4c785622715d350b219c35e998b5",
+            ),
+        ] {
+            let text = format!("{}\n", names.join("\n"));
+            assert_eq!(names.len(), count);
+            let mut hex = String::new();
+            for byte in Sha256::digest(text.as_bytes()) {
+                write!(hex, "{byte:02x}")?;
+            }
+            assert_eq!(hex, digest);
         }
         assert!(GUEST_SYSCALLS_X86_64.contains(&"arch_prctl"));
         assert!(!GUEST_SYSCALLS_AARCH64.contains(&"arch_prctl"));

@@ -1089,7 +1089,6 @@ fn the_real_entry_point_refuses_bad_parameters_and_a_missing_environment() -> Te
     Ok(())
 }
 
-#[cfg(feature = "test-support")]
 #[test]
 fn every_launcher_failure_has_its_own_exit_status() {
     let failures = [

@@ -668,7 +668,8 @@ impl SystemCallFilter {
 /// listener invariant fails, so neither returns success. The recovery peer
 /// exits with status 0 after it acknowledged its one exchange (ADR-069 R12
 /// §5). Any other argument vector exits with status 2; a failure of any mode
-/// ends with status 1 and one fixed diagnostic on standard error.
+/// ends with one fixed diagnostic on standard error and status 1, except for the launcher, whose
+/// status says which closed failure it was (`launcher::failure_status`).
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
@@ -687,8 +688,8 @@ enum ModeOutcome {
     Usage,
     /// The recovery peer acknowledged its one exchange: exit status 0.
     Succeeded,
-    /// A mode failed with this diagnostic and exit status (1, except for the launcher of a
-    /// `test-support` build, see `launcher::failure_status`).
+    /// A mode failed with this diagnostic and exit status (1, except for the launcher, see
+    /// `launcher::failure_status`).
     Failed(String, u8),
 }
 
