@@ -506,15 +506,16 @@ fn a_trap_seals_its_records_under_the_pass_key() -> TestResult {
             committed.admissions[index - 6].digest()
         );
     }
+    let retained = &control.set_reason().ok_or("no SetReason")?.sealed;
     let vault = scene
         .case
         .domain()
         .keys
-        .get(&control.metadata_key)
+        .get(&retained.metadata_key)
         .ok_or("no pass key")?;
-    assert_eq!(control.records.len(), 1);
+    assert_eq!(retained.records.len(), 1);
     assert_eq!(
-        vault.open(&control.records[0])?.as_slice(),
+        vault.open(&retained.records[0])?.as_slice(),
         records[10].as_slice()
     );
     let owner = community_catalogue_owner_v1(target(), GENERATION)?;
