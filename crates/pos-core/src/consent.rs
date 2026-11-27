@@ -299,10 +299,6 @@ fn decode_tstr_max(val: &Value, max: usize) -> Result<String, ConsentCodecError>
     }
 }
 
-// ---------------------------------------------------------------------------
-// ConsentGrantedV1
-// ---------------------------------------------------------------------------
-
 /// A consent grant event (ADR-039, `consent.granted.v1`).
 ///
 /// Array (12 elements):
@@ -458,10 +454,6 @@ fn decode_grant_retention(items: &[Value]) -> Result<GrantRetention, ConsentCode
         })
     })
 }
-
-// ---------------------------------------------------------------------------
-// ConsentRevokedV1
-// ---------------------------------------------------------------------------
 
 /// A consent revocation event (ADR-039, `consent.revoked.v1`).
 ///
@@ -1676,10 +1668,6 @@ impl ConsentGate for ConsentAuthority {
         Ok(())
     }
 }
-
-// ---------------------------------------------------------------------------
-// ConsentRevocationFoldListener
-// ---------------------------------------------------------------------------
 
 /// Listener implemented by `ProjectionRegistry` to invalidate caches on
 /// revocation (ADR-039 section 5).

@@ -50,10 +50,6 @@ pub use candidate::{
 };
 pub use staged::{InstallErrorV1, RevokedSubjectsV1, StagedProjectionV1};
 
-// ---------------------------------------------------------------------------
-// EntityStateProjection
-// ---------------------------------------------------------------------------
-
 /// A [`Reducer`] that folds each event into minimal per-entity state.
 ///
 /// After each event the state contains:
@@ -1371,10 +1367,6 @@ impl ConsentRevocationFoldListener for ProjectionRegistry {
         self.forget_subject(&subject_id);
     }
 }
-
-// ---------------------------------------------------------------------------
-// RelationshipIndex
-// ---------------------------------------------------------------------------
 
 /// Adjacency index for directed [`Relationship`] values.
 ///

@@ -755,9 +755,6 @@ fn verify_staged<S: EventStore>(
 
 /// An empty child segment makes no #411 completeness claim: the staged child
 /// head equals the parent cut and its own range is empty.
-///
-/// An honest adapter always stages exactly that, so this is defence in depth
-/// that ADR-105 requires. Do not remove it as a tautology.
 fn verify_empty_segment<S: EventStore>(
     store: &S,
     child: TimelineId,

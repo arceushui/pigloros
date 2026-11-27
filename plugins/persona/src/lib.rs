@@ -193,10 +193,6 @@ impl InstalledPluginFactoryV1 for PersonaPlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PersonaModel
-// ---------------------------------------------------------------------------
-
 /// A simple preference model (stub for Wave 5).
 ///
 /// Stores a list of (dimension, score) pairs and scores options by matching

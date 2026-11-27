@@ -251,10 +251,6 @@ impl InstalledPluginFactoryV1 for BridgePlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// BridgeIngestor
-// ---------------------------------------------------------------------------
-
 /// Produces [`EventDraft`]s from external data sources.
 ///
 /// This is NOT a Driver — it has no store/timeline dependencies.
