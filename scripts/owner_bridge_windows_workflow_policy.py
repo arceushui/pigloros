@@ -14,6 +14,70 @@ from check_owner_runtime_custody_policy import PolicyError, load_workflow, same_
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ".github/workflows/owner-bridge-windows.yml"
+HOST_QUIESCE_COMMAND = r"""# On hosted runners StorSvc, background indexers/telemetry and Windows
+# Defender scanning fresh WebView2 User Data Folders under TEMP contend
+# with timed native fixtures and BrowserProcessExited cleanup (#1468).
+# Deadlines stay fixed; the host is quiet.
+$ErrorActionPreference = 'Stop'
+foreach ($name in @('StorSvc', 'WSearch', 'SysMain', 'DiagTrack')) {
+  $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+  if ($service) {
+    $before = $service.Status
+    $disabled = $true
+    $stopped = $true
+    try {
+      Set-Service -Name $name -StartupType Disabled
+    } catch {
+      if ($name -eq 'StorSvc') { throw }
+      $disabled = $false
+    }
+    try {
+      Stop-Service -Name $name -Force
+    } catch {
+      if ($name -eq 'StorSvc') { throw }
+      $stopped = $false
+    }
+    $after = (Get-Service -Name $name).Status
+    Write-Output "HOST_QUIESCE service=$name before=$before after=$after disabled=$disabled stopped=$stopped"
+  } else {
+    Write-Output "HOST_QUIESCE service=$name absent"
+  }
+}
+if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
+  $status = try { Get-MpComputerStatus -ErrorAction SilentlyContinue } catch { $null }
+  $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
+  $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
+  $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
+  $candidates = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP, [System.IO.Path]::GetTempPath())
+  if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Temp') }
+  $paths = @(
+    $candidates |
+      Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+      ForEach-Object {
+        $full = [System.IO.Path]::GetFullPath($_).TrimEnd('\', '/')
+        $full
+        if ($null -ne $fso) {
+          try { $fso.GetFolder($full).Path.TrimEnd('\', '/') } catch {}
+        }
+      } |
+      Sort-Object -Unique
+  )
+  $excluded = 0
+  $failed = 0
+  foreach ($path in $paths) {
+    try {
+      Add-MpPreference -ExclusionPath $path
+      $excluded++
+    } catch {
+      $failed++
+    }
+  }
+  $state = if ($excluded -gt 0 -and $failed -eq 0) { 'excluded' } elseif ($excluded -gt 0) { 'partial' } elseif ($failed -gt 0) { 'unavailable' } else { 'none' }
+  Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
+} else {
+  Write-Output 'HOST_QUIESCE defender=absent'
+}
+"""
 NATIVE_COVERAGE_COMMAND = """$ErrorActionPreference = 'Stop'
 $metadata = cargo metadata --locked --no-deps --format-version 1
 if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
@@ -86,19 +150,9 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      "if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }\n"
                                                      'cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored\n'
                                                      "if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }\n"},
-                                             {'name': 'Stop the storage service before timed native fixtures',
+                                             {'name': 'Quiesce host services and Defender temp paths before timed native fixtures',
                                               'shell': 'pwsh',
-                                              'run': '# On hosted runners StorSvc takes a full core and the disk queue for\n'
-                                                     '# about 45 s some ten minutes into the job, which starves whichever\n'
-                                                     '# timed fixture is running. Deadlines stay fixed; the host is quiet.\n'
-                                                     '$service = Get-Service -Name StorSvc -ErrorAction SilentlyContinue\n'
-                                                     'if ($service) {\n'
-                                                     '  Set-Service -Name StorSvc -StartupType Disabled\n'
-                                                     '  Stop-Service -Name StorSvc -Force\n'
-                                                     '  Write-Output "HOST_QUIESCE service=StorSvc before=$($service.Status) after=$((Get-Service -Name StorSvc).Status)"\n'
-                                                     '} else {\n'
-                                                     "  Write-Output 'HOST_QUIESCE service=StorSvc absent'\n"
-                                                     '}\n'},
+                                              'run': HOST_QUIESCE_COMMAND},
                                              {'name': 'Measure only shim source coverage',
                                               'id': 'coverage',
                                               'timeout-minutes': 65,
@@ -330,17 +384,9 @@ EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
          "shell": "pwsh",
          "env": {"GH_TOKEN": "${{ github.token }}"},
          "run": './scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"'},
-        {"name": "Stop the storage service before timed native fixtures",
+        {"name": "Quiesce host services and Defender temp paths before timed native fixtures",
          "shell": "pwsh",
-         "run": "$service = Get-Service -Name StorSvc -ErrorAction SilentlyContinue\n"
-                "if ($service) {\n"
-                "  Set-Service -Name StorSvc -StartupType Disabled\n"
-                "  Stop-Service -Name StorSvc -Force\n"
-                '  Write-Output "HOST_QUIESCE service=StorSvc before=$($service.Status) '
-                'after=$((Get-Service -Name StorSvc).Status)"\n'
-                "} else {\n"
-                "  Write-Output 'HOST_QUIESCE service=StorSvc absent'\n"
-                "}\n"},
+         "run": HOST_QUIESCE_COMMAND},
         {"name": "Run the full native readiness soak",
          "timeout-minutes": 65,
          "shell": "pwsh",
@@ -350,7 +396,7 @@ EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
     ],
 }
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'd85a2eb971d62f1e2563d7483fc619a0f71a5d1543c80215e61786b83aadfe85',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '58f9672e5d7ca1c8876bb1c48bf774a68a01296d3824e001e48096cd71747d34',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 
