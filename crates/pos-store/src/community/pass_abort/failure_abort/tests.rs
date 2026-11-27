@@ -7,14 +7,14 @@ use pos_core::community_lifecycle::{
     CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
     CommunityAuthorityEvidenceV1, CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1,
     CommunityCurrentViewV1, CommunityDueMemberBudgetV1, CommunityDurableProfileV1,
-    CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1,
-    CommunityMetadataPolicyV1, CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1,
-    CommunityPassFrontierV1, CommunityPluginHostErrorV1 as Host, CommunityQuarantineDispositionV1,
-    CommunityQuarantineKeyV1, CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1,
-    CommunityQuarantineReasonV1, CommunityRecordKindsV1, CommunityScopeBindingInputV1,
-    CommunityScopeBindingV1, CommunityScopeCoverageRowsV1, CommunityScopeMembersV1,
-    CommunitySharedCountsV1, CommunityTypedInputRefsV1, ComponentTrapClassV1, TrapReproductionV1,
-    TrustDenialBasisV1,
+    CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1,
+    CommunityMemberSlotsV1, CommunityMetadataPolicyV1, CommunityOriginalProvenanceInputV1,
+    CommunityOriginalProvenanceV1, CommunityPassFrontierV1, CommunityPluginHostErrorV1 as Host,
+    CommunityProducerBindingV1, CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
+    CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
+    CommunityRecordKindsV1, CommunityScopeBindingInputV1, CommunityScopeBindingV1,
+    CommunityScopeCoverageRowsV1, CommunityScopeMembersV1, CommunitySharedCountsV1,
+    CommunityTypedInputRefsV1, ComponentTrapClassV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 use pos_core::{ArtifactRegistrationPersistencePortV1, AuthorityTrustRootSealV1, Hash};
 
@@ -492,6 +492,30 @@ fn a_trap_seals_its_records_under_the_pass_key() -> TestResult {
         .get(&(target(), OPERATION))
         .ok_or("no committed Abort")?;
     assert_eq!(committed.admissions.len(), 2);
+    for (index, magic) in [(6, *b"CFI1"), (7, *b"CFO1")] {
+        let materialization = CommunityMaterializationV1::from_canonical_cbor(&records[index])?;
+        let fields = materialization.as_input();
+        assert_eq!(fields.record_magic, magic);
+        assert!(matches!(
+            fields.producer,
+            CommunityProducerBindingV1::Control(digest) if digest == receipt.abort_digest()
+        ));
+        assert_eq!(
+            fields.materialization.attestation_address,
+            committed.admissions[index - 6].digest()
+        );
+    }
+    let vault = scene
+        .case
+        .domain()
+        .keys
+        .get(&control.metadata_key)
+        .ok_or("no pass key")?;
+    assert_eq!(control.records.len(), 1);
+    assert_eq!(
+        vault.open(&control.records[0])?.as_slice(),
+        records[10].as_slice()
+    );
     let owner = community_catalogue_owner_v1(target(), GENERATION)?;
     for admission in &committed.admissions {
         assert!(matches!(
