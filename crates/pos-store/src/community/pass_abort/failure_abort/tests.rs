@@ -163,33 +163,44 @@ struct Scene {
     horizon: u64,
 }
 
+/// The pass scope bytes of `case` and the failure horizon of its profile.
+fn scope_and_horizon(case: &Case) -> Fallible<(ScopeBytes, u64)> {
+    let rows = case.roster.rows()?;
+    let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
+    let horizon = profile
+        .as_input()
+        .retention
+        .quarantine_not_after_micros
+        .min(HORIZON);
+    scope_bytes(&profile, (None, 90)).map(|bytes| (bytes, horizon))
+}
+
+/// Give the reserved pass its second due member, the quote of `bytes` and
+/// the failure cohort key `Reserve` provisions.
+fn adopt(case: &mut Case, bytes: &ScopeBytes, horizon: u64) -> TestResult {
+    let key = cohort_key(horizon, cohort_kinds())?;
+    let domain = case.domain_mut();
+    let record = domain
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    record.reserved.cbq1_digest = bytes.quote_digest;
+    record.reserved.members.push(CommunityPassMemberDigestsV1 {
+        roster_index: 1,
+        cmb1_digest: MEMBER_ONE,
+        cin1_digest: hash(96),
+        trust_policy_snapshot_digest: hash(97),
+    });
+    domain.keys.insert(COHORT_ID, key);
+    Ok(())
+}
+
 impl Scene {
     fn new(live: bool) -> Fallible<Self> {
         let mut case = Case::new()?;
         case.reserve(live)?;
-        let rows = case.roster.rows()?;
-        let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
-        let bytes = scope_bytes(&profile, (None, 90))?;
-        let horizon = profile
-            .as_input()
-            .retention
-            .quarantine_not_after_micros
-            .min(HORIZON);
-        let domain = case.domain_mut();
-        let record = domain
-            .pass_records
-            .get_mut(&(target(), OPERATION))
-            .ok_or("no pass")?;
-        record.reserved.cbq1_digest = bytes.quote_digest;
-        record.reserved.members.push(CommunityPassMemberDigestsV1 {
-            roster_index: 1,
-            cmb1_digest: MEMBER_ONE,
-            cin1_digest: hash(96),
-            trust_policy_snapshot_digest: hash(97),
-        });
-        domain
-            .keys
-            .insert(COHORT_ID, cohort_key(horizon, cohort_kinds())?);
+        let (bytes, horizon) = scope_and_horizon(&case)?;
+        adopt(&mut case, &bytes, horizon)?;
         Ok(Self {
             case,
             bytes,
