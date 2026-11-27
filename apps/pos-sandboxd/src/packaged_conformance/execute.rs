@@ -118,7 +118,6 @@ pub(super) fn run_execute(
             &GuestInstantClock::start(),
             EXECUTE_WINDOW,
         )
-        .map_err(refused)?
         .iter()
         .try_for_each(|line| report_line(report, line))
 }

@@ -25,8 +25,8 @@ use super::{
 use crate::evaluator_protocol::{
     encode, EvaluationRequest, ProtocolError, RequiredProviderCapability, SandboxRequirement,
 };
+use crate::provider_admission::test_support::StagedLimits;
 use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole, SandboxArchitecture};
-use crate::selector_test_support::{GUEST_MEMORY_BYTES, GUEST_OUTPUT_BYTES, GUEST_STORAGE_BYTES};
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -681,7 +681,7 @@ fn image_manifest(
     )
 }
 
-fn launch_policy(image_manifest: [u8; 32], limits: &LimitTable) -> TestResult<Vec<u8>> {
+fn launch_policy(image_manifest: [u8; 32], limits: &[u64; LIMIT_COUNT]) -> TestResult<Vec<u8>> {
     let unsigned = Value::Array(vec![
         Value::Text("LPS1".to_owned()),
         integer(1),
@@ -701,62 +701,30 @@ fn launch_policy(image_manifest: [u8; 32], limits: &LimitTable) -> TestResult<Ve
     ]))?)
 }
 
-/// One value per ELM1 limit ID 0 through 16, shared by the launch policy and the broker caps.
-pub(crate) type LimitTable = [u64; 17];
+/// The ELM1 limit count.
+pub(crate) const LIMIT_COUNT: usize = 17;
 
-/// The small limits of every unit-test fixture.
-const FIXTURE_LIMITS: LimitTable = [
-    2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 256,
-    2_000, 2_000, 2_000,
-];
+/// The value of every operating limit of the default fixture, but for limit
+/// 13 (the concurrent attempts), which is 256.
+pub(crate) const DEFAULT_LIMITS: [u64; LIMIT_COUNT] = {
+    let mut limits = [2_000; LIMIT_COUNT];
+    limits[13] = 256;
+    limits
+};
 
-/// The limits of an attempt that must really run in the #444 evidence guest: memory 128 MiB, no
-/// swap, 256 tasks, one CPU, a 120 s watchdog, 1024 descriptors, 16 MiB files, 1 MiB output and
-/// a 16 MiB work area. The other limits keep the unit-test fixture's values. Memory, output and
-/// work bytes come from the constants the guest corpus budgets use, so the two cannot drift. Swap
-/// 0 is a literal zero ceiling that systemd enforces exactly (`is_unenforceable` refuses a zero
-/// only for limits 0, 2, 3 and 4), and admission accepts it (only limit 4 may not be zero).
-pub(crate) const GUEST_LIMITS: LimitTable = [
-    GUEST_MEMORY_BYTES,
-    0,
-    256,
-    1_000_000,
-    120_000,
-    1_024,
-    16_777_216,
-    2_000,
-    GUEST_OUTPUT_BYTES,
-    GUEST_STORAGE_BYTES,
-    2_000,
-    2_000,
-    2_000,
-    256,
-    2_000,
-    2_000,
-    2_000,
-];
-
-fn limit_values(limits: &LimitTable) -> Vec<Value> {
-    (0..17)
+fn limit_values(limits: &[u64; LIMIT_COUNT]) -> Vec<Value> {
+    (0..)
         .zip(limits)
         .map(|(limit_id, value)| Value::Array(vec![integer(limit_id), integer(*value)]))
         .collect()
 }
 
-fn broker_hard_caps(limits: &LimitTable) -> Result<Vec<u8>, ProtocolError> {
+fn broker_hard_caps(limits: &[u64; LIMIT_COUNT]) -> Result<Vec<u8>, ProtocolError> {
     encode(&Value::Array(vec![
         Value::Text("BHC1".to_owned()),
         integer(1),
         Value::Array(limit_values(limits)),
     ]))
-}
-
-/// The provider executable of a fixture installation and the limits it is admitted with.
-#[derive(Clone, Copy)]
-pub(crate) struct ProviderFixture<'a> {
-    pub(crate) binary: &'a [u8],
-    pub(crate) limits: &'a LimitTable,
-    pub(crate) syscalls: SyscallPolicy,
 }
 
 /// Expanded systemd-repart DDI and its independently described partitions.
@@ -871,19 +839,50 @@ pub(crate) fn admitted_state_with_arguments(
         signing,
         salt,
         arguments,
+        FIXTURE_PROVIDER_BINARY,
+    )
+}
+
+/// [`admitted_state_with_arguments`] with `provider_binary` as the bytes of
+/// the installed kind-11 provider executable, whose BLAKE3 digest the SPM1,
+/// PCR1 and APT1 records then bind.
+pub(crate) fn admitted_state_with_provider_binary(
+    root_image: &[u8],
+    executable: &[u8],
+    partitions: &[PartitionDescriptor; 3],
+    signing: &ImageSigning,
+    salt: [u8; 32],
+    arguments: &[String],
+    provider_binary: &[u8],
+) -> TestResult<InstalledSelectorState> {
+    admitted_state_with_limits(
+        root_image,
+        executable,
+        partitions,
+        signing,
+        salt,
+        arguments,
         ProviderFixture {
-            binary: FIXTURE_PROVIDER_BINARY,
-            limits: &FIXTURE_LIMITS,
+            binary: provider_binary,
+            limits: &StagedLimits::DEFAULT,
             syscalls: SyscallPolicy::Fixture,
         },
     )
 }
 
-/// [`admitted_state_with_arguments`] with `provider.binary` as the bytes of
-/// the installed kind-11 provider executable, whose BLAKE3 digest the SPM1,
-/// PCR1 and APT1 records then bind, and `provider.limits` as the launch policy's and the broker's
-/// limits.
-pub(crate) fn admitted_state_with_provider_binary(
+/// What a provider-binary fixture varies besides the image: the provider executable's bytes, the
+/// operating limits and the SCS1 allow-list.
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderFixture<'a> {
+    pub(crate) binary: &'a [u8],
+    pub(crate) limits: &'a StagedLimits,
+    pub(crate) syscalls: SyscallPolicy,
+}
+
+/// [`admitted_state_with_provider_binary`] with the broker hard caps and the
+/// launch policy of `provider.limits`, and the SCS1 of `provider.syscalls`, in place of the
+/// default fixture's.
+pub(crate) fn admitted_state_with_limits(
     root_image: &[u8],
     executable: &[u8],
     partitions: &[PartitionDescriptor; 3],
@@ -892,6 +891,7 @@ pub(crate) fn admitted_state_with_provider_binary(
     arguments: &[String],
     provider: ProviderFixture<'_>,
 ) -> TestResult<InstalledSelectorState> {
+    let (provider_binary, limits) = (provider.binary, provider.limits);
     let authority = provider_authority();
     let architecture = signing.architecture;
     let trust = provider_trust(&authority, signing)?;
@@ -902,8 +902,8 @@ pub(crate) fn admitted_state_with_provider_binary(
         .map(str::to_owned)
         .to_vec();
     let features_digest = feature_digest(&features)?;
-    let provider_binary_digest = *blake3::hash(provider.binary).as_bytes();
-    let hard_caps = broker_hard_caps(provider.limits)?;
+    let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
+    let hard_caps = broker_hard_caps(&limits.broker)?;
     let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
     let manifest = provider_manifest(
         &authority,
@@ -928,7 +928,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         &authority, root_image, executable, partitions, signing, salt, arguments,
     )?;
     let image_digest = signed_record_digest(&image)?;
-    let launch = launch_policy(image_digest, provider.limits)?;
+    let launch = launch_policy(image_digest, &limits.launch)?;
     let launch_digest = signed_record_digest(&launch)?;
     let policy = provider_policy(
         &authority,
@@ -957,7 +957,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         (8, launch_digest, launch.as_slice()),
         (9, image_digest, image.as_slice()),
         (10, hard_caps_digest, hard_caps.as_slice()),
-        (11, provider_binary_digest, provider.binary),
+        (11, provider_binary_digest, provider_binary),
         (12, *blake3::hash(root_image).as_bytes(), root_image),
         (13, *blake3::hash(executable).as_bytes(), executable),
     ];
