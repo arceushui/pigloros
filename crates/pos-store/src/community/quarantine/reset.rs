@@ -21,9 +21,10 @@
 //! It re-arms only the `F_q` shares a pre-execution `SetReason` spent
 //! (R15.3(6)).
 //!
-//! The principal and authorization refs and the authorization deadline are
-//! caller-supplied and opaque here: their verification, the reset's CAV1,
-//! CAU1, metadata key and registrations are slice R15-6's.
+//! The commit advances the inventory generation once, as every committed
+//! control does. The principal and authorization refs and the authorization
+//! deadline are caller-supplied and opaque here: their verification, the
+//! reset's CAV1, CAU1, metadata key and registrations are slice R15-6's.
 
 use std::collections::BTreeMap;
 
@@ -217,8 +218,8 @@ impl MemoryCommunityDomainV1 {
         })
     }
 
-    /// Retain the reset: the successor ledger, the retry index entry and the
-    /// re-armed `F_q` shares. The records are CQC1, CQR1 and CQO1 only (the
+    /// Retain the reset: the successor ledger, the retry index entry, the
+    /// re-armed `F_q` shares and the advanced inventory generation. The records are CQC1, CQR1 and CQO1 only (the
     /// reset's registrations and metadata records are R15-6's).
     fn retain_reset(
         &mut self,
@@ -240,14 +241,14 @@ impl MemoryCommunityDomainV1 {
             outcome: records.outcome,
         };
         self.count_quarantine_pairs(call.timeline, spent, 0);
+        self.inventory_generation += 1;
         self.quarantine_index.insert(key, records.ledger);
         self.quarantine_controls.insert(
             (call.timeline, call.control_operation_id),
             CommittedQuarantineControlV1 {
                 bound: ControlBoundV1::Reset(bound),
                 generation,
-                metadata_key: [0; 16],
-                records: Vec::new(),
+                sealed: None,
                 admission: None,
                 receipt: receipt.clone(),
             },

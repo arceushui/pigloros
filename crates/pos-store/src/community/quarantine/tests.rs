@@ -92,11 +92,12 @@ fn records(case: &QuarantineCase, control: [u8; 16]) -> Fallible<Vec<Vec<u8>>> {
         .quarantine_controls
         .get(&(target(), control))
         .ok_or("no committed SetReason")?;
+    let sealed = committed.sealed.as_ref().ok_or("no sealed records")?;
     let key = domain
         .keys
-        .get(&committed.metadata_key)
+        .get(&sealed.metadata_key)
         .ok_or("no metadata key")?;
-    Ok(committed
+    Ok(sealed
         .records
         .iter()
         .map(|sealed| key.open(sealed).map(|bytes| bytes.to_vec()))
@@ -162,7 +163,13 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
     assert!(fields.child_artifacts.is_empty());
     let metadata_intent = *after
         .keys
-        .get(&committed.metadata_key)
+        .get(
+            &committed
+                .sealed
+                .as_ref()
+                .ok_or("no sealed records")?
+                .metadata_key,
+        )
         .ok_or("no metadata key")?
         .intent()
         .as_input();
@@ -374,7 +381,11 @@ fn a_retry_needs_its_retained_evidence() -> TestResult {
             .ok_or("no committed SetReason")?;
         match fault {
             0 => {
-                let key = committed.metadata_key;
+                let key = committed
+                    .sealed
+                    .as_ref()
+                    .ok_or("no sealed records")?
+                    .metadata_key;
                 domain.keys.remove(&key);
             }
             1 => committed.receipt.outcome = zeroize::Zeroizing::new(vec![0x80]),

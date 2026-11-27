@@ -48,7 +48,7 @@ use super::super::metadata_authority::CommunityMetadataAuthorityV1;
 use super::super::pass_record::CommunityPassRecordV1;
 use super::super::protection::{CommunityArtifactProtectorV1, CommunityProtectedRecordV1};
 use super::super::quarantine::{
-    CommittedQuarantineControlV1, CommunityQuarantineContextV1, ControlBoundV1,
+    CommittedQuarantineControlV1, CommunityQuarantineContextV1, ControlBoundV1, SealedControlV1,
 };
 use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
@@ -805,12 +805,14 @@ impl MemoryCommunityDomainV1 {
                 CommittedQuarantineControlV1 {
                     bound: ControlBoundV1::SetReason(apply.bound),
                     generation: staged.committed.generation,
-                    metadata_key: staged.committed.metadata_key,
-                    records: vec![SealedMetadataV1 {
-                        envelope: outcome.envelope.clone(),
-                        address: outcome.address,
-                        commitment: outcome.commitment,
-                    }],
+                    sealed: Some(SealedControlV1 {
+                        metadata_key: staged.committed.metadata_key,
+                        records: vec![SealedMetadataV1 {
+                            envelope: outcome.envelope.clone(),
+                            address: outcome.address,
+                            commitment: outcome.commitment,
+                        }],
+                    }),
                     admission: None,
                     receipt: apply.receipt,
                 },
