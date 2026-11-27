@@ -629,8 +629,8 @@ impl GatewayProducedUnderV1 {
 }
 
 /// The store's current binding as the 32 bytes of its compiled GMP1 digest
-/// and its epoch, the binding an erasure submission records in its ELADM1
-/// (owner decision D5 of 2026-11-18 on #1413); `None` for an unbound store
+/// and its epoch, the binding an erasure submission records in its ELADM1;
+/// `None` for an unbound store
 /// or a profile this binary does not compile.
 pub(crate) fn current_binding_v1(
     port: &dyn pos_core::GatewayModeBindingPortV1,

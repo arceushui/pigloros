@@ -1,4 +1,4 @@
-//! The records form of the ADR-064 provisional Ticks (owner answer Q7).
+//! Provisional Ticks in the counterfactual dependency graph.
 //!
 //! The host builds the provisional dependency graph from the first
 //! recomputation Tick through the plan horizon. [`RecordsFormStagerV1`] stages
