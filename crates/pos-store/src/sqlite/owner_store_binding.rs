@@ -703,9 +703,11 @@ fn retain<T: 'static>(value: T) -> Retained<T> {
     Retained::new(value)
 }
 
-/// Test-only stand-in for `ManuallyDrop`: dropping it parks the value on a
-/// thread-local list, which the test fixture reclaims once every assertion
-/// ran. Production keeps `ManuallyDrop` and never runs the destructor.
+/// Test-only stand-in for `ManuallyDrop` that parks dropped values.
+///
+/// Dropping it parks the value on a thread-local list, which the test fixture
+/// reclaims once every assertion ran. Production keeps `ManuallyDrop` and
+/// never runs the destructor.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod retained {
@@ -806,8 +808,10 @@ mod tests {
         /// not seen as claimed by a later test.
         fn drop(&mut self) {
             super::retained::reclaim();
-            if let SubjectStoreFileIdV1::Linux { device, inode } = self.key {
-                release_identity([device, inode]);
+            for key in [self.key, self.other_key] {
+                if let SubjectStoreFileIdV1::Linux { device, inode } = key {
+                    release_identity([device, inode]);
+                }
             }
         }
     }
