@@ -208,6 +208,7 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
     // operation (#349, I18) are held to the rule too.
     for module in [
         "provider_lifecycle.rs",
+        "launcher/process_identity.rs",
         "selector/recovery.rs",
         "selector/recovery/authority.rs",
         "selector/recovery/host.rs",
@@ -489,7 +490,7 @@ const LAUNCHER_PROTOCOL_NAMES: [&str; 13] = [
     "pos_reference",
 ];
 /// Crates and path roots the launcher may import from.
-const LAUNCHER_IMPORT_ROOTS: [&str; 15] = [
+const LAUNCHER_IMPORT_ROOTS: [&str; 14] = [
     "std",
     "super",
     "self",
@@ -501,7 +502,6 @@ const LAUNCHER_IMPORT_ROOTS: [&str; 15] = [
     "error",
     "exec",
     "host",
-    "process_identity",
     "rustix",
     "nix",
     "sd_listen_fds",
@@ -549,8 +549,21 @@ fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
     let mut sources = Vec::new();
     rust_sources(&manifest_root().join("src/launcher"), &mut sources)?;
     assert!(sources.len() >= 7, "{sources:?}");
+    for needed in ["host.rs", "barrier.rs", "process_identity.rs"] {
+        assert!(
+            sources.iter().any(|path| path.ends_with(needed)),
+            "the launcher scan must include {needed}"
+        );
+    }
     for path in &sources {
         let text = non_comment_text(path)?;
+        // `provider_identity` opens a pidfd on pid 1: in the launcher's namespace that is the
+        // launcher itself, so only the provider may call it.
+        assert!(
+            path.ends_with("process_identity.rs") || !text.contains("provider_identity("),
+            "{}: launcher code calls `provider_identity`",
+            path.display()
+        );
         for token in FORBIDDEN_REACH {
             assert!(
                 !text.contains(token),

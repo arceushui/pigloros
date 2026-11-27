@@ -2,7 +2,7 @@ use std::{
     error::Error,
     ffi::CString,
     fs::{self, File},
-    io::{self, IoSlice, IoSliceMut},
+    io::{self, IoSlice, IoSliceMut, Read},
     mem::MaybeUninit,
     os::{
         fd::{AsRawFd, OwnedFd},
@@ -1011,6 +1011,46 @@ fn the_local_layout_keeps_the_proxy_open_for_the_adapter() -> TestResult {
         RecvFlags::DONTWAIT,
     )?;
     assert_eq!(closed.bytes, 0);
+    Ok(())
+}
+
+#[test]
+fn open_beneath_walks_plain_names_and_refuses_every_other_path() -> TestResult {
+    let tree = tempfile::tempdir()?;
+    let root = File::open(tree.path())?;
+    std::fs::create_dir_all(tree.path().join("a/b"))?;
+    std::fs::write(tree.path().join("a/b/file"), b"x")?;
+    std::fs::write(tree.path().join("top"), b"y")?;
+    symlink("a", tree.path().join("link"))?;
+    symlink("top", tree.path().join("a/final"))?;
+    symlink("/proc/self/exe", tree.path().join("magic"))?;
+
+    let mut text = String::new();
+    open_beneath(&root, "/a/b/file")?.read_to_string(&mut text)?;
+    assert_eq!(text, "x");
+    // Repeated separators name the same file.
+    assert!(open_beneath(&root, "a//b/file").is_ok());
+    assert!(open_beneath(&root, "top").is_ok());
+    for refused in [
+        "",
+        "/",
+        ".",
+        "a/./b/file",
+        "..",
+        "a/../top",
+        "a/b/..",
+        "link/b/file",
+        "a/final",
+        "magic",
+        "missing",
+        "a/missing/file",
+        "top/file",
+    ] {
+        assert!(
+            open_beneath(&root, refused).is_err(),
+            "{refused:?} must be refused"
+        );
+    }
     Ok(())
 }
 
