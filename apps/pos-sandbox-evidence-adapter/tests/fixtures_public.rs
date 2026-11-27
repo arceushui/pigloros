@@ -674,10 +674,11 @@ impl Orphan {
         let (raw, pid) = self.0.ok_or("already reaped")?;
         kill_process(pid, Signal::KILL)?;
         let status = wait_for(pid)?;
-        // Signal 9 is SIGKILL.
-        assert_eq!(status.terminating_signal(), Some(9));
-        assert_eq!(process_state(raw), None);
+        // The child is reaped: its pid may be reused, so the guard lets go
+        // of it before anything below can fail.
         self.0 = None;
+        assert_eq!(status.terminating_signal(), Some(Signal::KILL.as_raw()));
+        assert_eq!(process_state(raw), None);
         Ok(())
     }
 }
