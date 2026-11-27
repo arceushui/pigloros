@@ -160,7 +160,18 @@ pub fn apply(
     }
 }
 
-/// Whatever the effect did, the run goes on to report honestly.
+/// Whatever the effect did, refused or complete, the run goes on to report
+/// honestly.
+///
+/// This is deliberate: an adapter's own report never tells an enforced limit
+/// from an unenforced one. The kernel evidence does (ADR-069 section 8): the
+/// `pids.events.local` `max` delta ends a task-exhaustion attempt with
+/// `TaskLimit` whatever the adapter then exits with (it outranks
+/// `ProcessCrash`), and the `/work` capacity read-back (ELM1 limit 9) shows the
+/// work area's ceiling, while a refused `/work` write (`ENOSPC`) is a denied
+/// operation that ends the attempt `Completed`, as the conformance suite
+/// expects of a contained adapter. An adapter that ended differently on a
+/// refusal would turn the contained work-area case into a failure.
 fn then_report<T>(_effect: T) -> After {
     After::Report
 }
@@ -213,7 +224,16 @@ pub fn leave_orphan(executable: &Path, attempt: &CaseAttempt) -> Option<u32> {
         .stderr(Stdio::null())
         .spawn()
         .ok()
-        .and_then(|mut child| feed(&mut child, attempt).map(|()| child.id()))
+        .and_then(|mut child| {
+            if feed(&mut child, attempt).is_some() {
+                Some(child.id())
+            } else {
+                // It was not fed, so it would only fail and linger as a zombie.
+                child.kill().ok();
+                child.wait().ok();
+                None
+            }
+        })
 }
 
 /// Write `attempt` to the child's standard input and close it.

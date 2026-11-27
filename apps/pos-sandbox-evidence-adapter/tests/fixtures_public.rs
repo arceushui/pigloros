@@ -51,14 +51,21 @@ fn artifact(bytes: &[u8]) -> AttemptArtifact {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn encoded() -> TestResult<Vec<u8>> {
-    let attempt = CaseAttempt {
+    let mut stream = Vec::new();
+    write_attempt(&mut stream, &case_attempt(b"payload"))?;
+    Ok(stream)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn case_attempt(payload: &[u8]) -> CaseAttempt {
+    CaseAttempt {
         case_id: "fixture".to_owned(),
         claim_layer: ClaimLayer::MetricConformance,
         family: FixtureFamily::Positive,
         mode: ExecutionMode::AirGapped,
         fixture_digest: *blake3::hash(b"payload").as_bytes(),
         schema: artifact(b"schema"),
-        payload: artifact(b"payload"),
+        payload: artifact(payload),
         auxiliary: Vec::new(),
         budget: DeterministicBudget {
             memory_bytes: 1 << 20,
@@ -77,10 +84,7 @@ fn encoded() -> TestResult<Vec<u8>> {
             max_member_bytes: 1 << 20,
             max_attempt_bytes: 1 << 22,
         },
-    };
-    let mut stream = Vec::new();
-    write_attempt(&mut stream, &attempt)?;
-    Ok(stream)
+    }
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -104,12 +108,13 @@ const fn aimed_at(missing: &str, tcp: SocketAddr, resolver: SocketAddr) -> Targe
     }
 }
 
-/// A local TCP address and a local UDP address that nothing answers at.
+/// A TCP address (RFC 5737 documentation) that nothing answers at, a local
+/// UDP address that never answers, and the UDP socket that holds the latter:
+/// keep it alive for the whole test, so no other process can take the port.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr)> {
-    let tcp = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
-    let udp = UdpSocket::bind("127.0.0.1:0")?.local_addr()?;
-    Ok((tcp, udp))
+fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr, UdpSocket)> {
+    let silent = UdpSocket::bind("127.0.0.1:0")?;
+    Ok(("192.0.2.1:9".parse()?, silent.local_addr()?, silent))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -221,8 +226,18 @@ fn signalling_skips_the_adapter_itself_and_reaches_other_processes() {
     assert!(signal_foreign(u32::MAX).is_err());
     let own = std::process::id();
     assert!(signal_foreign(own).is_err());
+    // The parent can be signalled unless it is another user's process (or
+    // there is none, as in some containers): then it is denied, not an error.
     let parent = std::os::unix::process::parent_id();
-    assert!(signal_foreign(parent).is_ok());
+    match signal_foreign(parent) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                parent == 0 || error.kind() == std::io::ErrorKind::PermissionDenied,
+                "{error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -230,7 +245,7 @@ fn every_probe_fixture_lists_the_attempts_it_makes() -> TestResult {
     let dir = tempfile::tempdir()?;
     let missing = dir.path().join("missing");
     let missing = missing.to_str().ok_or("path")?;
-    let (tcp, udp) = silent_addresses()?;
+    let (tcp, udp, _silent) = silent_addresses()?;
     let targets = aimed_at(missing, tcp, udp);
     assert_eq!(probe::filesystem_escape(&targets).len(), 5);
     assert_eq!(probe::network_escape(&targets).len(), 5);
@@ -431,7 +446,7 @@ fn a_probe_fixture_aimed_at_denied_targets_reports_and_at_open_ones_escapes() ->
     let missing = dir.path().join("missing");
     let missing = missing.to_str().ok_or("path")?;
     let open = dir.path().to_str().ok_or("path")?;
-    let (tcp, udp) = silent_addresses()?;
+    let (tcp, udp, _silent) = silent_addresses()?;
     let attempt = attempt()?;
     let run_one =
         |fixture, targets: &Targets<'_>| apply(fixture, &attempt, targets, &mut Vec::new());
@@ -507,7 +522,7 @@ fn the_guest_targets_are_the_in_sandbox_places() {
 fn apply_runs_each_effect_and_says_who_writes_the_output() -> TestResult {
     let dir = tempfile::tempdir()?;
     let work = dir.path().to_str().ok_or("path")?;
-    let (tcp, udp) = silent_addresses()?;
+    let (tcp, udp, _silent) = silent_addresses()?;
     let targets = aimed_at(work, tcp, udp);
     let attempt = attempt()?;
     for (fixture, after) in [
@@ -528,6 +543,20 @@ fn apply_runs_each_effect_and_says_who_writes_the_output() -> TestResult {
     }
     // The work-area fixture wrote its bound where the targets put the area.
     assert_eq!(fs::metadata(dir.path().join("fill"))?.len(), 1);
+    // A refused work area (here, one that does not exist) is a denied
+    // operation: the run still reports honestly, as the suite expects of a
+    // contained adapter (the kernel evidence, not this report, tells an
+    // enforced ceiling from an unenforced one).
+    let refused = aimed_at("/nonexistent/work", tcp, udp);
+    assert_eq!(
+        apply(
+            Fixture::WorkAreaExhaustion(1),
+            &attempt,
+            &refused,
+            &mut Vec::new()
+        ),
+        Ok(After::Report)
+    );
     let mut output = Vec::new();
     assert_eq!(
         apply(Fixture::AdapterCrash, &attempt, &targets, &mut output),
@@ -558,7 +587,7 @@ fn a_broken_output_stream_is_an_output_failure_for_the_fixtures_that_own_it() ->
         }
     }
     let attempt = attempt()?;
-    let (tcp, udp) = silent_addresses()?;
+    let (tcp, udp, _silent) = silent_addresses()?;
     let targets = aimed_at("/nonexistent", tcp, udp);
     for fixture in [Fixture::MalformedOutput, Fixture::OversizedOutput(1)] {
         assert_eq!(
@@ -692,10 +721,11 @@ impl Orphan {
     fn kill_and_reap(&mut self) -> TestResult {
         let (raw, pid) = self.0.ok_or("already reaped")?;
         kill_process(pid, Signal::KILL)?;
-        let status = wait_for(pid)?;
-        // The child is reaped: its pid may be reused, so the guard lets go
-        // of it before anything below can fail.
+        let waited = wait_for(pid);
+        // Reaped, or the wait failed for good: either way the pid may be
+        // reused, so the guard lets go of it before anything below can fail.
         self.0 = None;
+        let status = waited?;
         assert_eq!(status.terminating_signal(), Some(Signal::KILL.as_raw()));
         assert_eq!(process_state(raw), None);
         Ok(())
@@ -784,6 +814,13 @@ fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
         format!("{BINARY}\0idle\0600000\0").into_bytes()
     );
     guard.kill_and_reap()?;
+    // An executable that exits without reading its attempt is not fed (the
+    // attempt is larger than a pipe's buffer, so the write fails): nothing is
+    // left, and the child is killed and waited for.
+    assert_eq!(
+        leave_orphan(Path::new("true"), &case_attempt(&vec![7; 1 << 19])),
+        None
+    );
     // An executable that cannot start leaves nothing.
     assert_eq!(
         leave_orphan(Path::new("/nonexistent/adapter"), &attempt()?),
