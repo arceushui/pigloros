@@ -69,6 +69,13 @@ pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
         AtFlags::empty(),
     )
     .ok();
+    rustix::fs::accessat(
+        &root,
+        path.trim_start_matches('/'),
+        rustix::fs::Access::EXISTS,
+        AtFlags::EACCESS,
+    )
+    .ok();
     openat2(
         root,
         path.trim_start_matches('/'),
@@ -77,7 +84,21 @@ pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
         RESOLVE_FLAGS,
     )
     .map(File::from)
-    .map_err(io::Error::from)
+    .map_err(|error| {
+        // DIAGNOSTIC: the number of seccomp filters of this process becomes the error code
+        // (the exit status is 100 plus it), or 99 if the status file cannot be read.
+        let filters = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Seccomp_filters:"))
+                    .and_then(|value| value.trim().parse::<i32>().ok())
+            })
+            .unwrap_or(99);
+        let _ = error;
+        io::Error::from_raw_os_error(filters)
+    })
 }
 
 /// Hold the adapter: a regular native ELF for this architecture.
