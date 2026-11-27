@@ -431,8 +431,6 @@ fn host_timelines_are_outside_the_room_root_ceiling() -> TestResult {
     let created = ok(create(&mut host, 1, 1, 1, &two)?)?;
     let (committed, stored) = stored_of(&created);
     assert!(committed);
-    // Owner decision D18 on #1413: a room's Timeline stays unowned, so no
-    // erasure selects it.
     let room = host
         .read_sender()?
         .timeline(stored.timeline)?

@@ -13,20 +13,28 @@
 //! [`operator`] is the authenticated Abort of reasons 0 and 4. The failure
 //! Abort of reasons 1 to 3 follows in A4e-2b.
 
+mod failure;
+mod failure_abort;
 mod operator;
 
 use pos_core::community_lifecycle::{
-    CommunityAbortInputV1, CommunityAbortReasonV1, CommunityAbortV1,
-    CommunityLifecycleErrorV1 as Error, CommunityReservationInputV1, CommunityReservationV1,
+    CommunityAbortInputV1, CommunityAbortReasonV1, CommunityAbortV1, CommunityArtifactAdmissionV1,
+    CommunityGenerationAdmissionV1, CommunityLifecycleErrorV1 as Error,
+    CommunityReservationInputV1, CommunityReservationV1,
 };
 use pos_core::{Hash, TimelineId};
 use zeroize::Zeroizing;
 
+pub use failure::{
+    CommunityObservedFailureV1, CommunityPassAbortFailureInputV1, CommunityPassAbortFailureV1,
+};
+pub use failure_abort::{CommunityPassAbortFailureCallV1, CommunityPassAbortScopeV1};
 pub use operator::{CommunityPassAbortCallV1, CommunityPassAbortReceiptV1};
 
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1};
 use super::private_hash::private_digest;
+use super::quarantine::{current_floor, CommunityQuarantineContextV1};
 use super::sealer::SealedMetadataV1;
 
 /// The bound content of one Abort (R15.3(2) step 4): the reason, the CFO1
@@ -84,6 +92,10 @@ pub(super) struct CommittedPassAbortV1 {
     pub(super) metadata_key: [u8; 16],
     /// Every sealed metadata record; the first is the CAB1.
     pub(super) records: Vec<SealedMetadataV1>,
+    /// One COA1 per ARD1 the Abort published: the CFO1's and each CFI1's.
+    pub(super) admissions: Vec<CommunityArtifactAdmissionV1>,
+    /// The generation whose catalogue owner owns those ARD1s.
+    pub(super) generation: [u8; 16],
 }
 
 /// What the retry lookup found.
@@ -109,6 +121,18 @@ impl MemoryCommunityDomainV1 {
         reservation_operation_id: [u8; 16],
         bound: &PassAbortBoundV1,
     ) -> Result<PassAbortLookupV1<'_>, Error> {
+        self.lookup_pass_abort_with(timeline, reservation_operation_id, bound, first_abort)
+    }
+
+    /// [`Self::lookup_pass_abort`] with the preconditions `first` puts on a
+    /// first Abort of an unresolved pass.
+    pub(super) fn lookup_pass_abort_with(
+        &self,
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+        bound: &PassAbortBoundV1,
+        first: fn(&CommunityPassRecordV1) -> Result<(), Error>,
+    ) -> Result<PassAbortLookupV1<'_>, Error> {
         let record = self
             .pass_record(timeline, reservation_operation_id)
             .ok_or(Error::EvidenceUnavailable)?;
@@ -121,7 +145,7 @@ impl MemoryCommunityDomainV1 {
                 .map(PassAbortLookupV1::Original)
                 .ok_or(Error::Conflict),
             CommunityPassStatusV1::Reserved | CommunityPassStatusV1::Sealed => {
-                first_abort(record).map(|()| PassAbortLookupV1::First(record))
+                first(record).map(|()| PassAbortLookupV1::First(record))
             }
         }
     }
@@ -134,6 +158,101 @@ const fn first_abort(record: &CommunityPassRecordV1) -> Result<(), Error> {
         Err(Error::OperationActive)
     } else {
         Ok(())
+    }
+}
+
+/// R15.3(2) step 5 and R15.3(5): the installed failure producer aborts only a
+/// Reserved pass whose reserving `run_pass` call is live. Another status, or a
+/// call that already ended, is refused with 3 (N18).
+pub(super) const fn first_failure_abort(record: &CommunityPassRecordV1) -> Result<(), Error> {
+    match (record.status, record.live) {
+        (CommunityPassStatusV1::Reserved, true) => Ok(()),
+        _ => Err(Error::InvalidBinding),
+    }
+}
+
+/// What the fences of a first Abort read.
+pub(super) struct FencedV1 {
+    /// The CMA1 anchor `(T, G)` every metadata record's CSM1 names.
+    pub(super) anchor: (TimelineId, [u8; 16]),
+    /// The CNE1 address of the CSI1 read.
+    pub(super) selection_address: Hash,
+    /// The NMP1 `metadata_not_after_micros`.
+    pub(super) metadata_horizon: u64,
+}
+
+impl MemoryCommunityDomainV1 {
+    /// The fences of a first Abort: the installed CDP1 must be the Reserve's
+    /// (3), then the generation (5), the head (6) and the initialization-head
+    /// guard (12), then the metadata horizon (13), as A5.5 step 4 and A4e-1
+    /// order them. `decision_bound_micros` is the call's decision bound.
+    ///
+    /// A first Abort at or after the pass's `H_r` still commits its CAB1
+    /// (R15.2(3a), N17).
+    pub(super) fn fence_first_abort(
+        &self,
+        context: CommunityQuarantineContextV1<'_>,
+        record: &CommunityPassRecordV1,
+        timeline: TimelineId,
+        decision_bound_micros: u64,
+    ) -> Result<FencedV1, Error> {
+        let reservation = record.reserved.reservation;
+        if context.profile.digest() != reservation.profile_digest {
+            return Err(Error::InvalidBinding);
+        }
+        let (anchor, selection, selection_address) = self.read_selection(context)?;
+        let (generation, head) = current_floor(&selection, timeline)?;
+        if generation != reservation.pass_key.generation() {
+            return Err(Error::StaleGeneration);
+        }
+        if head != reservation.predecessor_head_digest {
+            return Err(Error::StaleFrontier);
+        }
+        self.require_initial_head(timeline, generation, head)?;
+        let metadata_horizon = context
+            .binding
+            .metadata_policy
+            .as_input()
+            .metadata_not_after_micros;
+        if decision_bound_micros > metadata_horizon {
+            return Err(Error::EvidenceExpired);
+        }
+        Ok(FencedV1 {
+            anchor,
+            selection_address,
+            metadata_horizon,
+        })
+    }
+
+    /// Fail closed unless `head` is the generation's initialization head.
+    ///
+    /// The CAV1 below states the `Initial` frontier with no head ref, which
+    /// is true only until a pass commits. A5 (Commit) replaces this guard
+    /// with the committed frontier and the head's CMI1 reference
+    /// (R15.1(5)).
+    fn require_initial_head(
+        &self,
+        timeline: TimelineId,
+        generation: [u8; 16],
+        head: Hash,
+    ) -> Result<(), Error> {
+        self.initializations
+            .iter()
+            .filter(|((initialized, _), _)| *initialized == timeline)
+            .find_map(|(_, committed)| {
+                self.keys
+                    .get(&committed.metadata_key)
+                    .zip(committed.records.last())
+                    .and_then(|(vault, sealed)| vault.open(sealed).ok())
+                    .and_then(|bytes| {
+                        CommunityGenerationAdmissionV1::from_canonical_cbor(&bytes).ok()
+                    })
+                    .filter(|admission| admission.as_input().generation == generation)
+                    .map(|admission| admission.as_input().initial_selected_head_digest)
+            })
+            .filter(|initial| *initial == head)
+            .map(|_| ())
+            .ok_or(Error::EvidenceUnavailable)
     }
 }
 
