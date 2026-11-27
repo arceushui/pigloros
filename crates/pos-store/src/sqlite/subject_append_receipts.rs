@@ -14,11 +14,12 @@
 //! until owner activation (#1438).
 //!
 //! Only a writable open creates and validates the table. A read-only open
-//! neither creates nor validates it, so every lookup on such a store answers
-//! [`SubjectAppendReceiptRefusalV1::Unreadable`]: it fails closed. The
-//! qualified owner constructor must validate the table shape itself, and
-//! ungating in #1438 must remove both `cfg` gates (this module's and the
-//! writable-open call in `sqlite.rs`) together.
+//! neither creates nor validates it: when the table is absent a lookup
+//! answers [`SubjectAppendReceiptRefusalV1::Unreadable`], but when the table
+//! exists a read-only open reads it unvalidated. The qualified owner
+//! constructor (#1438) must validate the table shape itself, and ungating in
+//! #1438 must remove both `cfg` gates (this module's and the writable-open
+//! call in `sqlite.rs`) together.
 
 use std::{
     fmt,
@@ -118,6 +119,9 @@ pub enum SubjectAppendReceiptRefusalV1 {
     /// The request cannot be bound: a nil subject, a bad field tag or an unrepresentable expiry.
     #[error("subject append receipt request is invalid")]
     InvalidRequest,
+    /// The connection is not inside the caller's transaction (autocommit mode).
+    #[error("subject append receipt access requires an open transaction")]
+    NotInTransaction,
     /// The receipt table could not be read or written.
     #[error("subject append receipts are unreadable")]
     Unreadable,
@@ -195,11 +199,30 @@ pub fn subject_append_request_digest(
 /// only. The digest comparison is constant-time.
 ///
 /// # Errors
-/// Returns [`SubjectAppendReceiptRefusalV1::Unreadable`] when the read fails
+/// Returns [`SubjectAppendReceiptRefusalV1::NotInTransaction`] when the
+/// connection is in autocommit mode,
+/// [`SubjectAppendReceiptRefusalV1::Unreadable`] when the read fails
 /// (for example, the table is missing) and
 /// [`SubjectAppendReceiptRefusalV1::Malformed`] when the stored digest or
 /// Event id of a matching row does not parse.
 pub fn lookup_subject_append_receipt(
+    conn: &Connection,
+    operation_key: &[u8; 32],
+    request_digest: &[u8; 32],
+) -> Result<SubjectAppendReceiptLookupV1, SubjectAppendReceiptRefusalV1> {
+    require_transaction(conn).and_then(|()| lookup_row(conn, operation_key, request_digest))
+}
+
+/// Refuse a connection that is in autocommit mode: A2 needs the caller's transaction.
+fn require_transaction(conn: &Connection) -> Result<(), SubjectAppendReceiptRefusalV1> {
+    if conn.is_autocommit() {
+        Err(SubjectAppendReceiptRefusalV1::NotInTransaction)
+    } else {
+        Ok(())
+    }
+}
+
+fn lookup_row(
     conn: &Connection,
     operation_key: &[u8; 32],
     request_digest: &[u8; 32],
@@ -250,10 +273,20 @@ fn classify(
 /// replaced.
 ///
 /// # Errors
-/// Returns [`SubjectAppendReceiptRefusalV1::InvalidRequest`] for a nil
+/// Returns [`SubjectAppendReceiptRefusalV1::NotInTransaction`] when the
+/// connection is in autocommit mode,
+/// [`SubjectAppendReceiptRefusalV1::InvalidRequest`] for a nil
 /// subject or an expiry that overflows `u64` or `i64`, and
 /// [`SubjectAppendReceiptRefusalV1::NotStored`] when the insert fails.
 pub fn insert_subject_append_receipt(
+    conn: &Connection,
+    receipt: &SubjectAppendReceiptV1,
+    admitted_at: WallTime,
+) -> Result<(), SubjectAppendReceiptRefusalV1> {
+    require_transaction(conn).and_then(|()| insert_row(conn, receipt, admitted_at))
+}
+
+fn insert_row(
     conn: &Connection,
     receipt: &SubjectAppendReceiptV1,
     admitted_at: WallTime,
@@ -385,15 +418,27 @@ impl SubjectAppendMacKeyV1 {
     ///
     /// The `0x00` after the variable-length `field_tag` is an addition to the
     /// ADR-137 A2 text (`domain || field_tag || plaintext`), which is
-    /// ambiguous between tag and plaintext. It needs an ADR erratum.
-    #[must_use]
-    pub fn request_mac(&self, field_tag: &str, plaintext: &[u8]) -> [u8; 32] {
+    /// ambiguous between tag and plaintext. It needs an ADR erratum: the
+    /// preimage is `domain || field_tag || 0x00 || plaintext` with a
+    /// NUL-free `field_tag`, which makes the split unambiguous.
+    ///
+    /// # Errors
+    /// Returns [`SubjectAppendReceiptRefusalV1::InvalidRequest`] for a
+    /// `field_tag` containing a NUL byte.
+    pub fn request_mac(
+        &self,
+        field_tag: &str,
+        plaintext: &[u8],
+    ) -> Result<[u8; 32], SubjectAppendReceiptRefusalV1> {
+        if field_tag.as_bytes().contains(&0) {
+            return Err(SubjectAppendReceiptRefusalV1::InvalidRequest);
+        }
         let mut hasher = blake3::Hasher::new_keyed(&self.0);
         hasher.update(REQUEST_MAC_DOMAIN);
         hasher.update(field_tag.as_bytes());
         hasher.update(&[0]);
         hasher.update(plaintext);
-        *hasher.finalize().as_bytes()
+        Ok(*hasher.finalize().as_bytes())
     }
 }
 

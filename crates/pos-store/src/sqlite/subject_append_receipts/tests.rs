@@ -36,6 +36,12 @@ fn open_store(directory: &Path) -> Result<SqliteStore, Box<dyn std::error::Error
     Ok(SqliteStore::open(path.to_str().ok_or("non-UTF-8 path")?)?)
 }
 
+fn open_store_in_transaction(directory: &Path) -> Result<SqliteStore, Box<dyn std::error::Error>> {
+    let store = open_store(directory)?;
+    store.conn.execute_batch("BEGIN IMMEDIATE")?;
+    Ok(store)
+}
+
 fn receipt(operation_key: [u8; 32], request_digest: [u8; 32]) -> SubjectAppendReceiptV1 {
     SubjectAppendReceiptV1 {
         operation_key,
@@ -104,6 +110,7 @@ fn a_read_only_open_creates_nothing_and_a_missing_table_is_unreadable() -> TestR
     Connection::open(path)?.execute_batch("DROP TABLE subject_data_append_receipts")?;
 
     let store = SqliteStore::open_read_only(path)?;
+    store.conn.execute_batch("BEGIN")?;
     assert!(!table_exists(&store.conn)?);
     assert_eq!(
         lookup_subject_append_receipt(&store.conn, &KEY_A, &DIGEST_A),
@@ -240,7 +247,7 @@ fn the_table_accepts_one_good_row_and_refuses_each_malformed_column() -> TestRes
 #[test]
 fn a_lookup_is_absent_duplicate_or_a_conflict() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let store = open_store(directory.path())?;
+    let store = open_store_in_transaction(directory.path())?;
     assert_eq!(
         lookup_subject_append_receipt(&store.conn, &KEY_A, &DIGEST_A),
         Ok(SubjectAppendReceiptLookupV1::Absent)
@@ -266,7 +273,7 @@ fn a_lookup_is_absent_duplicate_or_a_conflict() -> TestResult {
 #[test]
 fn a_matching_row_that_does_not_parse_is_malformed() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let store = open_store(directory.path())?;
+    let store = open_store_in_transaction(directory.path())?;
     store
         .conn
         .execute_batch("PRAGMA ignore_check_constraints = ON")?;
@@ -314,7 +321,7 @@ fn a_matching_row_that_does_not_parse_is_malformed() -> TestResult {
 #[test]
 fn an_insert_stores_the_owner_event_and_retention_expiry() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let store = open_store(directory.path())?;
+    let store = open_store_in_transaction(directory.path())?;
     let stored = receipt(KEY_A, DIGEST_A);
     insert_subject_append_receipt(&store.conn, &stored, WallTime::from_micros(1_000))?;
     let (owner, digest, event, expires): (String, Vec<u8>, String, i64) = store.conn.query_row(
@@ -336,7 +343,7 @@ fn an_insert_stores_the_owner_event_and_retention_expiry() -> TestResult {
 #[test]
 fn an_insert_never_replaces_a_receipt_and_refuses_unbindable_requests() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let store = open_store(directory.path())?;
+    let store = open_store_in_transaction(directory.path())?;
     let first = receipt(KEY_A, DIGEST_A);
     insert_subject_append_receipt(&store.conn, &first, WallTime::from_micros(1))?;
     assert_eq!(
@@ -380,9 +387,39 @@ fn an_insert_never_replaces_a_receipt_and_refuses_unbindable_requests() -> TestR
 }
 
 #[test]
-fn a_purge_removes_only_receipts_whose_retention_has_ended() -> TestResult {
+fn a_lookup_and_an_insert_refuse_a_connection_in_autocommit_mode() -> TestResult {
     let directory = tempfile::tempdir()?;
     let store = open_store(directory.path())?;
+    assert!(store.conn.is_autocommit());
+    assert_eq!(
+        lookup_subject_append_receipt(&store.conn, &KEY_A, &DIGEST_A),
+        Err(SubjectAppendReceiptRefusalV1::NotInTransaction)
+    );
+    assert_eq!(
+        insert_subject_append_receipt(
+            &store.conn,
+            &receipt(KEY_A, DIGEST_A),
+            WallTime::from_micros(1)
+        ),
+        Err(SubjectAppendReceiptRefusalV1::NotInTransaction)
+    );
+    assert_eq!(
+        row_count(&store.conn)?,
+        0,
+        "the refused insert stored nothing"
+    );
+    store.conn.execute_batch("BEGIN IMMEDIATE")?;
+    assert_eq!(
+        lookup_subject_append_receipt(&store.conn, &KEY_A, &DIGEST_A),
+        Ok(SubjectAppendReceiptLookupV1::Absent)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_purge_removes_only_receipts_whose_retention_has_ended() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let store = open_store_in_transaction(directory.path())?;
     let horizon = APPEND_IDENTITY_RETENTION_MICROS;
     for (key, admitted) in [(1_u8, 10_u64), (2, 11), (3, 12)] {
         insert_subject_append_receipt(
@@ -579,7 +616,7 @@ fn assert_regenerated(directory: &Path) -> TestResult {
     let metadata = fs::metadata(&path)?;
     assert_eq!(metadata.mode(), 0o100_600);
     assert_eq!(metadata.nlink(), 1);
-    assert_eq!(key.request_mac("f", b"p"), blake3_mac([7; 32], "f", b"p"));
+    assert_eq!(key.request_mac("f", b"p")?, blake3_mac([7; 32], "f", b"p"));
     Ok(())
 }
 
@@ -597,7 +634,7 @@ fn a_missing_key_is_created_once_and_then_reloaded() -> TestResult {
     assert_regenerated(directory.path())?;
     let reloaded = load_with(directory.path(), euid(), failing_entropy)?;
     assert_eq!(
-        reloaded.request_mac("f", b"p"),
+        reloaded.request_mac("f", b"p")?,
         blake3_mac([7; 32], "f", b"p"),
         "a valid key is loaded without drawing entropy"
     );
@@ -612,7 +649,10 @@ fn the_public_loader_uses_system_entropy_and_the_current_user() -> TestResult {
     assert_eq!(stored.len(), 32);
     assert_ne!(stored, [0; 32]);
     let second = SubjectAppendMacKeyV1::load_or_create(directory.path())?;
-    assert_eq!(first.request_mac("f", b"p"), second.request_mac("f", b"p"));
+    assert_eq!(
+        first.request_mac("f", b"p")?,
+        second.request_mac("f", b"p")?
+    );
     Ok(())
 }
 
@@ -638,7 +678,7 @@ fn a_key_owned_by_another_user_is_replaced() -> TestResult {
     let directory = tempfile::tempdir()?;
     write_key(&key_path(directory.path()), &[1; 32], 0o600)?;
     let key = load_with(directory.path(), euid().wrapping_add(1), fixed_entropy)?;
-    assert_eq!(key.request_mac("f", b"p"), blake3_mac([7; 32], "f", b"p"));
+    assert_eq!(key.request_mac("f", b"p")?, blake3_mac([7; 32], "f", b"p"));
     Ok(())
 }
 
@@ -702,20 +742,34 @@ fn a_failed_entropy_source_creates_no_key_file() -> TestResult {
 fn the_request_mac_is_keyed_and_binds_the_field_tag_and_plaintext() -> TestResult {
     let directory = tempfile::tempdir()?;
     let key = load_with(directory.path(), euid(), fixed_entropy)?;
-    let mac = key.request_mac("weights", b"plaintext");
+    let mac = key.request_mac("weights", b"plaintext")?;
     assert_eq!(mac, blake3_mac([7; 32], "weights", b"plaintext"));
-    assert_ne!(mac, key.request_mac("weight", b"plaintext"));
-    assert_ne!(mac, key.request_mac("weights", b"plaintex"));
+    assert_ne!(mac, key.request_mac("weight", b"plaintext")?);
+    assert_ne!(mac, key.request_mac("weights", b"plaintex")?);
     assert_ne!(
-        key.request_mac("a", b"bc"),
-        key.request_mac("ab", b"c"),
+        key.request_mac("a", b"bc")?,
+        key.request_mac("ab", b"c")?,
         "the field tag and plaintext are separated"
     );
     let other = tempfile::tempdir()?;
     write_key(&key_path(other.path()), &[8; 32], 0o600)?;
     let other_key = load_with(other.path(), euid(), failing_entropy)?;
-    assert_ne!(mac, other_key.request_mac("weights", b"plaintext"));
+    assert_ne!(mac, other_key.request_mac("weights", b"plaintext")?);
     assert_eq!(format!("{key:?}"), "SubjectAppendMacKeyV1(..)");
+    Ok(())
+}
+
+#[test]
+fn a_field_tag_containing_nul_is_refused_so_the_split_is_unambiguous() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let key = load_with(directory.path(), euid(), fixed_entropy)?;
+    let refused = Err(SubjectAppendReceiptRefusalV1::InvalidRequest);
+    assert_eq!(key.request_mac("a\0b", b"c"), refused);
+    assert_eq!(key.request_mac("\0", b""), refused);
+    assert_eq!(
+        key.request_mac("a", b"b\0c")?,
+        blake3_mac([7; 32], "a", b"b\0c")
+    );
     Ok(())
 }
 
@@ -725,6 +779,10 @@ fn refusals_display_fixed_text() {
         (
             SubjectAppendReceiptRefusalV1::InvalidRequest,
             "subject append receipt request is invalid",
+        ),
+        (
+            SubjectAppendReceiptRefusalV1::NotInTransaction,
+            "subject append receipt access requires an open transaction",
         ),
         (
             SubjectAppendReceiptRefusalV1::Unreadable,
