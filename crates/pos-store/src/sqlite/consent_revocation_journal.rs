@@ -113,7 +113,7 @@ impl SqliteStore {
             })
     }
 
-    /// Refuse an object of that name, in any letter case, that has another type or belongs to another table.
+    /// Refuse an object of that name, in any letter case, that has another type or belongs to another table (compared in any letter case too).
     ///
     /// `SQLite` object names are case-insensitive, so the lookup is too.
     /// This runs before the `CREATE ... IF NOT EXISTS` statements, so the
@@ -128,7 +128,9 @@ impl SqliteStore {
             .optional()
             .map_err(Self::into_storage_error)
             .and_then(|found| match found {
-                Some(found) if found != (object.kind.to_owned(), object.table.to_owned()) => {
+                Some((kind, table))
+                    if kind != object.kind || !table.eq_ignore_ascii_case(object.table) =>
+                {
                     Err(incompatible(object))
                 }
                 _ => Ok(()),

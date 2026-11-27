@@ -97,7 +97,7 @@ fn count(conn: &Connection) -> rusqlite::Result<i64> {
 
 fn stored_sql(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row(
-        "SELECT sql FROM sqlite_master WHERE name = ?1",
+        "SELECT sql FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
         params![name],
         |row| row.get(0),
     )
@@ -105,7 +105,7 @@ fn stored_sql(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>>
 
 fn object_count(conn: &Connection, name: &str) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE name = ?1",
+        "SELECT count(*) FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
         params![name],
         |row| row.get(0),
     )
@@ -584,5 +584,12 @@ fn a_correct_table_stored_under_another_letter_case_is_accepted() -> TestResult 
     assert!(stored_sql(&store.conn, TABLE)?
         .ok_or("no table sql")?
         .contains("Consent_Revocation_Journal"));
+    drop(store);
+    for _ in 0..2 {
+        let reopened = SqliteStore::open(&path)?;
+        assert_eq!(object_count(&reopened.conn, TABLE)?, 1);
+        assert_eq!(object_count(&reopened.conn, PENDING_INDEX)?, 1);
+        assert_eq!(object_count(&reopened.conn, EVENTS_INDEX)?, 1);
+    }
     Ok(())
 }
