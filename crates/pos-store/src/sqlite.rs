@@ -182,6 +182,8 @@ pub mod interval_test_support;
 mod local_cut_owner;
 mod local_erasure;
 mod local_replica_residual;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub(crate) mod owner_store_binding;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
@@ -192,6 +194,8 @@ mod plugin_trust_registry_rows;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry_schema;
 mod registry_durability;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod subject_key_deletion;
 
 use fork_code_two_read::{
     sqlite_retained_key_evidence, sqlite_validated_admission, sqlite_validated_graph,
@@ -2255,10 +2259,30 @@ impl SqliteStore {
         Self::require_utf8_encoding(&conn)?;
         let erasure_inventory_data_version =
             sqlite_data_version(&conn).map_err(|error| CoreError::Storage(error.to_string()))?;
-        let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
-        let erasure_gate_bound = false;
 
-        let mut store = Self {
+        let mut store = Self::with_connection(
+            conn,
+            writer_reservation_connection,
+            hasher,
+            erasure_inventory_data_version,
+        );
+        store.finish_open(
+            initialize_schema,
+            flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY),
+        )?;
+        Ok(store)
+    }
+
+    /// Wrap an opened connection in a store with no schema work done yet.
+    /// Every constructor, including the qualified owner-store binding,
+    /// builds its store here.
+    fn with_connection(
+        conn: Connection,
+        writer_reservation_connection: Option<Connection>,
+        hasher: Box<dyn Hasher>,
+        erasure_inventory_data_version: i64,
+    ) -> Self {
+        Self {
             conn,
             writer_reservation_connection,
             hasher,
@@ -2266,8 +2290,8 @@ impl SqliteStore {
             consent_permits: crate::ConsentPermitBinding::default(),
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
-            erasure_gate,
-            erasure_gate_bound,
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
+            erasure_gate_bound: false,
             erasure_inventory_data_version,
             erasure_inventory_generation: None,
             erasure_topology_requires_permit: false,
@@ -2284,12 +2308,7 @@ impl SqliteStore {
             #[cfg(test)]
             destruction_transaction_hook: None,
             mode_binding_epoch: None,
-        };
-        store.finish_open(
-            initialize_schema,
-            flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY),
-        )?;
-        Ok(store)
+        }
     }
 
     fn open_writer_reservation_connection(
@@ -2347,6 +2366,8 @@ impl SqliteStore {
                     // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_key_deletion_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
