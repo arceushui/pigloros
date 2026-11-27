@@ -265,8 +265,7 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
 
     /// The draft's ELB1 and ELLR1 are retained with the installed TPS1 and
     /// the bundle's ELB1S, so committed evidence keeps the trust it was
-    /// admitted under (ADR-136 Q13; ELTA1 waits for #448's operator-key
-    /// history, Q17).
+    /// admitted under. ELTA1 is not retained with this freeze.
     fn prepare_freeze(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,

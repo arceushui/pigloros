@@ -101,8 +101,7 @@ pub enum ForkAttributionCodecErrorV1 {
 
 /// The only currently usable authority origin.
 ///
-/// The reserved wire code 2 is rejected until #447 installs its authenticated
-/// atomic import boundary; it has no public value variant here.
+/// The reserved wire code 2 is rejected and has no public value variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForkAttributionOriginV1 {
     /// Locally committed authority bytes.

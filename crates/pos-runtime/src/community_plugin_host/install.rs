@@ -1,6 +1,5 @@
-//! The community release install and rollback entries and their host-owned activation Event
-//! (ADR-061 revision 7 decision 9, ADR-103 revision 7 decision 4.3 item 3). Linux only, like the
-//! signed installer and the rollback entry they wrap.
+//! The community release install and rollback entries and their host-owned activation Event.
+//! They wrap the signed installer and production rollback entry.
 //!
 //! Each wrapper reads and projects the release closure once, builds the activation draft from
 //! that projection, and hands the signed installer (or the production rollback entry) a one-shot
@@ -8,8 +7,7 @@
 //! signature of and admits (or re-activates) exactly the bytes the payload describes. A rollback
 //! commits the same Event type with the payload of its target; the registry's ledger row kind
 //! tells it apart from an admission. The wrappers never call the registry's `admit` or
-//! `rollback` themselves. No operator command, HTTP route or remote trigger reaches them yet:
-//! ADR-103 revision 7 adds none (Q9, a non-goal of that revision).
+//! `rollback` themselves. No operator command, HTTP route or remote trigger calls these wrappers.
 
 use std::cell::RefCell;
 
@@ -151,7 +149,7 @@ pub fn install_community_release_v1(
 ///
 /// The activation draft is the install wrapper's own: the type
 /// `pigloros.plugin.release-activated` and the payload `[scope, plugin_id, pmf1_digest,
-/// release_digest]` of the **target** (ADR-103 revision 7, Q5). The bundle the source returns
+/// release_digest]` of the **target**. The bundle the source returns
 /// must be the one at `address`, and the closure is read once, exactly as for
 /// [`install_community_release_v1()`]; the production rollback entry receives that same bundle
 /// through a one-shot source. Repeating the same rollback with the same evidence and target is

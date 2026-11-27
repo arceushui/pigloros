@@ -295,8 +295,8 @@ impl<'a, S> Reached<'a, S> {
     ///
     /// A failure after `ReleaseV1` records no ending, and possibly no
     /// terminal snapshot. A progress-2 TME1 requires both, so its encoder
-    /// refuses the record and no response is emitted: a deliberate provider
-    /// fault that fails closed (owner decision 2026-11-19, Q2).
+    /// refuses the record and no response is emitted: a provider fault that
+    /// fails closed.
     fn failed(
         error: &'a ExecuteError,
         unit: UnitState,
@@ -464,10 +464,10 @@ fn snapshots(
 }
 
 /// TME1 `work-after`: `/work` after exit, read through the handle the
-/// frozen KOE1 observation opened (R9 §4.6.3). After a failed KOE1 (status 1
+/// frozen KOE1 observation opened. After a failed KOE1 (status 1
 /// or 2) no handle exists and it is null, which is valid; after a status-0
 /// KOE1 one that could not be read is null too, which is missing evidence,
-/// code 2 (owner decision 2026-11-19, R9 amendment review).
+/// code 2.
 fn work_after(evidence: Option<&ResourceEvidence>) -> Option<WorkStatfsFacts> {
     evidence
         .and_then(ResourceEvidence::terminal)
