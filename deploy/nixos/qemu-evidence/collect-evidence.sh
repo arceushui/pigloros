@@ -243,7 +243,7 @@ execute_case() { # DIR EXPORT_DIRECTORY
   # installed provider executables as the guest sees them (numeric owner, group and mode), and
   # whatever the manager still holds of the attempt units (a failed unit stays loaded).
   {
-    ls -ln /var/lib/pigloros/sandbox/providers
+    ls -ln /var/lib/pigloros/sandbox/providers || true
     systemctl show 'pigloros-attempt-*.service' --all \
       --property=Id,User,DynamicUser,ExecMainStatus,ExecMainCode,Result,ActiveState || true
   } >"$1/executable-diagnostics" 2>&1
