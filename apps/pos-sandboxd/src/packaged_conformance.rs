@@ -4,7 +4,9 @@
 //! `pos-sandboxd-conformance` binary. [`run_mode`] runs the stager (`stage`)
 //! when `stage` is the first argument: it stages the installation for the
 //! composed provider runtime, holds it until its control input closes and
-//! removes it. Otherwise one run is one case ([`run`]):
+//! removes it. It runs the selector's side of one provider exchange
+//! (`execute`) when that is the first argument. Otherwise one run is one
+//! case ([`run`]):
 //!
 //! 1. `ConformanceCase::stage` stages the signed test installation around
 //!    one caller-built SIM1 DDI, its signer certificate and the exact bytes
@@ -23,6 +25,7 @@
 //! kernel state and passes everything to the host checker, which owns every
 //! judgement. Nothing here creates a unit, a process or launch authority.
 
+mod execute;
 mod stage;
 
 use std::ffi::OsString;
@@ -45,6 +48,9 @@ use crate::{
 
 /// The first argument that selects the stager mode (see `stage`).
 const STAGE_MODE: &str = "stage";
+
+/// The first argument that selects the execute mode (see `execute`).
+const EXECUTE_MODE: &str = "execute";
 
 /// The fixed nonzero `AttemptId` of every evidence case.
 const ATTEMPT_ID: [u8; 16] = *b"pigloros-444-evd";
@@ -73,12 +79,18 @@ pub enum ConformanceError {
     Usage,
     /// The stager's arguments are not `stage IMAGE CERTIFICATE_DER
     /// KEY_DESCRIPTION ADAPTER SPI1 KEY_FILE_NAME PROVIDER_BINARY
-    /// [ADAPTER_ARGUMENT...]`.
+    /// EXPORT_DIRECTORY [ADAPTER_ARGUMENT...]`.
     #[error(
         "usage: pos-sandboxd-conformance stage IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER \
-         SPI1 KEY_FILE_NAME PROVIDER_BINARY [ADAPTER_ARGUMENT...]"
+         SPI1 KEY_FILE_NAME PROVIDER_BINARY EXPORT_DIRECTORY [ADAPTER_ARGUMENT...]"
     )]
     StageUsage,
+    /// The execute arguments are not `execute EXPORT_DIRECTORY MAIN_PID`.
+    #[error("usage: pos-sandboxd-conformance execute EXPORT_DIRECTORY MAIN_PID")]
+    ExecuteUsage,
+    /// The selector's side of the exchange could not be set up.
+    #[error("the provider exchange could not be set up: {0}")]
+    Execute(String),
     /// An input file, the control input or the report failed.
     #[error("conformance I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -282,14 +294,16 @@ where
     report_line(report, &removal_line(&directory.remove_unmounted()))
 }
 
-/// Run the stager when `arguments` start with `stage`, and one case (see
-/// [`run`]) otherwise.
+/// Run the stager when `arguments` start with `stage`, the execute mode
+/// when they start with `execute`, and one case (see [`run`]) otherwise.
 ///
 /// The stager (the `stage` module) stages the installation for a composed
-/// provider runtime and holds it until `control` ends.
+/// provider runtime and holds it until `control` ends. The execute mode (the
+/// `execute` module) is the selector's side of one exchange with that
+/// runtime.
 ///
 /// # Errors
-/// As [`run`], or the stager's.
+/// As [`run`], or the selected mode's.
 pub async fn run_mode<Describe, Detach>(
     arguments: Vec<OsString>,
     control: impl Read + Send,
@@ -305,10 +319,42 @@ where
         ) -> Release<'directory>
         + Send,
 {
-    if arguments.first().is_some_and(|mode| mode == STAGE_MODE) {
-        return stage::run_stage(&arguments[1..], control, report);
+    if let Some(mode) = Mode::select(&arguments) {
+        return mode.run(&arguments[1..], control, report);
     }
     run(arguments, control, report, describe, release).await
+}
+
+/// A mode that [`run_mode`] runs instead of a case, chosen by the first
+/// argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Mode {
+    Stage,
+    Execute,
+}
+
+impl Mode {
+    /// The mode `arguments` start with, if any.
+    fn select(arguments: &[OsString]) -> Option<Self> {
+        match arguments.first()?.to_str()? {
+            STAGE_MODE => Some(Self::Stage),
+            EXECUTE_MODE => Some(Self::Execute),
+            _ => None,
+        }
+    }
+
+    /// Run the mode with the arguments after its name.
+    fn run(
+        self,
+        arguments: &[OsString],
+        control: impl Read,
+        report: &mut impl Write,
+    ) -> Result<(), ConformanceError> {
+        match self {
+            Self::Stage => stage::run_stage(arguments, control, report),
+            Self::Execute => execute::run_execute(arguments, report),
+        }
+    }
 }
 
 /// Report one activation outcome, hold a mounted root until `control`

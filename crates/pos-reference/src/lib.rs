@@ -109,6 +109,8 @@ pub mod selector_transport_test_fixture {
         pub(crate) output_chunk: Vec<u8>,
         pub(crate) spy1: Vec<u8>,
         pub(crate) spe1: Vec<u8>,
+        /// The same refusal with SPE1 code 11, `SandboxUnavailable`.
+        pub(crate) spe1_starting: Vec<u8>,
         pub(crate) describe_request_id: [u8; 16],
         pub(crate) describe_nonce: [u8; 16],
         pub(crate) sdy1: Vec<u8>,
@@ -332,21 +334,24 @@ pub mod selector_transport_test_fixture {
             &authenticated_grant,
             &denied_receipt,
         )?;
-        let spe1 = sign_record(
-            "SPE1",
-            Value::Array(vec![
-                Value::Text("SPE1".to_owned()),
-                integer(1),
-                integer(1),
-                Value::Bytes(request.request.request_id.to_vec()),
-                Value::Bytes(request.request_digest.to_vec()),
-                Value::Bytes(request.attempt_id.to_vec()),
-                integer(17),
-                Value::Null,
-                Value::Text("runtime".to_owned()),
-            ]),
-            &fixture.authority.runtime,
-        )?;
+        let refusal = |code: u64| {
+            sign_record(
+                "SPE1",
+                Value::Array(vec![
+                    Value::Text("SPE1".to_owned()),
+                    integer(1),
+                    integer(1),
+                    Value::Bytes(request.request.request_id.to_vec()),
+                    Value::Bytes(request.request_digest.to_vec()),
+                    Value::Bytes(request.attempt_id.to_vec()),
+                    integer(code),
+                    Value::Null,
+                    Value::Text("runtime".to_owned()),
+                ]),
+                &fixture.authority.runtime,
+            )
+        };
+        let (spe1, spe1_starting) = (refusal(17)?, refusal(11)?);
         let describe_request_id = rand::random();
         let describe_nonce = rand::random();
         let sdy1 = describe_response(&fixture, &provider, describe_request_id)?;
@@ -377,6 +382,7 @@ pub mod selector_transport_test_fixture {
             output_chunk,
             spy1: terminal_result_bytes,
             spe1,
+            spe1_starting,
             describe_request_id,
             describe_nonce,
             sdy1,
