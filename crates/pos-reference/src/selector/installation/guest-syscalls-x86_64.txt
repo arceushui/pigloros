@@ -65,6 +65,7 @@ nanosleep
 newfstatat
 open
 openat
+pidfd_open
 pipe
 pipe2
 poll
