@@ -22,8 +22,8 @@ use crate::sandbox_provider_protocol::{
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
-    admitted_state, admitted_state_with_arguments, admitted_state_with_provider_binary,
-    ddi_fixture, materialize_state, provider_executable_path, ImageSigning, RUNTIME_KEY_SEED,
+    admitted_state, admitted_state_with_arguments, admitted_state_with_limits, ddi_fixture,
+    materialize_state, provider_executable_path, ImageSigning, DEFAULT_LIMITS, RUNTIME_KEY_SEED,
 };
 use crate::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
@@ -82,6 +82,81 @@ pub struct StagedProvider<'a> {
     pub key_file_name: &'a str,
 }
 
+/// The operating limits of a staged execution fixture.
+///
+/// `broker` is the BHC1 hard caps and `launch` the LPS1 limits, each by ELM1
+/// limit ID (0 `memory.max` bytes, 2 `pids.max`, 4 watchdog ms, 8 output
+/// bytes, 9 `/work` bytes). `watchdog_ms` and `budget` are the selected
+/// case's watchdog and deterministic budget, in `ResourceUsage` order (memory,
+/// CPU fuel, host calls, events, output, storage, steps, simulation time). An
+/// attempt's effective limit is the least of the three (ADR-069 section 8).
+///
+/// The case's `watchdog_ms` is also the selector client's deadline for the
+/// whole exchange, mount included (`GuestProviderClient::commitment`), while
+/// the provider's own watchdog (limit 4) runs from the unit's activation. So a
+/// short effective watchdog is set in the two limit 4 caps, and `watchdog_ms`
+/// stays long enough for a cold image mount.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StagedLimits {
+    /// The BHC1 hard caps.
+    pub broker: [u64; 17],
+    /// The LPS1 limits.
+    pub launch: [u64; 17],
+    /// The selected case's operational watchdog in milliseconds.
+    pub watchdog_ms: u64,
+    /// The selected case's deterministic budget.
+    pub budget: [u64; 8],
+}
+
+impl StagedLimits {
+    /// The limits of the default fixture: every unit stages exactly as
+    /// [`StagedInstallation::stage_provider_execution`] always has.
+    pub const DEFAULT: Self = Self {
+        broker: DEFAULT_LIMITS,
+        launch: DEFAULT_LIMITS,
+        watchdog_ms: 1_000,
+        budget: [100; 8],
+    };
+
+    /// The selector client's exchange deadline of a probing case.
+    ///
+    /// It covers a cold image mount (about 70 s under TCG), the attempt's own
+    /// watchdog and its termination, in milliseconds.
+    pub const EXCHANGE_MS: u64 = 300_000;
+
+    /// The default limits with the five probed limits set to their ceilings.
+    ///
+    /// Each is set in the broker caps, the launch policy and the case, so
+    /// that it is the attempt's effective limit. `attempt_watchdog_ms` is the
+    /// effective attempt watchdog (limit 4); the case's own `watchdog_ms`, the
+    /// client's exchange deadline, is [`Self::EXCHANGE_MS`].
+    #[must_use]
+    pub const fn probing(
+        memory_bytes: u64,
+        tasks: u64,
+        attempt_watchdog_ms: u64,
+        output_bytes: u64,
+        work_bytes: u64,
+    ) -> Self {
+        let mut limits = DEFAULT_LIMITS;
+        limits[0] = memory_bytes;
+        limits[2] = tasks;
+        limits[4] = attempt_watchdog_ms;
+        limits[8] = output_bytes;
+        limits[9] = work_bytes;
+        let mut budget = Self::DEFAULT.budget;
+        budget[0] = memory_bytes;
+        budget[4] = output_bytes;
+        budget[5] = work_bytes;
+        Self {
+            broker: limits,
+            launch: limits,
+            watchdog_ms: Self::EXCHANGE_MS,
+            budget,
+        }
+    }
+}
+
 /// The staged fixed installation, removed again when dropped.
 #[derive(Debug)]
 pub struct StagedInstallation {
@@ -101,7 +176,7 @@ impl StagedInstallation {
     /// empty or over-long SPI1 (its file rules allow 1 to 4096 bytes) and a
     /// key file name that is not one plain file name.
     pub fn stage_provider(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
-        let state = provider_state(provider)?;
+        let state = provider_state(provider, &StagedLimits::DEFAULT)?;
         let mut staged = Self::create_parent()?;
         let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
         staged.request = request_for(&admitted)?;
@@ -123,9 +198,25 @@ impl StagedInstallation {
     /// Everything [`Self::stage_provider`] refuses, and invalid fixture
     /// material.
     pub fn stage_provider_execution(provider: &StagedProvider<'_>) -> Result<Self, Box<dyn Error>> {
-        let state = provider_state(provider)?;
+        Self::stage_provider_execution_limited(provider, &StagedLimits::DEFAULT)
+    }
+
+    /// [`Self::stage_provider_execution`] with the broker hard caps, launch
+    /// policy, watchdog and deterministic budget of `limits`.
+    ///
+    /// # Errors
+    /// Everything [`Self::stage_provider_execution`] refuses.
+    pub fn stage_provider_execution_limited(
+        provider: &StagedProvider<'_>,
+        limits: &StagedLimits,
+    ) -> Result<Self, Box<dyn Error>> {
+        let state = provider_state(provider, limits)?;
         let mut staged = Self::create_parent()?;
-        let admitted = staged.stage_execution_state(state)?;
+        let corpus = crate::selector_test_support::air_gapped_corpus_with_limits(
+            limits.watchdog_ms,
+            limits.budget,
+        )?;
+        let admitted = staged.stage_execution_state(state, &corpus)?;
         staged.install_provider_files(&admitted, provider)?;
         Ok(staged)
     }
@@ -208,7 +299,10 @@ impl StagedInstallation {
     /// Refuses an existing fixed installation and invalid fixture material.
     pub fn stage_execution() -> Result<Self, Box<dyn Error>> {
         let mut staged = Self::create_parent()?;
-        staged.stage_execution_state(admitted_state()?)?;
+        staged.stage_execution_state(
+            admitted_state()?,
+            &crate::selector_test_support::air_gapped_corpus()?,
+        )?;
         Ok(staged)
     }
 
@@ -217,10 +311,10 @@ impl StagedInstallation {
     fn stage_execution_state(
         &mut self,
         state: InstalledSelectorState,
+        corpus: &crate::selector_test_support::Corpus,
     ) -> Result<AdmittedSelectorProvider, Box<dyn Error>> {
-        let corpus = crate::selector_test_support::air_gapped_corpus()?;
         let (evaluation, state) =
-            crate::selector::installation::fixture::execution_state(state, &corpus)?;
+            crate::selector::installation::fixture::execution_state(state, corpus)?;
         let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
         let resolved = admitted
             .bootstrap()
@@ -469,7 +563,10 @@ impl Drop for StagedInstallation {
 
 /// Validate `provider`'s files and build the installation state around its
 /// image, adapter and provider binary.
-fn provider_state(provider: &StagedProvider<'_>) -> Result<InstalledSelectorState, Box<dyn Error>> {
+fn provider_state(
+    provider: &StagedProvider<'_>,
+    limits: &StagedLimits,
+) -> Result<InstalledSelectorState, Box<dyn Error>> {
     let name = provider.key_file_name;
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
         return Err("the key file name is not one plain file name".into());
@@ -479,7 +576,7 @@ fn provider_state(provider: &StagedProvider<'_>) -> Result<InstalledSelectorStat
     }
     let binary = fs::read(provider.binary)?;
     let (partitions, signing, salt) = described(&provider.image)?;
-    admitted_state_with_provider_binary(
+    admitted_state_with_limits(
         provider.image.image,
         provider.image.executable,
         &partitions,
@@ -487,6 +584,7 @@ fn provider_state(provider: &StagedProvider<'_>) -> Result<InstalledSelectorStat
         salt,
         provider.image.arguments,
         &binary,
+        limits,
     )
 }
 
