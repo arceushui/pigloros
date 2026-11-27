@@ -18,7 +18,8 @@
 //! - [`SqliteStore::subject_key_lifecycle`] and
 //!   [`SqliteStore::registered_subject_root_material_digest`], the P1 reads
 //!   that P5 and ADR-097 section 5 unlock use;
-//! - [`SqliteStore::pending_subject_key_destructions`], the D4 enumeration.
+//! - [`SqliteStore::pending_subject_key_destructions`], the D4 enumeration of
+//!   subject keys and the owner's own signing identity.
 //!
 //! The wrap and binding files, the SNL1 row, the E16 and subject-owner locks
 //! and the order of the readiness steps (R2: P5 before D4) belong to the owner
@@ -127,6 +128,21 @@ pub struct SubjectKeyStagingRecordV1 {
     pub store_file_id: Vec<u8>,
 }
 
+/// The registry owner id of the owner process's own signing identity.
+const OWNER_SIGNING_OWNER_ID: &str = "piglor-owner";
+
+/// The registry role of the owner process's own signing identity.
+const OWNER_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
+
+/// The `DestructionPending` requests that ADR-137 D4 resumes at owner start.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingKeyDestructionsV1 {
+    /// Every `SubjectDataEncryption` request, of any subject and epoch.
+    pub subject_keys: Vec<KeyDestructionRequestV1>,
+    /// Every request of the owner's own `piglor-owner` signing identity.
+    pub owner_signing: Vec<KeyDestructionRequestV1>,
+}
+
 /// The P1 lifecycle of one `SubjectDataEncryption` identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubjectKeyLifecycleV1 {
@@ -165,6 +181,9 @@ fn stored<T>(result: rusqlite::Result<T>) -> Result<T, CoreError> {
 
 /// The registry owner of an ADR-091 subject: `subject:` and 32 lowercase hex
 /// digits that are not all zero (a non-nil subject).
+///
+/// Only this API refuses the nil subject; the table's `CHECK`s pin the
+/// `subject:` plus 32 lowercase hex form and do not exclude the nil value.
 fn subject_owner(owner_id: &str) -> Result<OwnerIdV1, CoreError> {
     owner_id
         .strip_prefix("subject:")
@@ -252,6 +271,9 @@ fn parse_row((owner_id, stored_epoch, store_file_id): RawRowV1) -> Result<Staged
 fn read_staging_rows(conn: &Connection) -> Result<Vec<StagedRowV1>, CoreError> {
     stored(conn.prepare(STAGING_ROWS_SQL))
         .and_then(|mut statement| {
+            // A path (`RawRowV1::try_from`) cannot stand in for this closure:
+            // the `TryFrom<&Row<'_>>` impl's lifetime is early-bound, so the
+            // path is not higher-ranked over the row borrow.
             let rows = statement
                 .query_map([], |row| RawRowV1::try_from(row))
                 .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>);
@@ -293,7 +315,11 @@ impl SqliteStore {
     /// Load the durable registry (P1), refusing when it is absent or unreadable.
     ///
     /// P1 is never treated as empty: a store whose registry cannot be read
-    /// refuses, and so does one that holds no registry at all.
+    /// refuses, and so does one that holds no registry row at all. ADR-137
+    /// P6's "P2 with an empty P1" is a registry that exists and holds no
+    /// `SubjectDataEncryption` identity, which every method here reads as an
+    /// empty set. A store with no registry row has never registered even the
+    /// owner's signing identity, so it is not a provisioned owner store.
     fn available_subject_registry(&self) -> Result<KeyRegistryStateV1, CoreError> {
         self.load_key_registry()
             .and_then(|registry| registry.ok_or_else(refusal))
@@ -576,27 +602,34 @@ impl SqliteStore {
             })
     }
 
-    /// The D4 enumeration: every `SubjectDataEncryption` `DestructionPending`
-    /// request in the registry.
+    /// The D4 enumeration: every `DestructionPending` request that startup
+    /// recovery resumes, split by kind.
     ///
     /// The owner resumes each at step 3 of D2, idempotently, after SNL1
     /// admission and P5. A failure of one identity leaves it pending and does
-    /// not block the others. The owner's own signing identity is not a
-    /// subject key and is not listed.
+    /// not block the others. Requests of every other owner and role are not
+    /// listed.
     ///
     /// # Errors
     /// Fails closed, with a fixed message, for an absent or unreadable
     /// registry.
-    pub fn pending_subject_key_destructions(
-        &self,
-    ) -> Result<Vec<KeyDestructionRequestV1>, CoreError> {
+    pub fn pending_subject_key_destructions(&self) -> Result<PendingKeyDestructionsV1, CoreError> {
         self.available_subject_registry()
             .map_err(|error| sealed(&error))
             .map(|registry| {
-                registry
+                let (subject_keys, others): (Vec<_>, Vec<_>) = registry
                     .pending_destruction_requests()
-                    .filter(|request| request.identity.role == KeyRoleV1::SubjectDataEncryption)
-                    .collect()
+                    .partition(|request| request.identity.role == KeyRoleV1::SubjectDataEncryption);
+                PendingKeyDestructionsV1 {
+                    subject_keys,
+                    owner_signing: others
+                        .into_iter()
+                        .filter(|request| {
+                            request.identity.role == OWNER_SIGNING_ROLE
+                                && request.identity.owner_id.as_str() == OWNER_SIGNING_OWNER_ID
+                        })
+                        .collect(),
+                }
             })
     }
 }
