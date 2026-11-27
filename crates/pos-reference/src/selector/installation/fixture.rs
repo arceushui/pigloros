@@ -252,13 +252,252 @@ fn provider_manifest(
     )
 }
 
-fn syscall_record(architecture: SandboxArchitecture) -> TestResult<Vec<u8>> {
+/// Which SCS1 allow-list an installation fixture selects.
+#[derive(Clone, Copy)]
+pub(crate) enum SyscallPolicy {
+    /// The single `read` of every unit-test fixture.
+    Fixture,
+    /// What the launcher, the static evidence adapter and systemd's executor need to run in the
+    /// #444 evidence guest.
+    Guest,
+}
+
+const GUEST_SYSCALLS_X86_64: &[&str] = &[
+    "accept4",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "capget",
+    "chdir",
+    "clock_gettime",
+    "clock_nanosleep",
+    "clone",
+    "clone3",
+    "close",
+    "close_range",
+    "connect",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit",
+    "exit_group",
+    "faccessat",
+    "faccessat2",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fcntl",
+    "flock",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getrlimit",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "ioctl",
+    "kill",
+    "listen",
+    "lseek",
+    "lstat",
+    "madvise",
+    "mkdirat",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "pselect6",
+    "pwrite64",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmsg",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "sched_yield",
+    "select",
+    "sendmsg",
+    "sendto",
+    "set_robust_list",
+    "set_tid_address",
+    "setsockopt",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "socketpair",
+    "stat",
+    "statx",
+    "sysinfo",
+    "tgkill",
+    "umask",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "wait4",
+    "write",
+    "writev",
+];
+const GUEST_SYSCALLS_AARCH64: &[&str] = &[
+    "accept4",
+    "bind",
+    "brk",
+    "capget",
+    "chdir",
+    "clock_gettime",
+    "clock_nanosleep",
+    "clone",
+    "clone3",
+    "close",
+    "close_range",
+    "connect",
+    "dup",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd2",
+    "execve",
+    "exit",
+    "exit_group",
+    "faccessat",
+    "faccessat2",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fcntl",
+    "flock",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getrlimit",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "ioctl",
+    "kill",
+    "listen",
+    "lseek",
+    "madvise",
+    "mkdirat",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "openat",
+    "pipe2",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "pselect6",
+    "pwrite64",
+    "read",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmsg",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "sched_yield",
+    "sendmsg",
+    "sendto",
+    "set_robust_list",
+    "set_tid_address",
+    "setsockopt",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "socketpair",
+    "statx",
+    "sysinfo",
+    "tgkill",
+    "umask",
+    "uname",
+    "unlinkat",
+    "wait4",
+    "write",
+    "writev",
+];
+
+const fn syscall_names(
+    architecture: SandboxArchitecture,
+    policy: SyscallPolicy,
+) -> &'static [&'static str] {
+    match (policy, architecture) {
+        (SyscallPolicy::Fixture, _) => &["read"],
+        (SyscallPolicy::Guest, SandboxArchitecture::X86_64) => GUEST_SYSCALLS_X86_64,
+        (SyscallPolicy::Guest, SandboxArchitecture::Aarch64) => GUEST_SYSCALLS_AARCH64,
+    }
+}
+
+fn syscall_record(architecture: SandboxArchitecture, policy: SyscallPolicy) -> TestResult<Vec<u8>> {
+    let names = || {
+        Value::Array(
+            syscall_names(architecture, policy)
+                .iter()
+                .map(|name| Value::Text((*name).to_owned()))
+                .collect(),
+        )
+    };
     let unsigned = Value::Array(vec![
         Value::Text("SCS1".to_owned()),
         integer(1),
         integer(architecture_code(architecture)),
-        Value::Array(vec![Value::Text("read".to_owned())]),
-        Value::Array(vec![Value::Text("read".to_owned())]),
+        names(),
+        names(),
     ]);
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.SCS1.v1\0");
@@ -507,6 +746,7 @@ fn broker_hard_caps(limits: &LimitTable) -> Result<Vec<u8>, ProtocolError> {
 pub(crate) struct ProviderFixture<'a> {
     pub(crate) binary: &'a [u8],
     pub(crate) limits: &'a LimitTable,
+    pub(crate) syscalls: SyscallPolicy,
 }
 
 /// Expanded systemd-repart DDI and its independently described partitions.
@@ -624,6 +864,7 @@ pub(crate) fn admitted_state_with_arguments(
         ProviderFixture {
             binary: FIXTURE_PROVIDER_BINARY,
             limits: &FIXTURE_LIMITS,
+            syscalls: SyscallPolicy::Fixture,
         },
     )
 }
@@ -661,7 +902,7 @@ pub(crate) fn admitted_state_with_provider_binary(
         architecture,
     )?;
     let manifest_digest = signed_record_digest(&manifest)?;
-    let syscall = syscall_record(architecture)?;
+    let syscall = syscall_record(architecture, provider.syscalls)?;
     let syscall_digest = signed_record_digest(&syscall)?;
     let host = host_profile(&authority, architecture)?;
     let host_digest = signed_record_digest(&host)?;
@@ -947,4 +1188,34 @@ pub(crate) fn execution_state(
         &corpus.trust_policy,
     )?;
     Ok((request, state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox_provider_protocol::SandboxSyscallSet;
+
+    #[test]
+    fn every_syscall_policy_is_a_valid_canonical_scs1() -> TestResult {
+        for architecture in [SandboxArchitecture::X86_64, SandboxArchitecture::Aarch64] {
+            for policy in [SyscallPolicy::Fixture, SyscallPolicy::Guest] {
+                let record = syscall_record(architecture, policy)?;
+                let set = SandboxSyscallSet::from_canonical_cbor(&record)?;
+                assert_eq!(set.architecture, architecture);
+                assert_eq!(set.requested_names, syscall_names(architecture, policy));
+                assert_eq!(set.expected_effective_names, set.requested_names);
+            }
+        }
+        // The guest list must let a process start and run: the launcher is entered with execve
+        // and ends with exit_group, and both lists keep them.
+        for architecture in [SandboxArchitecture::X86_64, SandboxArchitecture::Aarch64] {
+            let names = syscall_names(architecture, SyscallPolicy::Guest);
+            for needed in ["execve", "exit_group", "read", "write", "socket"] {
+                assert!(names.contains(&needed), "{needed}");
+            }
+        }
+        assert!(GUEST_SYSCALLS_X86_64.contains(&"arch_prctl"));
+        assert!(!GUEST_SYSCALLS_AARCH64.contains(&"arch_prctl"));
+        Ok(())
+    }
 }

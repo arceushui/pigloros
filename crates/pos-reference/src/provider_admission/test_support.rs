@@ -24,7 +24,7 @@ use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
     admitted_state, admitted_state_with_arguments, admitted_state_with_provider_binary,
     ddi_fixture, materialize_state, provider_executable_path, ImageSigning, ProviderFixture,
-    GUEST_LIMITS, RUNTIME_KEY_SEED,
+    SyscallPolicy, GUEST_LIMITS, RUNTIME_KEY_SEED,
 };
 use crate::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
@@ -497,6 +497,7 @@ fn provider_state(provider: &StagedProvider<'_>) -> Result<InstalledSelectorStat
         ProviderFixture {
             binary: &binary,
             limits: &GUEST_LIMITS,
+            syscalls: SyscallPolicy::Guest,
         },
     )
 }
