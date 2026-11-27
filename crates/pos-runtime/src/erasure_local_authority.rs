@@ -12,10 +12,9 @@
 //! preimage before it signs, and `LocalErasureDriverV1`, the only lifecycle
 //! caller.
 //!
-//! Before every freeze the driver's preparation retains the installed TPS1
-//! and the bundle's ELB1S beside ELB1 and ELLR1 (ADR-136 Q13). ELTA1, the
-//! operator-key lookup hint, is not retained yet: it needs the append-only
-//! operator-key history #448 has to deliver first (ADR-136 Q17).
+//! Before every freeze, the driver's preparation retains the installed TPS1
+//! and the bundle's ELB1S beside ELB1 and ELLR1. ELTA1 is the operator-key
+//! lookup hint; this freeze path does not retain it.
 
 mod authority;
 mod binding;

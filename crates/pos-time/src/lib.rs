@@ -10,21 +10,21 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`mod@replay`] | Install protected Replay State through a staged fold |
-//! | [`mod@snapshot`] | Protected snapshots, `Unavailable` until #502 |
+//! | [`mod@snapshot`] | Protected snapshots, currently unavailable |
 //! | [`compare()`] | Install both Fork arms and report diverged entities |
 //! | [`merge()`] | Conflict-free / strategy-guided timeline merge |
-//! | `counterfactual` | ADR-064 counterfactual dependency-graph validation and recomputation-frontier derivation (Linux only) |
+//! | `counterfactual` | Counterfactual dependency-graph validation and recomputation-frontier derivation (Linux only) |
 //!
 //! Protected Replay and Compare never fold through a visible
-//! `ProjectionRegistry` (ADR-113 §8). Inside ADR-112's release guard they read
+//! `ProjectionRegistry`. Inside the release guard they read
 //! and verify the Event range, fold it on the process-global
 //! [`pos_runtime::StagedFoldExecutorV1`] with the host-installed
 //! [`pos_runtime::HostProjectionProviderV1`], prepare the install, and move it
 //! in only through [`pos_runtime::handoff`]. They return State only, never
 //! Events. On a failure after the range was read and verified, the visible
-//! registry forgets only the revoked subjects of that range, after release
-//! (ADR-093 Revision 4). Each release reports its payload-free health
-//! signals into the caller's [`ReleaseHealthV1`].
+//! registry forgets only the revoked subjects of that range, after release.
+//! Each release reports its payload-free health signals into the caller's
+//! [`ReleaseHealthV1`].
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use std::{cell::Cell, sync::Arc};
@@ -58,7 +58,7 @@ pub use merge::{
 pub use replay::{replay, replay_at};
 pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};
 
-/// The ADR-112 capability of one protected release: the held release guard
+/// The capability of one protected release: the held release guard
 /// and the expiries checked under it, plus the caller's health record. The
 /// release consumes it.
 pub struct ProtectedReleaseV1<'g> {
@@ -89,14 +89,14 @@ impl ReleaseHealthV1 {
         }
     }
 
-    /// ADR-112's `trusted_clock_fence_overrun{kind}` signal, when a
+    /// The `trusted_clock_fence_overrun{kind}` signal, when a
     /// handoff's post-handoff check detected an overrun.
     #[must_use]
     pub const fn overrun_signal(&self) -> Option<TrustedClockOverrunKindV1> {
         self.overrun.get()
     }
 
-    /// ADR-113 P2's [`pos_runtime::GUARD_RELEASE_LATE_SIGNAL`], when a
+    /// [`pos_runtime::GUARD_RELEASE_LATE_SIGNAL`], when a
     /// failure-path teardown was predicted to end after `g0 + 30 s`.
     #[must_use]
     pub const fn guard_release_late(&self) -> Option<&'static str> {
@@ -125,7 +125,7 @@ pub struct ProtectedFoldV1<'a> {
     pub consumers: &'a [RecordedConsumerV1],
 }
 
-/// Every protected failure is ADR-093 `Unavailable`; the closed cause is
+/// Every protected failure is `Unavailable`; the closed cause is
 /// dropped, never exposed.
 fn unavailable<E>(error: E) -> pos_core::CoreError {
     drop(error);
@@ -179,7 +179,7 @@ fn record_p2(
     health.record_guard_release_late(pos_runtime::teardown_signal(clock, g0));
 }
 
-/// The ADR-112 handoff of one staged install, then the health signals, with
+/// The handoff of one staged install, then the health signals, with
 /// P2 measured on the production monotonic source.
 fn handoff_with_p2<T: ProtectedHandoffTargetV1>(
     guard: ReleaseGuardV1<'_>,
@@ -217,10 +217,9 @@ fn handoff_with_p2_on<T: ProtectedHandoffTargetV1>(
             Ok(())
         }
         Err(error) => {
-            // ADR-113 §4/§9 order this as "P2, then teardown", but
-            // `handoff_checked` (#503) rolls back and drops the guard
-            // internally on `Err`, so P2 is evaluated after that teardown.
-            // That is conservative (it can only over-signal); see #515.
+            // `handoff_checked` rolls back and drops the guard internally on
+            // `Err`, so P2 is evaluated after that teardown. That is
+            // conservative: it can only over-signal.
             record_p2(health, p2_clock, g0);
             Err(unavailable(error))
         }
@@ -304,7 +303,7 @@ fn require_prepared_world_replay(
     Ok(verified)
 }
 
-/// Apply the ADR-093 Revision 4 failure-path forget after release: only the
+/// Apply the failure-path forget after release: only the
 /// revoked subjects of a range that was read and verified, and only on failure.
 fn forget_on_failure<T>(
     result: Result<T, pos_core::CoreError>,
@@ -649,12 +648,12 @@ pub mod test_support {
         ))
     }
 
-    /// Run `body` with one fresh ADR-112 release on its own authority.
+    /// Run `body` with one fresh release on its own authority.
     pub(crate) fn with_release<T>(body: impl FnOnce(ProtectedReleaseV1<'_>) -> T) -> T {
         with_release_health(&ReleaseHealthV1::new(), body)
     }
 
-    /// Run `body` with one fresh ADR-112 release reporting into `health`.
+    /// Run `body` with one fresh release reporting into `health`.
     pub(crate) fn with_release_health<T>(
         health: &ReleaseHealthV1,
         body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
@@ -680,7 +679,7 @@ pub mod test_support {
 
     /// Run `body` with a release whose expiries were checked under another
     /// authority's guard: every check before the handoff passes, and the
-    /// ADR-112 handoff then refuses it as `AuthorityRegressed`.
+    /// Handoff then refuses it as `AuthorityRegressed`.
     pub(crate) fn with_mismatched_release_health<T>(
         health: &ReleaseHealthV1,
         body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
@@ -993,7 +992,7 @@ mod tests {
         }
     }
 
-    /// Case 13 (registry part): the ADR-093 Revision 4 forget applies only on
+    /// Case 13 (registry part): the failure-path forget applies only on
     /// failure, only for a range that was read and verified, and only to its
     /// revoked subjects.
     #[test]

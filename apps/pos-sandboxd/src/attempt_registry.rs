@@ -204,8 +204,7 @@ impl RegistryState {
     ///
     /// Reconciliation removes every attempt record and keeps the activation
     /// marker. Before any commit, a missing marker is created as "no request
-    /// yet", so a crash before this owner's first request still leaves one
-    /// (owner decision D2).
+    /// yet", so a crash before this owner's first request still leaves one.
     fn opened(directory: &RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
         let mut state = Self::default();
         if !require_only(&directory.file, Some(activation::MARKER_NAME))? {

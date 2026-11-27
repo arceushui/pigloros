@@ -1,7 +1,6 @@
-//! The ADR-059 non-interference mode harness (ADR-062 Revision 8 slice N0,
-//! #1227).
+//! Non-interference mode harness.
 //!
-//! The harness feeds the #181 framework in `pos_conformance`: it runs one
+//! The harness feeds the conformance framework in `pos_conformance`: it runs one
 //! admitted control/canary [`NonInterferenceFixturePairV1`] in the fixture's
 //! Execution Mode, normalizes each raw capture with
 //! [`normalize_non_interference_capture_v1`], compares the pair with
@@ -17,17 +16,11 @@
 //! - Replay: [`NonInterferenceReplayRunnerV1`] records the subject's run and
 //!   rebuilds its Projection State from the recorded Events alone.
 //! - Fork: [`NonInterferenceForkRunnerV1`] runs the subject in an ordinary
-//!   Fork of its Timeline cut at a Tick Boundary (`ExperimentSession::fork`).
-//!   Its F-mode evidence is engineering evidence (owner note
-//!   `ADR-062_R8_NonInterference_Harness`, decision 4): it counts for every
-//!   row except `NI-FORK-008`, which needs the ADR-064 records-form artifact
-//!   path of slice R6 (#1225) in slice N4 (#1232), and every F case is re-run
-//!   when Driver-declared provisional Ticks land (#1204).
-//! - Air-Gapped: [`NonInterferenceAirGappedRunnerV1`] is the only runner the
-//!   harness uses for this mode, and every run is the typed non-executed
-//!   [`NonInterferenceNonExecutedCauseV1::Unavailable`] until the
-//!   kernel-audited Sandbox Provider runs land (slice N7, owner answer Q8:
-//!   M-B). No Local-relaxation run is counted as Air-Gapped.
+//!   Fork of its Timeline cut at a Tick Boundary. The G-FORK adapter captures
+//!   the records-form Fork artifacts for `NI-FORK-008`.
+//! - Air-Gapped: [`NonInterferenceAirGappedRunnerV1`] returns the typed
+//!   non-executed [`NonInterferenceNonExecutedCauseV1::Unavailable`] for each
+//!   run. A Local-mode run is not counted as Air-Gapped evidence.
 //!
 //! # Preparation
 //!
@@ -46,7 +39,7 @@
 //! [`NonInterferenceRunOutcomeV1::NonExecuted`]: there is no artifact, nothing
 //! to publish and [`NonInterferenceRunOutcomeV1::claim`] is `None`. Only an
 //! executed case carries a pass/fail claim, and that claim is engineering
-//! evidence for its one coordinate: it does not flip the ADR-059 inventory
+//! evidence for its one coordinate: it does not flip the execution inventory
 //! (`execution-matrix.json`) and is not a report.
 //!
 //! # Report
@@ -161,7 +154,7 @@ pub enum NonInterferencePreparationV1 {
 }
 
 impl NonInterferencePreparationV1 {
-    /// The preparation of an ADR-059 variant: warm for `WarmCache`, cold for
+    /// The preparation of a non-interference variant: warm for `WarmCache`, cold for
     /// every other variant.
     #[must_use]
     pub const fn for_variant(variant: NonInterferenceVariantV1) -> Self {
@@ -252,7 +245,7 @@ pub trait NonInterferenceModeRunnerV1 {
     ) -> Result<NonInterferenceRawCaptureV1, NonInterferenceNonExecutedCauseV1>;
 }
 
-/// The Air-Gapped runner until slice N7: every run is
+/// Air-Gapped execution is currently unavailable; every run returns
 /// [`NonInterferenceNonExecutedCauseV1::Unavailable`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NonInterferenceAirGappedRunnerV1;
@@ -278,7 +271,7 @@ impl NonInterferenceModeRunnerV1 for NonInterferenceAirGappedRunnerV1 {
     }
 }
 
-/// One executed case: the #181 case, its preparation and its signed NIA1.
+/// One executed case, its preparation and its signed NIA1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NonInterferenceSignedExecutionV1 {
     case: NonInterferenceCaseV1,
@@ -496,7 +489,7 @@ impl NonInterferenceHarnessV1 {
 }
 
 /// Prepare the runner, prime a warm environment, then run and compare the
-/// pair through the #181 framework.
+/// pair through the conformance framework.
 fn run_case(
     runner: &mut dyn NonInterferenceModeRunnerV1,
     fixture: &NonInterferenceFixturePairV1,
@@ -642,7 +635,7 @@ pub fn publish_non_interference_execution_v1(
 }
 
 /// Build and host-sign an NIR1 from exactly 192 NIA1 artifacts, one per
-/// ADR-059 coordinate, each signed by a trusted executor key.
+/// execution-matrix coordinate, each signed by a trusted executor key.
 ///
 /// The report is validated against the same artifacts before it is returned.
 ///

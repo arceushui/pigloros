@@ -1,10 +1,9 @@
-//! ADR-119 section 4.2 trigger eligibility: a pure function from a closed
+//! Trigger eligibility: a pure function from a closed
 //! cause to an eligible trigger code.
 //!
-//! The outcome reader (slice 6) maps a failed or refused pass's
-//! `gates[i].launch_failure`, a [`PassFailureV1`], or a restart-composition
-//! fact to one [`FallbackTriggerCauseV1`]. The classifier never reads a pass,
-//! a handle or the registry.
+//! Classification maps a failed or refused pass's `gates[i].launch_failure`,
+//! a [`PassFailureV1`], or a restart-composition fact to one
+//! [`FallbackTriggerCauseV1`]. It never reads a pass, handle or registry.
 
 use pos_core::{FallbackActivationOriginV1, FallbackTriggerBasisV1, FallbackTriggerCodeV1 as Code};
 
@@ -12,7 +11,7 @@ use crate::community_plugin_host::{CommunityPluginHostErrorV1, PassFailureV1, Tr
 
 use self::FallbackTriggerCauseV1 as Cause;
 
-/// The closed failure cause an ADR-119 trigger is classified from.
+/// The closed failure cause a fallback trigger is classified from.
 ///
 /// Its `u16` code is the cause code of `trigger_basis`. Only the causes the
 /// classifier maps to a code can ever be recorded; the others exist so that
@@ -26,7 +25,7 @@ pub enum FallbackTriggerCauseV1 {
     InvalidManifest = 2,
     /// `ArtifactTrustDenied`, every basis including `TrustStateUnavailable`: never eligible.
     ArtifactTrustDenied = 3,
-    /// `ArtifactRevoked`, every basis: code 4 (Q6 (a) confirmed).
+    /// `ArtifactRevoked`, every basis: code 4.
     ArtifactRevoked = 4,
     /// `IncompatibleAbi`: never eligible.
     IncompatibleAbi = 5,
@@ -44,7 +43,7 @@ pub enum FallbackTriggerCauseV1 {
     StateMigrationFailed = 11,
     /// `GuestDeclaredFailure`: never eligible.
     GuestDeclaredFailure = 12,
-    /// `ComponentTrap` with `Unverified` reproduction: not eligible until FU-7.
+    /// `ComponentTrap` with `Unverified` reproduction: not eligible.
     ComponentTrapUnverified = 13,
     /// `ComponentTrap` that conformance reproduces: code 2.
     ComponentTrapReproduced = 14,
@@ -80,7 +79,7 @@ pub enum FallbackTriggerCauseV1 {
     BoundaryTransactionFailed = 27,
 }
 
-/// The cause of each community host error, by its closed ADR-061 name.
+/// The cause of each community host error, keyed by its closed name.
 ///
 /// `ComponentTrap` is listed with its `Unverified` cause; a reproduced trap is
 /// recognized before this table is read.
@@ -126,8 +125,7 @@ pub(super) const HOST_CAUSES: [(&str, Cause); 21] = [
     ("AtomicCommitFailed", Cause::AtomicCommitFailed),
 ];
 
-/// Every eligible cause and its trigger code (ADR-119 section 4.2, owner
-/// decisions Q2 (c) and Q6 (a)). Every other cause is never eligible.
+/// Every eligible cause and its trigger code. Every other cause is never eligible.
 const ELIGIBLE: [(Cause, Code); 8] = [
     (Cause::MissingImplementation, Code::MissingImplementation),
     (Cause::ComponentTrapReproduced, Code::ComponentTrap),
@@ -186,9 +184,8 @@ impl FallbackTriggerCauseV1 {
     /// The cause of one community host error.
     ///
     /// A `ComponentTrap` is `ComponentTrapReproduced` only when conformance
-    /// reproduces it (`TrapReproductionV1::ReproducedByConformance`). The
-    /// host emits only `Unverified` until FU-7, so code 2 stays ineligible
-    /// until then: this is the owner's Q2 (c) gate.
+    /// reproduces it (`TrapReproductionV1::ReproducedByConformance`). An
+    /// unverified trap remains ineligible.
     #[must_use]
     pub fn from_host_error(error: CommunityPluginHostErrorV1) -> Self {
         let reproduced = matches!(
@@ -231,7 +228,7 @@ impl FallbackTriggerCauseV1 {
 
 /// The trigger code `cause` is eligible for, or `None` when it never is.
 ///
-/// A pure function of the closed cause (ADR-119 section 4.2): codes 1, 3 and
+/// A pure function of the closed cause: codes 1, 3 and
 /// 4 are eligible, code 2 only for a reproduced trap, and code 5 for a worker
 /// crash. Whether an entry acts on a code is its declared trigger list; see
 /// [`declared_fallback_trigger_v1`].

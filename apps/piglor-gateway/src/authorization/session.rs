@@ -1,5 +1,4 @@
-//! The served `GET /v1/session` resource (#1362, owner decisions on #302,
-//! ADR-134 §5).
+//! The served `GET /v1/session` resource.
 //!
 //! A `Session` is a pure projection of the host's own authority: the pinned
 //! Local Principal chain the read's decision used, the evaluator's answer for
@@ -13,13 +12,14 @@
 //!
 //! - `generation` is the head position of the pinned authority (its chain,
 //!   plus its consent-bound chain when its provisioning binds consents) plus
-//!   the head of the Principal's consent Timeline (D8). Each consent is named
-//!   by the `EventId` of its `consent.granted.v1` Event (D7) and is `revoked`
-//!   from its ADR-039 fence on (#309). A Principal whose provisioning binds no
-//!   consent has a consent head of 0 and no consents.
+//!   the head of the Principal's consent Timeline. Each consent is identified
+//!   by the `EventId` of its `consent.granted.v1` Event and reports whether it
+//!   has been revoked. A Principal whose provisioning binds no consent has a
+//!   consent head of 0 and no consents.
 //! - `provenance.digest` is the BLAKE3 of the disclosed facts the Session is
 //!   derived from (see `PROVENANCE_DOMAIN`), so a client recomputes it.
-//! - `execution_profile` is the EPF1 profile, `unavailable` until #461.
+//! - `execution_profile` reports the EPF1 profile as unavailable with reason
+//!   `not-installed`.
 //! - In a mode without network the Principal network capability is never
 //!   listed: binding refuses an authority that names it, and the projection
 //!   drops it as well.
@@ -38,7 +38,7 @@ use crate::{
 
 /// The `$id` of the served `Session` schema.
 const SESSION_SCHEMA_ID: &str = "urn:pigloros:gateway:v1:schema:session";
-/// The served contract version; `-draft` drops only at Wave 9 acceptance.
+/// The served contract version.
 const CONTRACT_VERSION: &str = "1.0.0-draft";
 /// The domain of the provenance digest: BLAKE3 of this prefix, the 16
 /// Principal ID bytes, `generation` as a big-endian u64, the ASCII
