@@ -25,16 +25,30 @@ use pos_reference::provider_admission::test_support::{
 use super::execute::{EVALUATION_FILE, INPUT_FILE, SPX1_FILE};
 use super::{hold, report_line, ConformanceError, HOST_ARCHITECTURE};
 
+/// ELM1 limit 3, `CpuQuotaPerMillion`: one whole CPU. The default fixture's 2000 (0.2 %) throttles
+/// the unit's own namespace and mount setup so far under TCG that systemd's start timeout expires.
+const CPU_LIMIT: usize = 3;
+/// ELM1 limit 6, `LimitFSIZE`: 16 MiB, in place of the default fixture's 2000 bytes.
+const FILE_SIZE_LIMIT: usize = 6;
+
 /// The limits of the attempt that the guest runs: 128 MiB of memory, 256 tasks, a 120 s attempt
-/// watchdog, 1 MiB of output and a 16 MiB work area, with the case's exchange deadline of
-/// `StagedLimits::EXCHANGE_MS`. The default fixture's 2000-byte limits kill any real attempt.
-const GUEST_LIMITS: StagedLimits = StagedLimits::probing(
-    128 * 1024 * 1024,
-    256,
-    120_000,
-    1024 * 1024,
-    16 * 1024 * 1024,
-);
+/// watchdog, 1 MiB of output, a 16 MiB work area, one CPU and 16 MiB files, with the case's
+/// exchange deadline of `StagedLimits::EXCHANGE_MS`. The default fixture's tiny limits (2000
+/// bytes, 0.2 % of a CPU) kill or stall any real attempt.
+const GUEST_LIMITS: StagedLimits = {
+    let mut limits = StagedLimits::probing(
+        128 * 1024 * 1024,
+        256,
+        120_000,
+        1024 * 1024,
+        16 * 1024 * 1024,
+    );
+    limits.broker[CPU_LIMIT] = 1_000_000;
+    limits.launch[CPU_LIMIT] = 1_000_000;
+    limits.broker[FILE_SIZE_LIMIT] = 16 * 1024 * 1024;
+    limits.launch[FILE_SIZE_LIMIT] = 16 * 1024 * 1024;
+    limits
+};
 
 /// One stager run's files, read from its arguments.
 #[derive(Debug)]
