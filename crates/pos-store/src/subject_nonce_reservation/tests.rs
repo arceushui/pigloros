@@ -24,6 +24,7 @@ const OTHER_STORE: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
     device: 2,
     inode: 4,
 };
+const ONE_MIB: usize = 1024 * 1024;
 const REFUSED: SubjectDataConsumerErrorV1 = SubjectDataConsumerErrorV1::NonceReservationRefused;
 
 /// How the fake storage answers a replacement.
@@ -37,6 +38,8 @@ enum Replace {
     FailAfterStoring,
     /// Report success but store something else.
     StoreOther,
+    /// Report success but store more than the documented 1 MiB.
+    StoreOversized,
 }
 
 struct Storage {
@@ -49,13 +52,7 @@ struct Storage {
 
 impl Storage {
     fn new(ledger: &SubjectNonceLedgerV1) -> Self {
-        Self {
-            bytes: ledger.as_bytes().to_vec(),
-            reads: 0,
-            replaces: 0,
-            fail_read_at: None,
-            replace: Replace::Store,
-        }
+        Self::raw(ledger.as_bytes())
     }
 
     fn raw(bytes: &[u8]) -> Self {
@@ -97,6 +94,10 @@ impl SubjectNonceLedgerStorageV1 for Storage {
             }
             Replace::StoreOther => {
                 self.bytes = b"other".to_vec();
+                Ok(())
+            }
+            Replace::StoreOversized => {
+                self.bytes = vec![0; ONE_MIB + 1];
                 Ok(())
             }
         }
@@ -162,7 +163,6 @@ fn reservations_return_each_counter_once_and_persist_the_successor() -> TestResu
     assert_eq!(stored(&port)?.rows().next().map(|r| r.data_next), Some(8));
     assert_eq!(port.reserve_data_counter(data(OWNER, 1)?, digest()), Ok(8));
     assert_eq!(stored(&port)?.rows().next().map(|r| r.data_next), Some(9));
-    assert!(!port.is_spent());
     // Each reservation read the ledger, replaced it, and read it back.
     assert_eq!(port.storage.replaces, 2);
     assert_eq!(port.storage.reads, 4);
@@ -200,7 +200,6 @@ fn a_non_data_role_is_refused_before_the_ledger_is_read() -> TestResult {
         );
     }
     assert_eq!((port.storage.reads, port.storage.replaces), (0, 0));
-    assert!(!port.is_spent());
     Ok(())
 }
 
@@ -221,7 +220,6 @@ fn any_field_mismatch_refuses_without_writing_or_spending() -> TestResult {
         Err(REFUSED)
     );
     assert_eq!((port.storage.replaces, &port.storage.bytes), (0, &before));
-    assert!(!port.is_spent());
     // The exact request still works afterwards.
     assert_eq!(port.reserve_data_counter(data(OWNER, 1)?, digest()), Ok(1));
     Ok(())
@@ -239,17 +237,18 @@ fn a_foreign_store_identity_is_decryption_only_and_never_rewritten() -> TestResu
         Err(REFUSED)
     );
     assert_eq!((port.storage.replaces, &port.storage.bytes), (0, &before));
-    assert!(!port.is_spent());
     // A different expected identity of another platform tag never matches.
     let windows = SubjectStoreFileIdV1::Windows {
         volume_serial: 2,
         file_index: 3,
     };
     let mut port = DurableSubjectNonceReservationV1::new(Storage::new(&single(4)?), windows);
+    let before = port.storage.bytes.clone();
     assert_eq!(
         port.reserve_data_counter(data(OWNER, 1)?, digest()),
         Err(REFUSED)
     );
+    assert_eq!((port.storage.replaces, &port.storage.bytes), (0, &before));
     Ok(())
 }
 
@@ -263,7 +262,6 @@ fn an_unreadable_or_malformed_ledger_refuses_without_writing() -> TestResult {
         Err(REFUSED)
     );
     assert_eq!(port.storage.replaces, 0);
-    assert!(!port.is_spent());
     // The failed read spent nothing: the next attempt reserves counter 1.
     assert_eq!(port.reserve_data_counter(data(OWNER, 1)?, digest()), Ok(1));
 
@@ -274,7 +272,6 @@ fn an_unreadable_or_malformed_ledger_refuses_without_writing() -> TestResult {
             Err(REFUSED)
         );
         assert_eq!(port.storage.replaces, 0);
-        assert!(!port.is_spent());
     }
     let mut empty = new_port(Storage::new(&ledger(Vec::new())?));
     assert_eq!(
@@ -293,7 +290,6 @@ fn an_exhausted_counter_refuses_and_leaves_the_ledger_alone() -> TestResult {
         Err(REFUSED)
     );
     assert_eq!((port.storage.replaces, &port.storage.bytes), (0, &before));
-    assert!(!port.is_spent());
 
     // The last usable counter is returned once, then the ledger is exhausted.
     let mut last = new_port(Storage::new(&single(EXHAUSTED_SUBJECT_NONCE_COUNTER - 1)?));
@@ -308,52 +304,62 @@ fn an_exhausted_counter_refuses_and_leaves_the_ledger_alone() -> TestResult {
     Ok(())
 }
 
-fn assert_spent_after(storage: Storage, successor_stored: bool) -> TestResult {
+/// The failed reservation refuses, never restores the old counter, and the next
+/// call re-reads the ledger: it returns `next_counter` (the successor row when
+/// the replacement landed, the never-returned old counter when it did not).
+fn assert_refused_then_reads_afresh(
+    storage: Storage,
+    stored_data_next: u64,
+    next_counter: u64,
+) -> TestResult {
     let mut port = new_port(storage);
     assert_eq!(
         port.reserve_data_counter(data(OWNER, 1)?, digest()),
         Err(REFUSED)
     );
-    assert!(port.is_spent());
     assert_eq!(port.storage.replaces, 1);
-    // The old counter is never restored: the successor stays where it landed.
-    let expected = if successor_stored { Some(3) } else { Some(2) };
     assert_eq!(
         SubjectNonceLedgerV1::from_bytes(&port.storage.bytes)
             .ok()
             .and_then(|l| l.rows().next().map(|r| r.data_next)),
-        expected
+        Some(stored_data_next)
     );
-    // A spent port refuses even though the ledger is intact, and writes nothing.
+    port.storage.replace = Replace::Store;
     assert_eq!(
         port.reserve_data_counter(data(OWNER, 1)?, digest()),
-        Err(REFUSED)
+        Ok(next_counter)
     );
-    assert_eq!(port.storage.replaces, 1);
+    assert_eq!(
+        stored(&port)?.rows().next().map(|r| r.data_next),
+        Some(next_counter + 1)
+    );
     Ok(())
 }
 
 #[test]
-fn a_failed_or_unconfirmed_replacement_spends_the_port() -> TestResult {
+fn a_failed_replacement_leaves_the_old_row_and_the_next_call_reserves_it() -> TestResult {
     let mut failed = Storage::new(&single(2)?);
     failed.replace = Replace::FailUnchanged;
-    assert_spent_after(failed, false)?;
-
-    let mut after_storing = Storage::new(&single(2)?);
-    after_storing.replace = Replace::FailAfterStoring;
-    assert_spent_after(after_storing, true)
+    assert_refused_then_reads_afresh(failed, 2, 2)
 }
 
 #[test]
-fn a_failed_readback_spends_the_port() -> TestResult {
+fn an_unconfirmed_replacement_that_landed_makes_the_next_call_return_the_successor() -> TestResult {
+    let mut after_storing = Storage::new(&single(2)?);
+    after_storing.replace = Replace::FailAfterStoring;
+    assert_refused_then_reads_afresh(after_storing, 3, 3)
+}
+
+#[test]
+fn a_failed_readback_makes_the_next_call_return_the_successor() -> TestResult {
     let mut storage = Storage::new(&single(2)?);
     // Read 0 loads the ledger, read 1 is the readback.
     storage.fail_read_at = Some(1);
-    assert_spent_after(storage, true)
+    assert_refused_then_reads_afresh(storage, 3, 3)
 }
 
 #[test]
-fn a_readback_that_differs_from_the_replacement_spends_the_port() -> TestResult {
+fn a_readback_that_differs_from_the_replacement_refuses_and_keeps_refusing() -> TestResult {
     let mut storage = Storage::new(&single(2)?);
     storage.replace = Replace::StoreOther;
     let mut port = new_port(storage);
@@ -361,8 +367,36 @@ fn a_readback_that_differs_from_the_replacement_spends_the_port() -> TestResult 
         port.reserve_data_counter(data(OWNER, 1)?, digest()),
         Err(REFUSED)
     );
-    assert!(port.is_spent());
     assert_eq!(port.storage.bytes, b"other");
+    // The ledger is no longer a valid SNL1: every later call refuses unwritten.
+    port.storage.replace = Replace::Store;
+    assert_eq!(
+        port.reserve_data_counter(data(OWNER, 1)?, digest()),
+        Err(REFUSED)
+    );
+    assert_eq!(
+        (port.storage.replaces, &port.storage.bytes),
+        (1, &b"other".to_vec())
+    );
+    Ok(())
+}
+
+#[test]
+fn an_oversized_readback_is_refused() -> TestResult {
+    let mut storage = Storage::new(&single(2)?);
+    storage.replace = Replace::StoreOversized;
+    let mut port = new_port(storage);
+    assert_eq!(
+        port.reserve_data_counter(data(OWNER, 1)?, digest()),
+        Err(REFUSED)
+    );
+    assert_eq!(port.storage.bytes.len(), ONE_MIB + 1);
+    // An oversized ledger is never decoded, so the next call refuses unwritten.
+    assert_eq!(
+        port.reserve_data_counter(data(OWNER, 1)?, digest()),
+        Err(REFUSED)
+    );
+    assert_eq!(port.storage.replaces, 1);
     Ok(())
 }
 
