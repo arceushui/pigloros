@@ -113,46 +113,59 @@ impl CommunityArtifactProtectorV1 {
     /// CCI1 refusal (`InvalidBinding`, `BoundsExceeded`) for an invalid
     /// cohort.
     pub fn provision(
-        _seal: &'static AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         cohort: CommunityProtectionCohortV1,
     ) -> Result<Self, Error> {
-        fresh_identity().and_then(|protection_id| {
-            fresh_identity().and_then(|copy_id| {
-                VaultKeyV1::provision(CommunityKeyIntentInputV1 {
-                    protection_operation_id: protection_id,
+        fresh_identity()
+            .and_then(|protection_id| Self::provision_identified(seal, cohort, protection_id))
+    }
+
+    /// [`Self::provision`] under a protection ID the host allocated before
+    /// the writer, such as a Reserve's failure cohort key (R15.1(3)).
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::provision`]; a zero `protection_id`
+    /// is `InvalidBinding`.
+    pub fn provision_identified(
+        _seal: &'static AuthorityTrustRootSealV1,
+        cohort: CommunityProtectionCohortV1,
+        protection_id: [u8; 16],
+    ) -> Result<Self, Error> {
+        fresh_identity().and_then(|copy_id| {
+            VaultKeyV1::provision(CommunityKeyIntentInputV1 {
+                protection_operation_id: protection_id,
+                parent_operation: cohort.parent_operation,
+                timeline: cohort.timeline,
+                generation: cohort.generation,
+                purpose: cohort.purpose,
+                scope_set_digest: cohort.scope_set_digest,
+                evidence_not_after_micros: cohort.evidence_not_after_micros,
+                allowed_record_kinds: cohort.allowed_record_kinds,
+                member_slots: cohort.member_slots,
+                material_fingerprint: Hash::zero(),
+                authority_request_digest: cohort.authority_request_digest,
+            })
+            .and_then(|key| {
+                CommunityCopyInventoryV1::new(CommunityCopyInventoryInputV1 {
+                    copy_id,
+                    revision: 1,
+                    predecessor: None,
                     parent_operation: cohort.parent_operation,
                     timeline: cohort.timeline,
                     generation: cohort.generation,
+                    holder: CommunityCopyHolderV1::KeyVault,
+                    holder_digest: key.intent().digest(),
                     purpose: cohort.purpose,
                     scope_set_digest: cohort.scope_set_digest,
-                    evidence_not_after_micros: cohort.evidence_not_after_micros,
-                    allowed_record_kinds: cohort.allowed_record_kinds,
-                    member_slots: cohort.member_slots,
-                    material_fingerprint: Hash::zero(),
-                    authority_request_digest: cohort.authority_request_digest,
+                    object_commitment: None,
+                    state: CommunityCopyStateV1::Owned,
+                    deadline_micros: cohort.evidence_not_after_micros,
                 })
-                .and_then(|key| {
-                    CommunityCopyInventoryV1::new(CommunityCopyInventoryInputV1 {
-                        copy_id,
-                        revision: 1,
-                        predecessor: None,
-                        parent_operation: cohort.parent_operation,
-                        timeline: cohort.timeline,
-                        generation: cohort.generation,
-                        holder: CommunityCopyHolderV1::KeyVault,
-                        holder_digest: key.intent().digest(),
-                        purpose: cohort.purpose,
-                        scope_set_digest: cohort.scope_set_digest,
-                        object_commitment: None,
-                        state: CommunityCopyStateV1::Owned,
-                        deadline_micros: cohort.evidence_not_after_micros,
-                    })
-                    .map(|copy| Self {
-                        cohort,
-                        protection_id,
-                        key,
-                        copy,
-                    })
+                .map(|copy| Self {
+                    cohort,
+                    protection_id,
+                    key,
+                    copy,
                 })
             })
         })

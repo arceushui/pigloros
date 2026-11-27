@@ -178,17 +178,19 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 ## Resource-intensive sanitizer jobs
 
 The complete workspace ASan gate retains all features and test targets. The
-standard-stage `asan-build` job compiles every workspace test target once with
-`cargo nextest archive` and uploads the archive; six hosted shards download it
-and run tests without compiling. The `bundle-coverage` and `bundle-public`
-shards run the two `pos-conformance` bundle integration targets independently.
-The `moat-proof` shard runs the slow moat integration target independently.
-`remainder-1` and `remainder-2` use cargo-nextest's disjoint `slice:1/2` and
-`slice:2/2` partitions over `not package(pos-conformance)`; `remainder-1` also
-runs every other `pos-conformance` target by excluding only the three targets
-assigned to the dedicated bundle and moat shards. Newly added conformance
-targets therefore join the remainder automatically rather than requiring an
-allowlist update. Each shard bounds test threads at two through the explicit
+standard-stage `asan-build` job compiles the selected test targets once with
+`cargo nextest archive`, then uploads a full archive and a filtered
+`pos-conformance` archive. The two remainder shards download the full archive;
+five conformance shards download the filtered archive and run without
+compiling. The `bundle-coverage` and two `bundle-public` shards run the
+`pos-conformance` bundle integration targets independently. The `moat-proof`
+shard runs the slow moat integration target independently. `remainder-1` and
+`remainder-2` use cargo-nextest's disjoint `slice:1/2` and `slice:2/2`
+partitions over `not package(pos-conformance)`. The separate
+`conformance-remainder` shard runs every other `pos-conformance` target by
+excluding only the three targets assigned to the dedicated bundle and moat
+shards. Newly added conformance targets therefore join the remainder
+automatically rather than requiring an allowlist update. Each shard bounds test threads at two through the explicit
 cargo-nextest `--test-threads 2` cap. The two long remainder shards are
 scheduled first under the five-runner cap, so both begin together while the
 short moat shard waits. The required `asan (address sanitizer)` aggregate runs
@@ -235,7 +237,7 @@ fail-closed aggregate, and complete ASan scope by parsing the workflow's
 executable YAML semantics. On a pull request the archive and shards take the
 affected-package selection, which defaults to `--workspace` for every other
 event and for a missing scope output; a selection without `pos-conformance`
-skips the four conformance-only partitions explicitly. Adversarial fixtures prove that disabled/non-failing
+skips the five conformance-only shards explicitly. Adversarial fixtures prove that disabled/non-failing
 steps, environment-based test runners, detached sanitizer flags, `--no-run`,
 shell success overrides, skipped prerequisites, injected setup steps, and
 test-skip arguments are rejected. The ASan job graph and pinned setup-step
@@ -256,7 +258,7 @@ counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
 The complete workspace/all-features/all-test-target ASan scope and
-`detect_leaks=1` remain unchanged across the six shards. A separate 1,234-byte
+`detect_leaks=1` remain unchanged across the seven shards. A separate 1,234-byte
 intentional leak runs under the same sanitizer, symbolizer, suppression file,
 and options; it must exit nonzero, report exactly one allocation, and match
 neither approved rule.
