@@ -258,22 +258,26 @@ fn assert_includes_are_listed(path: &Path, lines: &[String], listed: impl Fn(&st
                 let rest = format!("{}\n{}", &line[column..], lines[number + 1..].join("\n"));
                 let open = token.len() - 1;
                 let mut depth = 0_usize;
-                let end = rest[open..]
-                    .char_indices()
-                    .find_map(|(offset, character)| {
-                        match character {
-                            '(' => depth += 1,
-                            ')' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    return Some(open + offset + 1);
-                                }
+                let closed = rest[open..].char_indices().find_map(|(offset, character)| {
+                    match character {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(open + offset + 1);
                             }
-                            _ => {}
                         }
-                        None
-                    })
-                    .unwrap_or(rest.len());
+                        _ => {}
+                    }
+                    None
+                });
+                assert!(
+                    closed.is_some(),
+                    "{}:{}: `{token}` has no closing parenthesis",
+                    path.display(),
+                    number + 1
+                );
+                let end = closed.unwrap_or(rest.len());
                 assert!(
                     listed(&rest[..end]),
                     "{}:{}: `{token}` of an unlisted path in provider code",
