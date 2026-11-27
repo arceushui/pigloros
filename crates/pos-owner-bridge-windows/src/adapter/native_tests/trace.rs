@@ -260,7 +260,7 @@ fn report_if_quarantined(result_error: Option<BridgeError>, case: u64, progress:
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use pos_owner_bridge::{LifecycleCode, QuarantineCode};
 
@@ -335,8 +335,8 @@ mod tests {
             snapshot_calls.set(snapshot_calls.get() + 1);
             "stub-snapshot".to_owned()
         };
-        let mut emitted = Vec::new();
-        let mut emit = |line: &str| emitted.push(line.to_owned());
+        let emitted = RefCell::new(Vec::new());
+        let mut emit = |line: &str| emitted.borrow_mut().push(line.to_owned());
 
         report_if_quarantined_with(None, 1, "pid=None", &mut snapshot, &mut emit);
         report_if_quarantined_with(
@@ -347,7 +347,7 @@ mod tests {
             &mut emit,
         );
         assert_eq!(snapshot_calls.get(), 0);
-        assert!(emitted.is_empty());
+        assert!(emitted.borrow().is_empty());
 
         let current_pid = std::process::id();
         let with_pid = format!("pid=Some({current_pid}) exited=None");
@@ -359,14 +359,16 @@ mod tests {
             &mut emit,
         );
         assert_eq!(snapshot_calls.get(), 1);
-        assert_eq!(emitted.len(), 1);
+        let first = emitted.borrow();
+        assert_eq!(first.len(), 1);
         let expected_browser = format!("browser=Some(({current_pid}, Ok(Some(");
-        assert!(emitted[0].contains("NATIVE_STALL_PROCESSES context=readiness-case-3 "));
-        assert!(emitted[0].contains(&expected_browser));
-        assert!(emitted[0].contains("stub-snapshot"));
-        assert!(!emitted[0].contains('\\'));
+        assert!(first[0].contains("NATIVE_STALL_PROCESSES context=readiness-case-3 "));
+        assert!(first[0].contains(&expected_browser));
+        assert!(first[0].contains("stub-snapshot"));
+        assert!(!first[0].contains('\\'));
+        drop(first);
 
-        emitted.clear();
+        emitted.borrow_mut().clear();
         report_if_quarantined_with(
             Some(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
             4,
@@ -377,7 +379,7 @@ mod tests {
         assert_eq!(snapshot_calls.get(), 2);
         let expected_no_pid =
             "NATIVE_STALL_PROCESSES context=readiness-case-4 browser=None stub-snapshot";
-        assert_eq!(emitted, [expected_no_pid]);
+        assert_eq!(*emitted.borrow(), [expected_no_pid]);
 
         Trace::new(5, Instant::now()).report_if_quarantined(None);
     }
