@@ -183,6 +183,8 @@ mod local_cut_owner;
 mod local_erasure;
 mod local_replica_residual;
 mod pipeline_admission;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod subject_key_staging;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
 #[cfg(target_os = "linux")]
@@ -2347,6 +2349,8 @@ impl SqliteStore {
                     // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_key_staging_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
