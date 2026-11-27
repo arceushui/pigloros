@@ -784,7 +784,9 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// Retain each in-Abort `SetReason`: the ledger in the quarantine index
-    /// and the CQC1 in the retry index, with its sealed CQO1 (R15.3(4)).
+    /// and the CQC1 in the retry index, with its sealed CQO1 (R15.3(4)). An
+    /// in-Abort reason spends no `F_q` share (R15.3(6)), so the erasure
+    /// budget's active pairs do not move.
     fn retain_quarantine(
         &mut self,
         staged: &mut StagedFailureAbortV1,
@@ -795,11 +797,6 @@ impl MemoryCommunityDomainV1 {
             .into_iter()
             .zip(outcomes)
         {
-            let before = self
-                .quarantine_index
-                .get(&apply.key)
-                .map_or(0, |current| current.reasons.len() as u64);
-            self.count_quarantine_pairs(staged.key.0, before, apply.ledger.reasons.len() as u64);
             self.quarantine_index.insert(apply.key, apply.ledger);
             self.quarantine_controls.insert(
                 (staged.key.0, apply.control_operation_id),

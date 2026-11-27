@@ -372,6 +372,13 @@ fn a_trap_commits_its_records_and_quarantines_its_member() -> TestResult {
     assert_eq!(domain.inventory_generation, inventory + 1);
     assert_eq!(domain.native_producer_ordinal, ordinal);
     assert_eq!(
+        domain
+            .erasure_contexts
+            .get(&target())
+            .map_or(0, |context| context.active_pairs),
+        0
+    );
+    assert_eq!(
         domain.pass_status(target(), OPERATION),
         Some(CommunityPassStatusV1::Aborted)
     );
@@ -551,6 +558,13 @@ fn two_failures_register_every_row_the_entry_holds() -> TestResult {
     let domain = scene.case.domain();
     assert_eq!(domain.quarantine_index.len(), 2);
     assert_eq!(domain.quarantine_controls.len(), 2);
+    assert_eq!(
+        domain
+            .erasure_contexts
+            .get(&target())
+            .map_or(0, |context| context.active_pairs),
+        0
+    );
     let committed = domain
         .pass_aborts
         .get(&(target(), OPERATION))
@@ -1037,5 +1051,28 @@ fn a_staged_commit_that_cannot_proceed_changes_nothing() -> TestResult {
         Some(Error::Conflict)
     );
     assert!(taken.unresolved());
+    Ok(())
+}
+
+/// The control identity is present exactly when the failure maps to a
+/// quarantine reason (R15.3(2) step 1, N7): a trap without one and an
+/// unmapped failure with one are shape refusals, so no failure with an
+/// identity can lack a reason.
+#[test]
+fn a_control_identity_is_present_exactly_for_a_mapped_failure() -> TestResult {
+    let mut scene = Scene::new(true)?;
+    let mut bare = trap(MEMBER_ZERO, 0x71);
+    bare.control_operation_id = None;
+    let mut named = invalid_output(MEMBER_ZERO);
+    named.control_operation_id = Some([0x72; 16]);
+    for failure in [bare, named] {
+        assert_eq!(
+            scene
+                .abort(input(Reason::ValidatedInvocationFailure, &[failure]))?
+                .err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    assert!(scene.unresolved());
     Ok(())
 }
