@@ -17,7 +17,7 @@ use crate::community::pass_record::{
     CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1,
 };
 use crate::community::quarantine::{
-    CommunityQuarantineReceiptV1, QuarantineLedgerV1, QuarantineReasonStateV1,
+    CommunityQuarantineReceiptV1, QuarantineLedgerV1, QuarantineReasonStateV1, RetainedControlV1,
 };
 use crate::community::{
     CommunityDomainBindingV1, CommunityPreExecutionTrustV1, CommunityQuarantineContextV1,
@@ -244,7 +244,7 @@ fn a_reset_applies_from_the_index_alone() -> TestResult {
     assert!(domain
         .quarantine_controls
         .get(&(target(), CONTROL))
-        .is_some_and(|retained| retained.sealed.is_none()));
+        .is_some_and(|retained| matches!(retained.kind, RetainedControlV1::Reset(_))));
     Ok(())
 }
 
@@ -271,8 +271,10 @@ fn a_reset_of_an_empty_ledger_appends_another_revision() -> TestResult {
 }
 
 /// I214: a reset re-arms only the shares a pre-execution `SetReason` spent
-/// (R15.3(6)). The seeded ledger spent the revocation's share, not the
-/// trap's, so one pair comes back; a ledger with nothing spent re-arms none.
+/// (R15.3(6)). The seeded ledger holds both kinds of pair: the trap, as a
+/// failure Abort activates it (no share spent), and the revocation, as a
+/// pre-execution `SetReason` does (share spent). Exactly the revocation's
+/// pair comes back; a ledger of Abort-activated pairs alone re-arms none.
 #[test]
 fn a_reset_re_arms_only_the_spent_shares() -> TestResult {
     let mut case = seeded(Revocation::None)?;

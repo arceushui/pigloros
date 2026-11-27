@@ -92,7 +92,7 @@ fn records(case: &QuarantineCase, control: [u8; 16]) -> Fallible<Vec<Vec<u8>>> {
         .quarantine_controls
         .get(&(target(), control))
         .ok_or("no committed SetReason")?;
-    let sealed = committed.sealed.as_ref().ok_or("no sealed records")?;
+    let sealed = &committed.set_reason().ok_or("no SetReason")?.sealed;
     let key = domain
         .keys
         .get(&sealed.metadata_key)
@@ -145,7 +145,12 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
         .values()
         .next()
         .ok_or("no committed SetReason")?;
-    let admission = committed.admission.as_ref().ok_or("no COA1")?;
+    let admission = committed
+        .set_reason()
+        .ok_or("no SetReason")?
+        .admission
+        .as_ref()
+        .ok_or("no COA1")?;
     let owner = community_catalogue_owner_v1(target(), GENERATION)?;
     let row = ArtifactRegistrationPersistencePortV1::read_artifact_registration(
         &after.store,
@@ -165,9 +170,9 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
         .keys
         .get(
             &committed
+                .set_reason()
+                .ok_or("no SetReason")?
                 .sealed
-                .as_ref()
-                .ok_or("no sealed records")?
                 .metadata_key,
         )
         .ok_or("no metadata key")?
@@ -259,7 +264,11 @@ fn an_active_reason_persists_only_its_outcome() -> TestResult {
         .quarantine_controls
         .get(&(target(), again))
         .ok_or("no committed SetReason")?;
-    assert!(committed.admission.is_none());
+    assert!(committed
+        .set_reason()
+        .ok_or("no SetReason")?
+        .admission
+        .is_none());
     // CCI1, CQC1, CQO1.
     assert_eq!(records(&case, again)?.len(), 3);
     Ok(())
@@ -382,14 +391,16 @@ fn a_retry_needs_its_retained_evidence() -> TestResult {
         match fault {
             0 => {
                 let key = committed
+                    .set_reason()
+                    .ok_or("no SetReason")?
                     .sealed
-                    .as_ref()
-                    .ok_or("no sealed records")?
                     .metadata_key;
                 domain.keys.remove(&key);
             }
             1 => committed.receipt.outcome = zeroize::Zeroizing::new(vec![0x80]),
-            _ => committed.generation = [0x99; 16],
+            _ => {
+                committed.set_reason_mut().ok_or("no SetReason")?.generation = [0x99; 16];
+            }
         }
         assert_eq!(
             set_reason(&mut case, claim(Basis::Artifact))?.err(),
