@@ -652,8 +652,10 @@ fn a_registry_that_denies_decryption_wins_over_an_unlocked_keyring() -> TestResu
     let mut seed = self::seed()?;
     let timeline = seed.timeline;
     seed.append(timeline, "first")?;
+    // A replacement may only finish a destruction that is already durably
+    // pending, so the two steps are two commits.
+    seed.change_registry(|registry| registry.begin_key_destruction(request).map(|_| ()))?;
     seed.change_registry(|registry| {
-        registry.begin_key_destruction(request)?;
         registry
             .complete_key_destruction(request, deletion_receipt(&request))
             .map(|_| ())
