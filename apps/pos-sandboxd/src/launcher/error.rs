@@ -33,8 +33,8 @@ pub enum LauncherError {
     /// The inherited descriptors differ from the expected layout.
     #[error("inherited descriptor layout is invalid")]
     Layout,
-    /// The release channel peer is not the root provider.
-    #[error("release channel peer is not the root provider")]
+    /// The release channel peer is not the provider.
+    #[error("release channel peer is not the provider")]
     Peer,
     /// The adapter could not be opened beneath the root or is not the
     /// regular native ELF for this architecture.

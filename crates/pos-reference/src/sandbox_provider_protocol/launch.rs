@@ -157,6 +157,10 @@ pub struct LaunchParameters {
     pub arguments: Vec<String>,
     /// Expected FDL1 digest for the execution mode.
     pub expected_fdl1_digest: [u8; 32],
+    /// The pidfs mount ID and inode of the provider process itself (`provider-pidfd-identity`), as
+    /// `statx` reports them for a pidfd that the provider opened on its own process. The launcher
+    /// accepts the release channel only from the peer whose `SO_PEERPIDFD` has this identity.
+    pub provider_identity: FdIdentity,
     /// LPV1 self-digest, which `ReadyV1` binds as the launch-parameter digest.
     pub digest: [u8; 32],
 }
@@ -174,6 +178,7 @@ impl LaunchParameters {
         adapter_path: String,
         arguments: Vec<String>,
         expected_fdl1_digest: [u8; 32],
+        provider_identity: FdIdentity,
     ) -> Result<Self, SandboxProviderProtocolError> {
         let mut record = Self {
             attempt_id,
@@ -182,6 +187,7 @@ impl LaunchParameters {
             adapter_path,
             arguments,
             expected_fdl1_digest,
+            provider_identity,
             digest: [0; 32],
         };
         record.validate_fields()?;
@@ -212,7 +218,7 @@ impl LaunchParameters {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
         let document = decode_document(bytes)?;
-        let (fields, digest) = self_digested::<8>(&document, "LPV1")?;
+        let (fields, digest) = self_digested::<9>(&document, "LPV1")?;
         let record = Self {
             attempt_id: id16(&fields[2])?,
             nonce: fixed_bytes(&fields[3])?,
@@ -220,6 +226,7 @@ impl LaunchParameters {
             adapter_path: super::codec::text(&fields[5])?.to_owned(),
             arguments: decode_text_list(&fields[6])?,
             expected_fdl1_digest: digest32(&fields[7])?,
+            provider_identity: FdIdentity::decode(&fields[8])?,
             digest,
         };
         record.validate_fields()?;
@@ -237,6 +244,8 @@ impl LaunchParameters {
             || !nonzero(&[self.nonce, self.sim1_digest, self.expected_fdl1_digest])
             || !normalized_absolute_path(&self.adapter_path)
             || !arguments_valid
+            || !self.provider_identity.valid()
+            || self.provider_identity.mount_id == 0
         {
             Err(SandboxProviderProtocolError::FieldOutOfBounds)
         } else {
@@ -244,7 +253,7 @@ impl LaunchParameters {
         }
     }
 
-    fn unsigned_value(&self) -> [Value; 8] {
+    fn unsigned_value(&self) -> [Value; 9] {
         [
             text_value("LPV1"),
             uint_value(1),
@@ -254,6 +263,7 @@ impl LaunchParameters {
             text_value(&self.adapter_path),
             Value::Array(self.arguments.iter().map(|a| text_value(a)).collect()),
             bytes_value(&self.expected_fdl1_digest),
+            self.provider_identity.value(),
         ]
     }
 }

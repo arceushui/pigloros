@@ -61,6 +61,8 @@ use zbus::OwnedFd;
 
 use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservationEvidence};
 
+use crate::process_identity::own_process_identity;
+
 use crate::{
     observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,
     CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
@@ -476,6 +478,9 @@ pub enum BarrierError {
     /// The release channel could not be created.
     #[error("the release channel could not be created")]
     Channel(#[source] io::Error),
+    /// The provider's own process identity (its pidfd) could not be read for LPV1.
+    #[error("the provider process identity could not be read")]
+    ProviderIdentity,
     /// The single-use LPV1 nonce could not be drawn.
     #[error("the launch nonce could not be drawn")]
     Nonce(#[source] io::Error),
@@ -552,6 +557,7 @@ impl BarrierError {
             Self::AttemptMismatch
             | Self::Parameters(_)
             | Self::Channel(_)
+            | Self::ProviderIdentity
             | Self::Nonce(_)
             | Self::UnitEndTaken
             | Self::RuntimeFlavor
@@ -637,18 +643,23 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
         .map_err(io::Error::from)
         .map_err(BarrierError::Channel)
         .and_then(|(provider_end, unit_end)| {
-            layout_digest(attempt.mode())
-                .and_then(|layout| {
-                    LaunchParameters::new(
-                        attempt.attempt_id(),
-                        nonce,
-                        attempt.sim1_digest(),
-                        attempt.executable_path().to_owned(),
-                        attempt.arguments().to_vec(),
-                        layout,
-                    )
+            let provider = own_process_identity().ok_or(BarrierError::ProviderIdentity);
+            provider
+                .and_then(|provider| {
+                    layout_digest(attempt.mode())
+                        .and_then(|layout| {
+                            LaunchParameters::new(
+                                attempt.attempt_id(),
+                                nonce,
+                                attempt.sim1_digest(),
+                                attempt.executable_path().to_owned(),
+                                attempt.arguments().to_vec(),
+                                layout,
+                                provider,
+                            )
+                        })
+                        .map_err(BarrierError::Parameters)
                 })
-                .map_err(BarrierError::Parameters)
                 .map(|parameters| Self {
                     admitted: attempt.clone(),
                     provider_end,

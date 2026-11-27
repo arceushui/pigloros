@@ -18,8 +18,8 @@ type Rejects = fn(&[u8]) -> bool;
 type Case<'a> = (&'a [u8], Rejects);
 type PathCase<'a> = (&'a [u8], Rejects, Vec<Vec<usize>>);
 
-const LPV1_FULL: &str = "8288644c5056310150010101010101010101010101010101015820020202020202020202020202020202020202020202020202020202020202020258200303030303030303030303030303030303030303030303030303030303030303702f7573722f62696e2f6164617074657282672d2d7365727665672d2d7175696574582004040404040404040404040404040404040404040404040404040404040404045820e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281";
-const LPV1_DIGEST: &str = "e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281";
+const LPV1_FULL: &str = "8289644c5056310150010101010101010101010101010101015820020202020202020202020202020202020202020202020202020202020202020258200303030303030303030303030303030303030303030303030303030303030303702f7573722f62696e2f6164617074657282672d2d7365727665672d2d71756965745820040404040404040404040404040404040404040404040404040404040404040482081864582051d1d1fc2185f35dcba39b73c4201494db3ed744e819e6746a4096cc1426c311";
+const LPV1_DIGEST: &str = "51d1d1fc2185f35dcba39b73c4201494db3ed744e819e6746a4096cc1426c311";
 const RDY1_FULL: &str = "828d645244593101500101010101010101010101010101010158200202020202020202020202020202020202020202020202020202020202020202500505050505050505050505050505050558200606060606060606060606060606060606060606060606060606060606060606820718645820030303030303030303030303030303030303030303030303030303030303030358200707070707070707070707070707070707070707070707070707070707070707820718c85820e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281582004040404040404040404040404040404040404040404040404040404040404045820080808080808080808080808080808080808080808080808080808080808080858206348e47cb248ee8b32633b3f268606a8c7d5e85a22310e75bea5bbe43ed92140";
 const RDY1_DIGEST: &str = "6348e47cb248ee8b32633b3f268606a8c7d5e85a22310e75bea5bbe43ed92140";
 const RLS1_FULL: &str = "838f64524c53310150010101010101010101010101010101015820020202020202020202020202020202020202020202020202020202020202020258206348e47cb248ee8b32633b3f268606a8c7d5e85a22310e75bea5bbe43ed921405820090909090909090909090909090909090909090909090909090909090909090958200a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a58200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01020358200c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c58200d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d1a075bcd156b72756e74696d652d6b65795820533c96ca296f8ed9b29810932f3006584c4b8cfec660eaad85f82016eafd15a658407b48f0fd04bce7f20c5a7bfa26a40b482843cbb5ef3709b9ae5aefa771d11ce3f3c3b542e2b17818bd5af12084310c496121d87f75c7a461379627fe7e16ef0e";
@@ -47,6 +47,12 @@ fn unhex(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         .collect()
 }
 
+/// The pidfs identity of the provider in the vectors (`provider-pidfd-identity`).
+const PROVIDER: FdIdentity = FdIdentity {
+    mount_id: 8,
+    inode: 100,
+};
+
 fn launch() -> Result<LaunchParameters, Box<dyn Error>> {
     Ok(LaunchParameters::new(
         [1; 16],
@@ -55,6 +61,7 @@ fn launch() -> Result<LaunchParameters, Box<dyn Error>> {
         "/usr/bin/adapter".to_owned(),
         vec!["--serve".to_owned(), "--quiet".to_owned()],
         [4; 32],
+        PROVIDER,
     )?)
 }
 
@@ -152,13 +159,42 @@ fn rls1_matches_the_golden_vector_verifies_and_round_trips() -> TestResult {
 #[test]
 fn lpv1_constructor_rejects_every_invalid_field() {
     let build = |attempt: [u8; 16], nonce, sim1, path: &str, arguments: Vec<String>, fdl1| {
-        LaunchParameters::new(attempt, nonce, sim1, path.to_owned(), arguments, fdl1)
+        LaunchParameters::new(
+            attempt,
+            nonce,
+            sim1,
+            path.to_owned(),
+            arguments,
+            fdl1,
+            PROVIDER,
+        )
     };
     let args = || vec!["a".to_owned()];
     assert!(build([0; 16], fill(2), [3; 32], "/a", args(), [4; 32]).is_err());
     assert!(build([1; 16], fill(0), [3; 32], "/a", args(), [4; 32]).is_err());
     assert!(build([1; 16], fill(2), [0; 32], "/a", args(), [4; 32]).is_err());
     assert!(build([1; 16], fill(2), [3; 32], "/a", args(), [0; 32]).is_err());
+    for identity in [
+        FdIdentity {
+            mount_id: 8,
+            inode: 0,
+        },
+        FdIdentity {
+            mount_id: 0,
+            inode: 100,
+        },
+    ] {
+        assert!(LaunchParameters::new(
+            [1; 16],
+            fill(2),
+            [3; 32],
+            "/a".to_owned(),
+            args(),
+            [4; 32],
+            identity
+        )
+        .is_err());
+    }
     for path in ["", "a", "/a//b", "/a/../b", "/a/./b", "/a\0b", "/", "/a/"] {
         assert!(build([1; 16], fill(2), [3; 32], path, args(), [4; 32]).is_err());
     }
@@ -228,6 +264,7 @@ fn lpv1_enforces_the_64_kib_record_bound() {
             "/a".to_owned(),
             vec!["a".repeat(256); count],
             [4; 32],
+            PROVIDER,
         )
     };
     assert!(build(250).is_ok());
@@ -382,6 +419,14 @@ fn decoders_reject_a_correctly_digested_record_with_a_zero_field() -> TestResult
         Value::Bytes(vec![0; 32])
     )?)
     .is_err());
+    for path in [[0, 8, 0], [0, 8, 1]] {
+        assert!(LaunchParameters::from_canonical_cbor(&mutated(
+            &lpv,
+            &path,
+            Value::Integer(0.into())
+        )?)
+        .is_err());
+    }
     let rls = release()?.to_canonical_cbor()?;
     assert!(ExecutionRelease::from_canonical_cbor(&mutated(
         &rls,
@@ -403,7 +448,10 @@ fn every_decoder_field_rejects_a_value_of_the_wrong_type() -> TestResult {
         (
             lpv.as_slice(),
             |b| LaunchParameters::from_canonical_cbor(b).is_err(),
-            (2..=7).map(|index| vec![0, index]).collect(),
+            (2..=8)
+                .map(|index| vec![0, index])
+                .chain([vec![0, 8, 0], vec![0, 8, 1]])
+                .collect(),
         ),
         (
             rdy.as_slice(),
@@ -468,6 +516,7 @@ fn sized_record(
         "/a".to_owned(),
         arguments,
         [4; 32],
+        PROVIDER,
     )
 }
 

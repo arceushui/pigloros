@@ -1886,6 +1886,7 @@ fn every_barrier_failure_records_its_r9_code() {
             None,
         ),
         (BarrierError::Channel(io::Error::other("channel")), None),
+        (BarrierError::ProviderIdentity, None),
         (BarrierError::UnitEndTaken, None),
         (BarrierError::RuntimeFlavor, None),
         (BarrierError::AlreadyAttempted, None),

@@ -9,8 +9,8 @@
 //! 2. adopts the descriptors systemd passes at fixed numbers and validates
 //!    their names, types, count, order and the absence of any higher
 //!    descriptor against the expected layout;
-//! 3. accepts the release channel only if `SO_PEERCRED` identifies the root
-//!    provider;
+//! 3. accepts the release channel only if the pidfs identity of its
+//!    `SO_PEERPIDFD` is the provider's, which LPV1 records;
 //! 4. opens, checks and hashes the adapter beneath the activated root and its
 //!    own executable;
 //! 5. sends exactly one `ReadyV1` with `SCM_CREDENTIALS`;
@@ -102,7 +102,7 @@ fn launch(lpv1_hex: &str) -> Result<Infallible, LauncherError> {
     let (environment, inherited) = LaunchEnvironment::from_process().and_then(|environment| {
         descriptors::adopt(&environment).map(|inherited| (environment, inherited))
     })?;
-    barrier::run(&ProcessHost::root(), &environment, &parameters, inherited)
+    barrier::run(&ProcessHost, &environment, &parameters, inherited)
 }
 
 /// Decode the lowercase-hexadecimal LPV1 argument.

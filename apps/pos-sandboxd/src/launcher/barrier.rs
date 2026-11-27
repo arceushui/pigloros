@@ -18,7 +18,7 @@ use rustix::{
     io::{fcntl_setfd, Errno, FdFlags},
     net::{
         recvmsg, sendmsg,
-        sockopt::{set_socket_timeout, socket_peercred, Timeout},
+        sockopt::{set_socket_timeout, Timeout},
         RecvAncillaryBuffer, RecvFlags, ReturnFlags, SendAncillaryBuffer, SendAncillaryMessage,
         SendFlags, UCred,
     },
@@ -59,8 +59,9 @@ pub(super) fn run(
 ) -> Result<Infallible, LauncherError> {
     let open = host.open_descriptors().map_err(|_| LauncherError::Layout)?;
     let layout = validate(inherited, &open)?;
-    socket_peercred(&layout.release)
-        .is_ok_and(|credentials| credentials.uid.as_raw() == host.provider_uid())
+    // The provider is the peer whose pidfd has the identity that LPV1 records for it: neither its
+    // uid nor its pid is visible in the unit's namespaces. Any other outcome is a refusal.
+    (host.peer_identity(&layout.release) == Some(parameters.provider_identity))
         .then_some(())
         .ok_or(LauncherError::Peer)?;
     let observed_fdl1_digest = observed_fdl1(parameters.expected_fdl1_digest, &layout.entries)?;
