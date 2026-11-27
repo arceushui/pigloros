@@ -39,6 +39,8 @@
 
 mod evidence;
 
+use std::collections::BTreeMap;
+
 use pos_conformance::{PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1};
 use pos_core::community_lifecycle::{
     community_catalogue_owner_v1, community_decision_provenance_digest_v1,
@@ -169,12 +171,12 @@ pub struct CommunitySetReasonCallV1<'a> {
 /// unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityQuarantineReceiptV1 {
-    timeline: TimelineId,
-    control_operation_id: [u8; 16],
-    request_digest: Hash,
-    selected_ledger_digest: Hash,
-    already_quarantined: bool,
-    outcome: Zeroizing<Vec<u8>>,
+    pub(super) timeline: TimelineId,
+    pub(super) control_operation_id: [u8; 16],
+    pub(super) request_digest: Hash,
+    pub(super) selected_ledger_digest: Hash,
+    pub(super) already_quarantined: bool,
+    pub(super) outcome: Zeroizing<Vec<u8>>,
 }
 
 impl CommunityQuarantineReceiptV1 {
@@ -224,13 +226,13 @@ impl CommunityQuarantineReceiptV1 {
 /// field. The key `(T, control_operation_id)` fixes the rest.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct SetReasonBoundV1 {
-    key: Hash,
-    expected_ledger: Option<Hash>,
-    reason: u8,
-    host_failure: CommunityPluginHostErrorV1,
-    trust_policy_snapshot_digest: Hash,
-    expected_generation: [u8; 16],
-    expected_head: Hash,
+    pub(super) key: Hash,
+    pub(super) expected_ledger: Option<Hash>,
+    pub(super) reason: u8,
+    pub(super) host_failure: CommunityPluginHostErrorV1,
+    pub(super) trust_policy_snapshot_digest: Hash,
+    pub(super) expected_generation: [u8; 16],
+    pub(super) expected_head: Hash,
 }
 
 /// One CQK1's current ledger head in the domain-private quarantine index
@@ -241,6 +243,29 @@ pub(super) struct QuarantineLedgerV1 {
     pub(super) ordinal: u64,
     pub(super) reasons: Vec<CommunityQuarantineReasonEvidenceV1>,
     pub(super) evidence_not_after_micros: u64,
+    /// Each active reason's evidence horizon and spent-share flag, by reason
+    /// code (R15.2(1)).
+    pub(super) states: BTreeMap<u8, QuarantineReasonStateV1>,
+}
+
+/// One active reason's evidence horizon and whether a pre-execution
+/// `SetReason` spent its `F_q` share (R15.2(1), R15.3(6)). A reason a failure
+/// Abort activates spent none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct QuarantineReasonStateV1 {
+    pub(super) evidence_not_after_micros: u64,
+    pub(super) share_spent: bool,
+}
+
+/// The per-reason states of a ledger once `reason` joins `current`'s.
+pub(super) fn ledger_states(
+    current: Option<&QuarantineLedgerV1>,
+    reason: u8,
+    state: QuarantineReasonStateV1,
+) -> BTreeMap<u8, QuarantineReasonStateV1> {
+    let mut states = current.map_or_else(BTreeMap::new, |ledger| ledger.states.clone());
+    states.insert(reason, state);
+    states
 }
 
 /// One committed `SetReason`, retained for its retry (A5.3(5)).

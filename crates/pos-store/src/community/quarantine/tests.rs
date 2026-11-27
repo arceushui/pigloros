@@ -17,7 +17,8 @@ use pos_core::{
 };
 
 use super::{
-    CommunityQuarantineReceiptV1, QuarantineLedgerV1, SetReasonPreparedV1, StagedSetReasonV1,
+    CommunityQuarantineReceiptV1, QuarantineLedgerV1, QuarantineReasonStateV1, SetReasonPreparedV1,
+    StagedSetReasonV1,
 };
 use crate::community::MemoryCommunityDomainV1;
 use crate::community_initialization_fixture::{
@@ -131,6 +132,13 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
         .ok_or("no index entry")?;
     assert_eq!(ledger.head, receipt.selected_ledger_digest());
     assert_eq!(ledger.ordinal, 1);
+    assert_eq!(
+        ledger.states.get(&Reason::Revoked.code()),
+        Some(&QuarantineReasonStateV1 {
+            evidence_not_after_micros: ledger.evidence_not_after_micros,
+            share_spent: true,
+        })
+    );
     let committed = after
         .quarantine_controls
         .values()
@@ -427,6 +435,7 @@ fn an_active_reason_skips_the_horizon_check() -> TestResult {
                 failure_evidence_digest: hash(0x94),
             }],
             evidence_not_after_micros: EXPIRES - 1,
+            states: std::collections::BTreeMap::new(),
         },
     );
     let outcome = with_set_reason(

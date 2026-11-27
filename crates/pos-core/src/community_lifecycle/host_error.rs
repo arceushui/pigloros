@@ -277,6 +277,13 @@ pub enum CommunityPluginHostErrorV1 {
 }
 
 impl CommunityPluginHostErrorV1 {
+    /// The closed ADR-129 host-failure code of this error, as a CFI1 and
+    /// CFO1 encode it.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        super::failure::host_code(self)
+    }
+
     /// The exact closed ADR-061 error name.
     #[must_use]
     pub const fn name(self) -> &'static str {
