@@ -558,12 +558,32 @@ fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
     for path in &sources {
         let text = non_comment_text(path)?;
         // `provider_identity` opens a pidfd on pid 1: in the launcher's namespace that is the
-        // launcher itself, so only the provider may call it.
-        assert!(
-            path.ends_with("process_identity.rs") || !text.contains("provider_identity("),
-            "{}: launcher code calls `provider_identity`",
-            path.display()
-        );
+        // launcher itself, so only the provider may call it. Outside `process_identity.rs`
+        // (which defines it; its launcher-side readers are checked instead) the name may only appear as a field access
+        // (`parameters.provider_identity`): a call, an import or an alias (`... as x`) names it
+        // without a leading dot.
+        if path.ends_with("process_identity.rs") {
+            for reader in ["fn own_process_identity", "fn peer_process_identity"] {
+                let body = text.split(reader).nth(1).and_then(|rest| {
+                    rest.split("\nfn ")
+                        .next()
+                        .and_then(|rest| rest.split("\npub(crate) fn ").next())
+                });
+                assert!(body.is_some(), "{reader} must exist in process_identity.rs");
+                assert!(
+                    !body.unwrap_or_default().contains("provider_identity"),
+                    "{reader} must not call `provider_identity`"
+                );
+            }
+        } else {
+            for (column, _) in text.match_indices("provider_identity") {
+                assert!(
+                    text[..column].ends_with('.'),
+                    "{}: launcher code names `provider_identity` other than as a field",
+                    path.display()
+                );
+            }
+        }
         for token in FORBIDDEN_REACH {
             assert!(
                 !text.contains(token),
