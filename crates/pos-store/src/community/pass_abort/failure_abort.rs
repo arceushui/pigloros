@@ -47,7 +47,10 @@ use super::super::memory_domain::MemoryCommunityDomainV1;
 use super::super::metadata_authority::CommunityMetadataAuthorityV1;
 use super::super::pass_record::CommunityPassRecordV1;
 use super::super::protection::{CommunityArtifactProtectorV1, CommunityProtectedRecordV1};
-use super::super::quarantine::{CommittedQuarantineControlV1, CommunityQuarantineContextV1};
+use super::super::quarantine::{
+    CommittedQuarantineControlV1, CommunityQuarantineContextV1, RetainedControlV1,
+    RetainedSetReasonV1, SealedControlV1,
+};
 use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
 use super::super::vault::VaultKeyV1;
@@ -801,15 +804,19 @@ impl MemoryCommunityDomainV1 {
             self.quarantine_controls.insert(
                 (staged.key.0, apply.control_operation_id),
                 CommittedQuarantineControlV1 {
-                    bound: apply.bound,
-                    generation: staged.committed.generation,
-                    metadata_key: staged.committed.metadata_key,
-                    records: vec![SealedMetadataV1 {
-                        envelope: outcome.envelope.clone(),
-                        address: outcome.address,
-                        commitment: outcome.commitment,
-                    }],
-                    admission: None,
+                    kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                        bound: apply.bound,
+                        generation: staged.committed.generation,
+                        sealed: SealedControlV1 {
+                            metadata_key: staged.committed.metadata_key,
+                            records: vec![SealedMetadataV1 {
+                                envelope: outcome.envelope.clone(),
+                                address: outcome.address,
+                                commitment: outcome.commitment,
+                            }],
+                        },
+                        admission: None,
+                    }),
                     receipt: apply.receipt,
                 },
             );

@@ -26,7 +26,9 @@ use crate::evaluator_protocol::{
     encode, EvaluationRequest, ProtocolError, RequiredProviderCapability, SandboxRequirement,
 };
 use crate::provider_admission::test_support::StagedLimits;
-use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole, SandboxArchitecture};
+use crate::sandbox_provider_protocol::{
+    PartitionDescriptor, PartitionRole, SandboxArchitecture, SandboxSyscallSet,
+};
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -272,6 +274,17 @@ pub(crate) enum SyscallPolicy {
 const GUEST_SYSCALLS_X86_64: &str = include_str!("guest-syscalls-x86_64.txt");
 const GUEST_SYSCALLS_AARCH64: &str = include_str!("guest-syscalls-aarch64.txt");
 
+// The checked-in production SCS1 records (systemd v260.2, libseccomp v2.6.1). systemd adds its
+// `@default` and `@sandbox` sets to every allow-list, and reads the union back; the names of those
+// sets that the target does not resolve natively are the production records' implicit readback
+// additions, so the guest records take theirs from there instead of keeping a second copy.
+const PRODUCTION_SCS1_X86_64: &[u8] = include_bytes!(
+    "../../../../pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
+);
+const PRODUCTION_SCS1_AARCH64: &[u8] = include_bytes!(
+    "../../../../pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-aarch64.scs1.cbor"
+);
+
 /// The allow-list names, one per line in the data files (the process-creation scan of the provider
 /// sources reads Rust source only, and these are syscall names, not code).
 fn syscall_names(architecture: SandboxArchitecture, policy: SyscallPolicy) -> Vec<&'static str> {
@@ -286,21 +299,51 @@ fn syscall_names(architecture: SandboxArchitecture, policy: SyscallPolicy) -> Ve
     }
 }
 
+/// The names that systemd's allow-list setter adds to the readback on top of the requested ones for
+/// this architecture: the production record's `expected-effective-names` without its
+/// `requested-names`.
+fn implicit_readback_names(architecture: SandboxArchitecture) -> TestResult<Vec<String>> {
+    let production = SandboxSyscallSet::from_canonical_cbor(match architecture {
+        SandboxArchitecture::X86_64 => PRODUCTION_SCS1_X86_64,
+        SandboxArchitecture::Aarch64 => PRODUCTION_SCS1_AARCH64,
+    })?;
+    Ok(production
+        .expected_effective_names
+        .into_iter()
+        .filter(|name| !production.requested_names.contains(name))
+        .collect())
+}
+
+/// What systemd reads back for the requested names: the same for the unit-test fixture, and the
+/// requested names plus the implicit additions, sorted, for the guest.
+fn expected_names(
+    architecture: SandboxArchitecture,
+    policy: SyscallPolicy,
+) -> TestResult<Vec<String>> {
+    let mut names: Vec<String> = syscall_names(architecture, policy)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if matches!(policy, SyscallPolicy::Guest) {
+        names.extend(implicit_readback_names(architecture)?);
+        names.sort_unstable();
+        names.dedup();
+    }
+    Ok(names)
+}
+
 fn syscall_record(architecture: SandboxArchitecture, policy: SyscallPolicy) -> TestResult<Vec<u8>> {
-    let names = || {
-        Value::Array(
-            syscall_names(architecture, policy)
-                .iter()
-                .map(|name| Value::Text((*name).to_owned()))
-                .collect(),
-        )
-    };
+    let array = |names: Vec<String>| Value::Array(names.into_iter().map(Value::Text).collect());
+    let requested = syscall_names(architecture, policy)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let unsigned = Value::Array(vec![
         Value::Text("SCS1".to_owned()),
         integer(1),
         integer(architecture_code(architecture)),
-        names(),
-        names(),
+        array(requested),
+        array(expected_names(architecture, policy)?),
     ]);
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.SCS1.v1\0");
@@ -998,7 +1041,6 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
-    use crate::sandbox_provider_protocol::SandboxSyscallSet;
 
     #[test]
     fn every_syscall_policy_is_a_valid_canonical_scs1() -> TestResult {
@@ -1008,7 +1050,14 @@ mod tests {
                 let set = SandboxSyscallSet::from_canonical_cbor(&record)?;
                 assert_eq!(set.architecture, architecture);
                 assert_eq!(set.requested_names, syscall_names(architecture, policy));
-                assert_eq!(set.expected_effective_names, set.requested_names);
+                assert_eq!(
+                    set.expected_effective_names,
+                    expected_names(architecture, policy)?
+                );
+                assert!(set
+                    .requested_names
+                    .iter()
+                    .all(|name| set.expected_effective_names.contains(name)));
             }
         }
         // The guest list must let a process start and run: the launcher is entered with execve
@@ -1024,13 +1073,13 @@ mod tests {
         for (text, count, digest) in [
             (
                 GUEST_SYSCALLS_X86_64,
-                152,
-                "71892635c59fc2093bdf232c94cc9701482aa9ff25c51903d280f5f0a11ff6a8",
+                134,
+                "aca43c4321137b43b089d1d08064ea1e11c989448aacb2422ccf168c22a74617",
             ),
             (
                 GUEST_SYSCALLS_AARCH64,
-                140,
-                "a39c9edf364fb0a2447772a8b9857f0670dccc9261c35e81b10e1c9d02829255",
+                115,
+                "4e513a364071bff1052a8dc54dbe2915778195f0c345e17c6dc97c244e5d7840",
             ),
         ] {
             // The sorted names are hashed, so that a reorder alone is no failure but any addition
@@ -1048,27 +1097,44 @@ mod tests {
         Ok(())
     }
 
-    /// systemd adds its `@default` and `@sandbox` sets to every allow-list it is given, and reads
-    /// the union back sorted. The SCS1 `expected-effective-names` is compared with that readback
-    /// exactly, so each guest list holds the whole set already (systemd 260.5, `seccomp-util.c`).
+    /// systemd adds its `@default` and `@sandbox` sets to every allow-list it is given and reads the
+    /// union back sorted; the SCS1 `expected-effective-names` is compared with that readback
+    /// exactly. `guest-syscalls-systemd-default.txt` holds those 70 names (identical in systemd
+    /// v260.2, the production pin, and v260.5, the version the guest runs: `seccomp-util.c`
+    /// `@default` and `@sandbox`). Each guest list names the native ones itself, and the rest are
+    /// exactly the production records' implicit readback additions.
     #[test]
-    fn the_guest_lists_hold_every_name_systemd_adds_to_an_allow_list() {
-        let implicit: Vec<&str> = include_str!("guest-syscalls-systemd-default.txt")
+    fn the_guest_readback_is_the_requested_names_plus_the_systemd_default_sets() -> TestResult {
+        let defaults: Vec<&str> = include_str!("guest-syscalls-systemd-default.txt")
             .lines()
             .collect();
-        assert_eq!(implicit.len(), 70);
-        for text in [GUEST_SYSCALLS_X86_64, GUEST_SYSCALLS_AARCH64] {
-            let names: Vec<&str> = text.lines().collect();
-            for name in &implicit {
-                assert!(names.contains(name), "{name}");
-            }
-            let mut sorted = names.clone();
+        assert_eq!(defaults.len(), 70);
+        for architecture in [SandboxArchitecture::X86_64, SandboxArchitecture::Aarch64] {
+            let requested = syscall_names(architecture, SyscallPolicy::Guest);
+            let implicit = implicit_readback_names(architecture)?;
+            let mut sorted = requested.clone();
             sorted.sort_unstable();
             sorted.dedup();
             assert_eq!(
-                names, sorted,
+                requested, sorted,
                 "sorted and unique, as systemd reads them back"
             );
+            for name in &implicit {
+                assert!(defaults.contains(&name.as_str()), "{name} is not a default");
+                assert!(!requested.contains(&name.as_str()), "{name} is native");
+            }
+            for name in &defaults {
+                assert!(
+                    requested.contains(name) || implicit.iter().any(|other| other == name),
+                    "{name}"
+                );
+            }
+            let mut union: Vec<String> = requested.iter().map(|name| (*name).to_owned()).collect();
+            union.extend(defaults.iter().map(|name| (*name).to_owned()));
+            union.sort_unstable();
+            union.dedup();
+            assert_eq!(expected_names(architecture, SyscallPolicy::Guest)?, union);
         }
+        Ok(())
     }
 }
