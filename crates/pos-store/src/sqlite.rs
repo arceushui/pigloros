@@ -153,7 +153,6 @@ mod counterfactual_store;
 mod erasure_admissions;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod erasure_fence_rows;
-#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 mod erasure_fence_writers;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
@@ -11409,10 +11408,7 @@ fn apply_sqlite_erasure_cas(
     for index in mutation.index_inserts() {
         insert_sqlite_index(conn, mutation.request(), *index)?;
     }
-    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
     let effect_cbor = erasure_fence_writers::fenced_effect_cbor(conn, mutation)?;
-    #[cfg(not(all(target_os = "linux", any(test, feature = "test-support"))))]
-    let effect_cbor = mutation.effect().to_canonical_cbor()?;
     let effect_subject = mutation
         .effect()
         .subject()
