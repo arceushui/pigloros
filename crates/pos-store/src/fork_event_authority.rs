@@ -697,7 +697,7 @@ impl<'a> ClassifiedTickAuthorityV1<'a> {
 /// - **Not idempotent.** Replaying a committed call fails the basis recheck,
 ///   and a prior `FOP1` under a derived operation ID is corrupt authority.
 /// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
-///   is unsupported until #447.
+///   is unsupported by these recording methods.
 /// - **No deletion.** An admitted Fork is never deleted (ADR-099 revision
 ///   13): the generic `delete_timeline` refuses it with
 ///   `AdmittedForkNotDeletable` before any mutation. Its `FOP1` rows therefore
@@ -808,13 +808,11 @@ pub(crate) fn without_wall_time_override(
     }
 }
 
-/// The two authority validators of ADR-105 r6 R6.9.
+/// Selects which authority origins a Fork operation accepts.
 ///
-/// Every write path and every issuance or recovery read passes
-/// [`Self::LocalOnly`]. Only a read caller (`read_fork_event_suffix`,
-/// publication `read_committed`, and, once #561 lands, Replay) passes
-/// [`Self::CodeTwoAware`].
-/// Making the local check origin-aware instead is forbidden by R6.9.
+/// Writes, issuance reads, and recovery reads require [`Self::LocalOnly`].
+/// Fork suffix reads, committed publication reads, and protected Replay
+/// accept either origin through [`Self::CodeTwoAware`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AuthorityValidatorV1 {
     /// Validator (a): `FAR1` origin exactly `Local`, an `FCC1` Fork-admission

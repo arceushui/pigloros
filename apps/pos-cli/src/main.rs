@@ -7,7 +7,7 @@
 //! Subcommands:
 //!   pos store init|info `<path>`
 //!   pos timeline list|fork|merge …
-//!   pos timeline replay|snapshot|compare … (currently unavailable)
+//!   pos timeline replay|snapshot|compare … (require CLI owner-verified evidence)
 //!   pos events log …
 //!   pos experiment run|verify|reproduce …
 //!   pos version
@@ -112,8 +112,7 @@ macro_rules! output_stderr {
 
 use pos_core::{clock::Seq, ids::TimelineId, plugin::Plugin, store::SeqRange};
 use pos_experiment::{ReproductionManifest, ReproductionRecipe, RunResult};
-// Only the generated reference fixture composes an Experiment until installed
-// registration returns with Wave 9 (#467/#462).
+// These imports support the generated reference fixture used by tests.
 #[cfg(test)]
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition};
 use pos_store::StoreConfig;
@@ -121,9 +120,8 @@ use ulid::Ulid;
 
 include!("host_store.rs");
 
-// Test-only. The shared Local erasure signing fixtures and the key-less root
-// store fixture of ADR-136 acceptance test 11 (#1450); the items are `pub`
-// so this crate may use a subset.
+// Test-only shared signing and key-less root store fixtures. The items are
+// `pub` so this crate may use a subset.
 #[cfg(target_os = "linux")]
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -169,9 +167,7 @@ fn builtin_output_binding<P: Plugin>(
     .map_err(Into::into)
 }
 
-/// Wave 8 has no installed EPF1, so installed registration fails closed even
-/// if an installed binding were resolved. #467/#462 restore the installed
-/// reference runner together with a real installed EPF1.
+/// Installed registration fails closed when no execution profile is installed.
 fn installed_registration_closed() -> Box<dyn std::error::Error> {
     pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
 }
@@ -570,17 +566,15 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-/// Resolve the reference Plugins' installed bindings.
-///
-/// Wave 8 has no installed EPF1, so the runner fails closed before any
-/// Experiment or registration exists.
+/// Run the reference Plugins with installed bindings. The runner fails closed
+/// before creating an Experiment when no execution profile is installed.
 fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::Error>> {
     let agent_plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
     let obs_plugin = pos_plugin_synthetic_obs::SyntheticObsPlugin::new();
     let obs_configuration = 1.0_f64.to_be_bytes();
     // Report the first binding error, or the closed installed-registration
     // error if both bindings resolve. This stays one combinator chain on
-    // purpose: in Wave 8 every installed binding fails, so `let ... ?;`
+    // purpose: every installed binding currently fails, so `let ... ?;`
     // bindings would leave the serialization error, the post-binding
     // continuations and the final closed error as unreachable LLVM regions.
     // `and` evaluates both bindings eagerly, so both are exercised either way.
@@ -606,8 +600,7 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
 }
 
 // This fixture never enters the installed-registration seam or creates a
-// production Plugin pin. The real CLI command above stays fail-closed until
-// the host catalogue has an operator-approved profile.
+// production Plugin pin. Installed runs require an operator-approved profile.
 #[cfg(test)]
 fn run_builtin_reference_experiment_fixture(
     store_config: StoreConfig,
@@ -940,10 +933,6 @@ fn parse_seq(s: &str) -> Result<Seq, Box<dyn std::error::Error>> {
         .map_err(|e| format!("invalid sequence number '{s}': {e}"))?;
     Ok(Seq::from_u64(n))
 }
-
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
