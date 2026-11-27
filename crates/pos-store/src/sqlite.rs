@@ -11410,7 +11410,8 @@ fn apply_sqlite_erasure_cas(
         insert_sqlite_index(conn, mutation.request(), *index)?;
     }
     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
-    erasure_fence_writers::write_erasure_fence_rows(conn, mutation)?;
+    let effect_cbor = erasure_fence_writers::fenced_effect_cbor(conn, mutation)?;
+    #[cfg(not(all(target_os = "linux", any(test, feature = "test-support"))))]
     let effect_cbor = mutation.effect().to_canonical_cbor()?;
     let effect_subject = mutation
         .effect()

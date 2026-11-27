@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 //! ADR-097 B6 writers: mirror the ADR-060 erasure lifecycle into fence rows.
 //!
-//! [`write_erasure_fence_rows`] runs inside the transaction of
+//! [`write_erasure_fence_rows`] runs, through [`fenced_effect_cbor`], inside the transaction of
 //! `apply_sqlite_erasure_cas`, so the rows commit or roll back together with
 //! the ERCRP1 manifest advance that proves them. A failed compare-and-swap
 //! therefore leaves no fence-row change, and an exact retry returns before
@@ -97,6 +97,17 @@ pub(super) fn write_erasure_fence_rows(
             FenceDisposition::Mirror(code) => mirror(conn, mutation, &request, code),
         }
     })
+}
+
+/// Write the fence rows, then encode the mutation's effect.
+///
+/// Wraps the effect encoding that `apply_sqlite_erasure_cas` already performs
+/// so the writer joins its existing fallible step.
+pub(super) fn fenced_effect_cbor(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    write_erasure_fence_rows(conn, mutation).and_then(|()| mutation.effect().to_canonical_cbor())
 }
 
 /// Set the request's rows to `code`, then add the rows this mutation creates.
