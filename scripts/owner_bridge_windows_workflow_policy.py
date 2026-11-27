@@ -44,7 +44,7 @@ foreach ($name in @('StorSvc', 'WSearch', 'SysMain', 'DiagTrack')) {
   }
 }
 if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-  $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+  $status = try { Get-MpComputerStatus -ErrorAction SilentlyContinue } catch { $null }
   $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
   $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
   $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
@@ -63,16 +63,17 @@ if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
       Sort-Object -Unique
   )
   $excluded = 0
-  try {
-    foreach ($path in $paths) {
+  $failed = 0
+  foreach ($path in $paths) {
+    try {
       Add-MpPreference -ExclusionPath $path
       $excluded++
+    } catch {
+      $failed++
     }
-    $state = if ($excluded -gt 0) { 'excluded' } else { 'none' }
-    Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper count=$excluded/$($paths.Count)"
-  } catch {
-    Write-Output "HOST_QUIESCE defender=unavailable rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
   }
+  $state = if ($excluded -gt 0 -and $failed -eq 0) { 'excluded' } elseif ($excluded -gt 0) { 'partial' } elseif ($failed -gt 0) { 'unavailable' } else { 'none' }
+  Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
 } else {
   Write-Output 'HOST_QUIESCE defender=absent'
 }
@@ -395,7 +396,7 @@ EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
     ],
 }
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '76935328a2729570fcd05fda1b70d76e22bef0797c866aaff3945f2b19d1e69d',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '2cbc294af7171fa31a8466f3c791f3bf16b67dd44a288d411ac71850562c70f2',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 

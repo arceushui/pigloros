@@ -32,7 +32,7 @@ pub(super) struct Session<'a> {
     // live browser, and a hung test would otherwise hold the step to its timeout.
     abandon: fn() -> !,
     // Bounded read-only stall snapshot emitted after the stall line is flushed.
-    on_stall: fn(&str, Option<u32>),
+    on_stall: fn(&str, &str),
 }
 
 impl<'a> Session<'a> {
@@ -45,7 +45,7 @@ impl<'a> Session<'a> {
             had_controller: Cell::new(false),
             retirement_bound: RETIREMENT_BOUND,
             abandon: std::process::abort,
-            on_stall: super::trace::report_stalled_processes,
+            on_stall: super::trace::report_process_snapshot,
         })
     }
 
@@ -99,7 +99,7 @@ impl<'a> Session<'a> {
         );
         let _flushed_or_unavailable = stderr.flush();
         drop(stderr);
-        (self.on_stall)("retirement-stalled", None);
+        (self.on_stall)("NATIVE_STALL_PROCESSES", "retirement-stalled");
     }
 }
 
@@ -367,9 +367,9 @@ mod tests {
             static ABANDONED: Cell<bool> = const { Cell::new(false) };
             static STALL_REPORTED: Cell<bool> = const { Cell::new(false) };
         }
-        fn record_stall(context: &str, pid: Option<u32>) {
+        fn record_stall(tag: &str, context: &str) {
+            assert_eq!(tag, "NATIVE_STALL_PROCESSES");
             assert_eq!(context, "retirement-stalled");
-            assert!(pid.is_none());
             assert!(!ABANDONED.with(Cell::get));
             STALL_REPORTED.with(|reported| reported.set(true));
         }

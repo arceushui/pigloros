@@ -87,7 +87,7 @@ jobs:
             }
           }
           if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-            $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+            $status = try { Get-MpComputerStatus -ErrorAction SilentlyContinue } catch { $null }
             $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
             $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
             $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
@@ -106,16 +106,17 @@ jobs:
                 Sort-Object -Unique
             )
             $excluded = 0
-            try {
-              foreach ($path in $paths) {
+            $failed = 0
+            foreach ($path in $paths) {
+              try {
                 Add-MpPreference -ExclusionPath $path
                 $excluded++
+              } catch {
+                $failed++
               }
-              $state = if ($excluded -gt 0) { 'excluded' } else { 'none' }
-              Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper count=$excluded/$($paths.Count)"
-            } catch {
-              Write-Output "HOST_QUIESCE defender=unavailable rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
             }
+            $state = if ($excluded -gt 0 -and $failed -eq 0) { 'excluded' } elseif ($excluded -gt 0) { 'partial' } elseif ($failed -gt 0) { 'unavailable' } else { 'none' }
+            Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
           } else {
             Write-Output 'HOST_QUIESCE defender=absent'
           }
@@ -347,7 +348,7 @@ jobs:
             }
           }
           if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-            $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+            $status = try { Get-MpComputerStatus -ErrorAction SilentlyContinue } catch { $null }
             $rtp = if ($status) { $status.RealTimeProtectionEnabled } else { 'unknown' }
             $tamper = if ($status) { $status.IsTamperProtected } else { 'unknown' }
             $fso = try { New-Object -ComObject Scripting.FileSystemObject } catch { $null }
@@ -366,16 +367,17 @@ jobs:
                 Sort-Object -Unique
             )
             $excluded = 0
-            try {
-              foreach ($path in $paths) {
+            $failed = 0
+            foreach ($path in $paths) {
+              try {
                 Add-MpPreference -ExclusionPath $path
                 $excluded++
+              } catch {
+                $failed++
               }
-              $state = if ($excluded -gt 0) { 'excluded' } else { 'none' }
-              Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper count=$excluded/$($paths.Count)"
-            } catch {
-              Write-Output "HOST_QUIESCE defender=unavailable rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
             }
+            $state = if ($excluded -gt 0 -and $failed -eq 0) { 'excluded' } elseif ($excluded -gt 0) { 'partial' } elseif ($failed -gt 0) { 'unavailable' } else { 'none' }
+            Write-Output "HOST_QUIESCE defender=$state rtp=$rtp tamper=$tamper excluded=$excluded/$($paths.Count)"
           } else {
             Write-Output 'HOST_QUIESCE defender=absent'
           }
