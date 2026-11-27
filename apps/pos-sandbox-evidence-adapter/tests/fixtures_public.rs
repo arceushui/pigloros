@@ -33,8 +33,9 @@ use pos_sandbox_evidence_adapter::probe::{
 use pos_sandbox_evidence_adapter::{
     apply, exit_code, run, AdapterRunError, After, Fixture, Mode, MODES,
 };
+use rustix::io::Errno;
 use rustix::net::{AddressFamily, SocketType};
-use rustix::process::{kill_process, waitpid, Pid, Signal, WaitOptions};
+use rustix::process::{kill_process, waitpid, Pid, Signal, WaitOptions, WaitStatus};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -637,18 +638,58 @@ fn process_state(pid: u32) -> Option<char> {
     stat.rsplit_once(')')?.1.trim_start().chars().next()
 }
 
-/// Reap `pid`, a child of this process, after killing it: it is then gone,
-/// not a zombie.
+/// Wait for the child `pid`, again if a signal interrupted the wait.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn kill_and_reap(pid: u32) -> TestResult {
-    let target = i32::try_from(pid)
-        .ok()
-        .and_then(Pid::from_raw)
-        .ok_or("pid")?;
-    kill_process(target, Signal::KILL)?;
-    assert!(waitpid(Some(target), WaitOptions::empty())?.is_some());
-    assert_eq!(process_state(pid), None);
-    Ok(())
+fn wait_for(pid: Pid) -> TestResult<WaitStatus> {
+    loop {
+        match waitpid(Some(pid), WaitOptions::empty()) {
+            Err(Errno::INTR) => {}
+            other => {
+                return other?
+                    .map(|(_, status)| status)
+                    .ok_or_else(|| "no wait status".into())
+            }
+        }
+    }
+}
+
+/// A child of this process that must not outlive the test, however the test
+/// ends: dropping it kills and reaps it, ignoring errors there.
+struct Orphan(Option<(u32, Pid)>);
+
+impl Orphan {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn of(raw: u32) -> TestResult<Self> {
+        let pid = i32::try_from(raw)
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or("pid")?;
+        Ok(Self(Some((raw, pid))))
+    }
+
+    /// Kill the child and reap it, which shows death by SIGKILL and leaves
+    /// no process behind, not even a zombie.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn kill_and_reap(&mut self) -> TestResult {
+        let (raw, pid) = self.0.ok_or("already reaped")?;
+        kill_process(pid, Signal::KILL)?;
+        let status = wait_for(pid)?;
+        // Signal 9 is SIGKILL.
+        assert_eq!(status.terminating_signal(), Some(9));
+        assert_eq!(process_state(raw), None);
+        self.0 = None;
+        Ok(())
+    }
+}
+
+impl Drop for Orphan {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn drop(&mut self) {
+        if let Some((_, pid)) = self.0.take() {
+            kill_process(pid, Signal::KILL).ok();
+            wait_for(pid).ok();
+        }
+    }
 }
 
 /// Kill `pid`, which is not a child of this process (its parent exited, so
@@ -699,12 +740,13 @@ fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
 
     // Directly: the orphan is a child of this process, left running.
     let direct = leave_orphan(Path::new(BINARY), &attempt()?).ok_or("no orphan")?;
+    let mut guard = Orphan::of(direct)?;
     assert!(matches!(process_state(direct), Some('S' | 'R')));
     assert_eq!(
         fs::read(format!("/proc/{direct}/cmdline"))?,
         format!("{BINARY}\0idle\0600000\0").into_bytes()
     );
-    kill_and_reap(direct)?;
+    guard.kill_and_reap()?;
     // An executable that cannot start leaves nothing.
     assert_eq!(
         leave_orphan(Path::new("/nonexistent/adapter"), &attempt()?),
