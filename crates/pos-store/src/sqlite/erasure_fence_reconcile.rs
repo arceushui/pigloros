@@ -62,11 +62,6 @@ const MIRRORED: [ErasureLifecycleV1; 5] = [
     ErasureLifecycleV1::PartialFailure,
 ];
 
-/// The longest simple path of ADR-060 edges among the mirrored lifecycles
-/// (`AccessFrozen`, `DestructionDispatched`, `AwaitingAcknowledgements`,
-/// `PartialFailure`, `Complete`); `PartialFailure` also loops on itself.
-const MAX_EDGES: u8 = 4;
-
 /// A stored row's key: the canonical Timeline text and the 32-byte request.
 type RowKey = (String, Vec<u8>);
 
@@ -105,66 +100,58 @@ fn lifecycle_of(code: i64) -> Option<ErasureLifecycleV1> {
         .find(|lifecycle| code_of(*lifecycle) == code)
 }
 
-/// Whether the forward edges lead from `from` to `to` in at most `edges` steps.
-fn reaches(from: ErasureLifecycleV1, to: ErasureLifecycleV1, edges: u8) -> bool {
+/// Whether the forward edges lead from `from` to `to` among the mirrored
+/// lifecycles.
+///
+/// The only cycle in ADR-060's edges is `PartialFailure` looping on itself, so
+/// skipping a self edge makes every walk strictly forward and the recursion
+/// finite without a depth bound.
+fn reaches(from: ErasureLifecycleV1, to: ErasureLifecycleV1) -> bool {
     from == to
-        || (edges > 0
-            && MIRRORED
-                .iter()
-                .any(|next| from.permits(*next) && reaches(*next, to, edges - 1)))
+        || MIRRORED
+            .iter()
+            .any(|next| *next != from && from.permits(*next) && reaches(*next, to))
 }
 
 /// The Timelines of a frozen request: its scope and its ERSE1 children.
-fn frozen_timelines(
-    state: &ErasureVerifiedStateV1,
-) -> Result<Vec<TimelineId>, ErasureFenceReconcileErrorV1> {
+///
+/// A verified frozen request always carries its scope, so the scope Timelines
+/// are read as a sequence rather than as a fallible lookup.
+fn frozen_timelines(state: &ErasureVerifiedStateV1) -> Vec<TimelineId> {
     state
         .scope()
-        .ok_or(ErasureFenceReconcileErrorV1::Contradictory)
-        .map(|scope| {
-            scope
-                .scope_timeline_ids()
+        .into_iter()
+        .flat_map(|scope| scope.scope_timeline_ids().iter().copied())
+        .chain(
+            state
+                .scope_extensions()
                 .iter()
-                .copied()
-                .chain(
-                    state
-                        .scope_extensions()
-                        .iter()
-                        .map(pos_core::ErasureScopeExtensionV1::child_timeline),
-                )
-                .collect()
-        })
+                .map(pos_core::ErasureScopeExtensionV1::child_timeline),
+        )
+        .collect()
 }
 
-fn add_state(
-    mut plan: Expectation,
-    state: &ErasureVerifiedStateV1,
-) -> Result<Expectation, ErasureFenceReconcileErrorV1> {
+fn add_state(mut plan: Expectation, state: &ErasureVerifiedStateV1) -> Expectation {
     let request = state.request().reference().digest().to_vec();
     match state.lifecycle() {
-        ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => Ok(plan),
+        ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => {}
         ErasureLifecycleV1::Rejected => {
             plan.cleared.insert(request);
-            Ok(plan)
         }
-        mirrored => frozen_timelines(state).map(|timelines| {
+        mirrored => {
             let code = code_of(mirrored);
             plan.expected.extend(
-                timelines
+                frozen_timelines(state)
                     .into_iter()
                     .map(|timeline| ((timeline.to_string(), request.clone()), code)),
             );
-            plan
-        }),
+        }
     }
+    plan
 }
 
-fn expectation(
-    inventory: &ErasureVerifiedInventoryV1,
-) -> Result<Expectation, ErasureFenceReconcileErrorV1> {
-    inventory
-        .states()
-        .try_fold(Expectation::default(), add_state)
+fn expectation(inventory: &ErasureVerifiedInventoryV1) -> Expectation {
+    inventory.states().fold(Expectation::default(), add_state)
 }
 
 fn read_heads(conn: &Connection) -> rusqlite::Result<BTreeMap<Vec<u8>, Vec<u8>>> {
@@ -229,7 +216,7 @@ fn require_explained(
             |want| {
                 lifecycle_of(*code)
                     .zip(lifecycle_of(*want))
-                    .filter(|(from, to)| reaches(*from, *to, MAX_EDGES))
+                    .filter(|(from, to)| reaches(*from, *to))
                     .map(|_| ())
                     .ok_or(ErasureFenceReconcileErrorV1::Contradictory)
             },
@@ -237,12 +224,9 @@ fn require_explained(
     })
 }
 
-/// Delete the Rejected requests' rows, then insert or change the rest.
-fn apply(
-    conn: &Connection,
-    stored: &BTreeMap<RowKey, i64>,
-    plan: &Expectation,
-) -> rusqlite::Result<()> {
+/// Delete the Rejected requests' rows, then upsert every expected row. The
+/// upsert is idempotent, so rows that already match are simply rewritten.
+fn apply(conn: &Connection, plan: &Expectation) -> rusqlite::Result<()> {
     plan.cleared
         .iter()
         .try_for_each(|request| {
@@ -252,7 +236,6 @@ fn apply(
         .and_then(|()| {
             plan.expected
                 .iter()
-                .filter(|&(key, code)| stored.get(key) != Some(code))
                 .try_for_each(|((timeline, request), code)| {
                     conn.execute(UPSERT_SQL, params![timeline, request.as_slice(), code])
                         .map(|_| ())
@@ -265,11 +248,11 @@ fn reconcile(
     inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<(), ErasureFenceReconcileErrorV1> {
     require_current_heads(conn, inventory)
-        .and_then(|()| expectation(inventory))
+        .map(|()| expectation(inventory))
         .and_then(|plan| {
             read_rows(conn).map_err(unreadable).and_then(|stored| {
                 require_explained(&stored, &plan)
-                    .and_then(|()| apply(conn, &stored, &plan).map_err(unreadable))
+                    .and_then(|()| apply(conn, &plan).map_err(unreadable))
             })
         })
 }
