@@ -80,6 +80,26 @@ pub enum NetlinkError {
     /// Provider-owned network state remained after it was removed.
     #[error("provider network state remained after its removal")]
     Residual,
+    /// Every bracketed read of the nftables ruleset was torn by a change.
+    #[error("every bracketed read of the nftables ruleset was torn by a change")]
+    Torn,
+}
+
+impl NetlinkError {
+    /// Whether the exchange failed in transit (ADR-069 R14 §3.2 error
+    /// classes): a socket error other than a missing object, including a
+    /// receive timeout and a failed `setns`, a dump still interrupted after
+    /// [`consistent`]'s three reads, and three torn nftables reads. Every
+    /// other failure, a missing object among them, means the kernel answered
+    /// with other state.
+    #[must_use]
+    pub fn is_transport(&self) -> bool {
+        match self {
+            Self::Io(errno) => *errno != Errno::NOENT,
+            Self::Interrupted | Self::Torn => true,
+            _ => false,
+        }
+    }
 }
 
 /// One netlink socket: whole datagrams out, whole datagrams in.

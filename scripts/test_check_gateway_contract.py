@@ -52,11 +52,13 @@ def problem_code(baseline: dict) -> dict:
 UNROUTED_PATHS = Path(__file__).resolve().parent / "data/gateway_unrouted_paths.json"
 TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
-PREVIEWS = "/v1/decision-previews"
-# A Draft read whose family has both a positive and a fail-closed example.
-PREVIEW = "/v1/decision-previews/{preview_id}"
-# A Draft creation that answers `201`.
+# A Draft creation that answers `201`, of a family that stays Draft (#306): its tests keep a
+# Draft subject now that the Decision Preview routes are served (#305, ADR-140 section 9).
 PREVIEW_ACTIONS = "/v1/decision-previews/{preview_id}/actions"
+# A Draft admission that answers `202` (#307).
+ENSEMBLES = "/v1/decision-previews/{preview_id}/ensembles"
+# A Draft read that answers an enveloped resource (#308).
+PREVIEW_EVIDENCE = "/v1/decision-previews/{preview_id}/evidence"
 
 
 def example(name: str) -> dict:
@@ -264,36 +266,38 @@ class CheckGatewayContractTest(unittest.TestCase):
         examples = [
             (name, item)
             for name, item in checker.load_examples()
-            if item["operation_id"] not in ("createDecisionPreview", "getDecisionPreview")
+            if item["operation_id"] != "submitSimulatedAction"
             or item["response"]["status"] < 400
         ]
-        with self.assertRaisesRegex(checker.ContractError, "family decision-preview"):
+        with self.assertRaisesRegex(checker.ContractError, "family simulated-action"):
             checker.check_examples(contract(), examples)
 
     def test_a_draft_mutation_without_an_idempotency_key_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREVIEWS]["post"]["parameters"] = []
+        document["paths"][PREVIEW_ACTIONS]["post"]["parameters"] = [
+            {"$ref": "#/components/parameters/PreviewId"}
+        ]
         with self.assertRaisesRegex(checker.ContractError, "requires Idempotency-Key"):
             checker.check_description(contract(document=document))
 
     def test_an_admission_that_does_not_answer_the_receipt_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"][PREVIEWS]["post"]["responses"]["202"]["content"]
-        answer["application/json"]["schema"] = {"$ref": "#/components/schemas/DecisionPreview"}
+        answer = document["paths"][ENSEMBLES]["post"]["responses"]["202"]["content"]
+        answer["application/json"]["schema"] = {"$ref": "#/components/schemas/Ensemble"}
         with self.assertRaisesRegex(checker.ContractError, "admission receipt"):
             checker.check_description(contract(document=document))
 
     def test_a_draft_operation_must_be_structurally_draft(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["paths"][PREVIEW]["get"]["x-pigloros-owner"]
+        del document["paths"][PREVIEW_ACTIONS]["post"]["x-pigloros-owner"]
         with self.assertRaisesRegex(checker.ContractError, "owner ticket"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREVIEW]["get"]["description"] = "Read the preview."
+        document["paths"][PREVIEW_ACTIONS]["post"]["description"] = "Submit an action."
         with self.assertRaisesRegex(checker.ContractError, "does not start with Draft"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREVIEW]["get"]["tags"] = []
+        document["paths"][PREVIEW_ACTIONS]["post"]["tags"] = []
         with self.assertRaisesRegex(checker.ContractError, "one family tag"):
             checker.check_description(contract(document=document))
 
@@ -305,7 +309,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_read_answers_an_enveloped_resource(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"][PREVIEW]["get"]["responses"]["200"]["content"]
+        answer = document["paths"][PREVIEW_EVIDENCE]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
             "$ref": "#/components/schemas/CommittedEventReceipt"
         }
@@ -316,14 +320,14 @@ class CheckGatewayContractTest(unittest.TestCase):
         document = copy.deepcopy(DOCUMENT)
         answer = document["paths"]["/health"]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
-            "$ref": "#/components/schemas/DecisionPreview"
+            "$ref": "#/components/schemas/PreviewEvidence"
         }
         with self.assertRaisesRegex(checker.ContractError, "served operations reach the Draft"):
             checker.check_description(contract(document=document))
 
     def test_a_draft_operation_reaching_an_unmarked_schema_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["components"]["schemas"]["DecisionPreview"]["x-pigloros-maturity"]
+        del document["components"]["schemas"]["SimulatedActionRequest"]["x-pigloros-maturity"]
         with self.assertRaisesRegex(checker.ContractError, "neither Draft nor served"):
             checker.check_description(contract(document=document))
 
@@ -693,7 +697,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_an_admission_receipt_never_claims_a_commit(self) -> None:
         subject = contract()
-        receipt = example("draft-decision-preview-admitted")["response"]["body"]
+        receipt = example("decision-preview-admitted")["response"]["body"]
         schema = {"$ref": "#/components/schemas/AdmissionReceipt"}
         self.assertEqual(subject.schema_errors(receipt, schema), [])
         self.assertTrue(subject.schema_errors({**receipt, "state": "committed"}, schema))
@@ -711,14 +715,40 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_a_preview_names_a_commit_exactly_after_committing(self) -> None:
         subject = contract()
         schema = {"$ref": "#/components/schemas/DecisionPreview"}
-        committed = example("draft-decision-preview-committed")["response"]["body"]
-        admitted = example("draft-decision-preview-admitted-not-committed")["response"]["body"]
-        self.assertEqual(subject.schema_errors(committed, schema), [])
-        self.assertEqual(subject.schema_errors(admitted, schema), [])
+        committed = example("decision-preview-committed")["response"]["body"]
+        admitted = example("decision-preview-admitted-not-committed")["response"]["body"]
+        failed = example("decision-preview-failed")["response"]["body"]
+        degraded = example("decision-preview-degraded")["response"]["body"]
+        for body in (committed, admitted, failed, degraded):
+            self.assertEqual(subject.schema_errors(body, schema), [])
         for state in ("admitted", "failed"):
             self.assertTrue(subject.schema_errors({**committed, "state": state}, schema))
         for state in ("committed", "projected", "complete", "exported", "degraded"):
             self.assertTrue(subject.schema_errors({**admitted, "state": state}, schema))
+        # `failure` is an object exactly when the preview failed (ADR-140 P27).
+        code = {"code": "input-deleted"}
+        self.assertTrue(subject.schema_errors({**failed, "failure": None}, schema))
+        self.assertTrue(subject.schema_errors({**admitted, "failure": code}, schema))
+        self.assertTrue(subject.schema_errors({**failed, "failure": {"code": "Deleted"}}, schema))
+        # `failure`, `uncertainty` and `calibration` are guaranteed members.
+        for member in ("failure", "uncertainty", "calibration"):
+            missing = {key: value for key, value in committed.items() if key != member}
+            self.assertTrue(subject.schema_errors(missing, schema), member)
+        # A degraded preview withholds its Recommendation; `withheld` is the fourth variant, so
+        # the served `options_per_spec` pointer keeps naming the computed one.
+        self.assertEqual(degraded["recommendation"], {"status": "withheld"})
+        self.assertEqual(
+            checker.pointer(
+                DOCUMENT,
+                "/components/schemas/DecisionPreview/properties/recommendation/oneOf/3"
+                "/properties/status/const",
+            ),
+            "withheld",
+        )
+        # Calibration is never presented as a calibrated prediction.
+        self.assertEqual(
+            committed["calibration"], {"status": "unavailable", "reason": "no-resolved-predictions"}
+        )
 
     def test_a_degraded_resource_never_claims_exact(self) -> None:
         subject = contract()
@@ -785,8 +815,8 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_draft_values_are_bounded_integers(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        reference = document["components"]["schemas"]["RevisionRef"]["properties"]
-        del reference["revision"]["maximum"]
+        reactions = document["components"]["schemas"]["PreviewEvidence"]["properties"]["reactions"]
+        del reactions["items"]["properties"]["seq"]["maximum"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)

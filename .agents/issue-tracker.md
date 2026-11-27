@@ -13,7 +13,10 @@ Use `curl -H "X-Redmine-API-Key: $KEY"` for direct API access when MCP is unavai
 - **List issues**: `GET /projects/pigloros/issues.json?status_id=open&limit=25`
 - **Comment on an issue**: `PUT /issues/<number>.json` with `{ "issue": { "notes": "..." } }`
 - **Apply a label/status**: `PUT /issues/<number>.json` with `{ "issue": { "status_id": <id> } }`
-- **Close**: `PUT /issues/<number>.json` with `{ "issue": { "status_id": 5 } }` (status 5 = Closed in default Redmine)
+- **Lifecycle**: use the configured names and allowed transitions through
+  [start-work](skills/start-work/SKILL.md). Resolve completed implementation work
+  against its delivered artifact; do not assume default status IDs or use
+  administrative closure as implementation completion.
 
 ## When a skill says "publish to the issue tracker"
 
@@ -36,4 +39,5 @@ Used by `/wayfinder`. The **map** is a Redmine issue with child issues as ticket
 - **Child ticket**: a Redmine issue with `parent_issue_id` set to the map issue number.
 - **Blocking**: set relation via `POST /issues/<n>/relations.json` with `{ "relation": { "issue_to_id": <depends-on>, "relation_type": "blocks" } }`. Example: `#116 blocks #117` → `POST /issues/116/relations.json` with `"issue_to_id": 117, "relation_type": "blocks"`.
 - **Claim**: `PUT /issues/<n>.json` with `{ "issue": { "assigned_to_id": "me" } }`
-- **Resolve**: add a journal note with the answer, then close the issue.
+- **Resolve**: journal the answer and its required evidence, apply the configured
+  resolution transition, and read the stored status and note back.

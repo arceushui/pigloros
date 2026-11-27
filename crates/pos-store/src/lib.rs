@@ -114,6 +114,8 @@ pub mod owner_store_admission;
 pub mod owner_store_installation;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod owner_store_interlock;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod owner_store_mode_lock;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
 #[cfg(target_os = "linux")]
