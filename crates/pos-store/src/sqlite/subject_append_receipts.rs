@@ -22,9 +22,9 @@
 
 use std::{
     fmt,
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, Permissions},
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
 };
 
@@ -172,24 +172,20 @@ pub fn subject_append_request_digest(
     predecessor: Option<EventId>,
     request_mac: &[u8; 32],
 ) -> Result<[u8; 32], SubjectAppendReceiptRefusalV1> {
+    let owner =
+        subject_owner_id(subject).map_err(|_| SubjectAppendReceiptRefusalV1::InvalidRequest)?;
     subject_data_public_header(subject, field_tag)
-        .map(|_| {
-            let owner = format!(
-                "subject:{:032x}",
-                u128::from_be_bytes(subject.inner().to_bytes())
-            );
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(REQUEST_DIGEST_DOMAIN);
-            hasher.update(owner.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(&timeline.inner().to_bytes());
-            hasher.update(field_tag.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(&predecessor.map_or([0; 16], |event| event.inner().to_bytes()));
-            hasher.update(request_mac);
-            *hasher.finalize().as_bytes()
-        })
-        .map_err(|_| SubjectAppendReceiptRefusalV1::InvalidRequest)
+        .map_err(|_| SubjectAppendReceiptRefusalV1::InvalidRequest)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(REQUEST_DIGEST_DOMAIN);
+    hasher.update(owner.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&timeline.inner().to_bytes());
+    hasher.update(field_tag.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&predecessor.map_or([0; 16], |event| event.inner().to_bytes()));
+    hasher.update(request_mac);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Look up the receipt for `operation_key` against the request's digest.
@@ -302,9 +298,11 @@ pub fn purge_expired_subject_append_receipts(
 
 /// The owner append-MAC key: 32 random bytes held for the process lifetime.
 ///
-/// It is never logged and is wiped on drop. It confers no authority and
-/// protects no confidentiality beyond the receipt's request MAC.
-pub struct SubjectAppendMacKeyV1([u8; 32]);
+/// It is never logged and is wiped on drop. The bytes live in one heap box so
+/// that moving the key never leaves a stack copy behind, and every load or
+/// create fills that box in place. It confers no authority and protects no
+/// confidentiality beyond the receipt's request MAC.
+pub struct SubjectAppendMacKeyV1(Box<[u8; 32]>);
 
 impl fmt::Debug for SubjectAppendMacKeyV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -319,53 +317,75 @@ impl Drop for SubjectAppendMacKeyV1 {
 }
 
 type Entropy = fn(&mut [u8]) -> Result<(), ()>;
+type KeyReader = fn(&Path, u32, &mut [u8; 32]) -> io::Result<()>;
+type KeyPersister = fn(&mut File, &[u8; 32]) -> io::Result<()>;
 
 fn system_entropy(bytes: &mut [u8]) -> Result<(), ()> {
     SysRng.try_fill_bytes(bytes).map_err(|_| ())
+}
+
+/// The effects of key custody, injectable so each failure can be pinned.
+struct KeyIo {
+    euid: u32,
+    fill: Entropy,
+    read: KeyReader,
+    persist: KeyPersister,
 }
 
 impl SubjectAppendMacKeyV1 {
     /// Load the key file in `directory`, creating it when missing or corrupt.
     ///
     /// The caller holds the E16 lifetime lock on the already admitted state
-    /// directory (ADR-137 A2). A file that is not a regular `0600` file with
-    /// one link, owned by the current effective user and exactly 32 bytes
-    /// long is corrupt: its entry is removed and a new key is created with
-    /// `O_EXCL`, `0600`, no-follow, and a file plus directory sync. Retries of
-    /// receipts made under a lost key then answer `OperationConflict`.
+    /// directory (ADR-137 A2). A missing file is created. A file that is not
+    /// a regular `0600` file with one link, owned by the current effective
+    /// user and exactly 32 bytes long is corrupt: its entry is removed and a
+    /// new key is created with `O_EXCL`, `0600` (forced with `fchmod`, so a
+    /// restrictive umask cannot weaken it), no-follow, and a file plus
+    /// directory sync. Retries of receipts made under a lost key then answer
+    /// `OperationConflict`. Any other read failure (descriptor exhaustion, an
+    /// I/O error, a permission error) leaves the file untouched.
     ///
     /// # Errors
-    /// Returns [`SubjectAppendReceiptRefusalV1::KeyUnavailable`] when the
-    /// entry cannot be removed or the new key cannot be created durably.
+    /// Returns [`SubjectAppendReceiptRefusalV1::KeyUnavailable`] when the key
+    /// cannot be read for a reason other than absence or corruption, when the
+    /// corrupt entry cannot be removed, or when the new key cannot be created
+    /// durably. A new file whose write or sync failed is removed again.
     pub fn load_or_create(directory: &Path) -> Result<Self, SubjectAppendReceiptRefusalV1> {
         Self::load_or_create_with(
             directory,
-            rustix::process::geteuid().as_raw(),
-            system_entropy,
+            &KeyIo {
+                euid: rustix::process::geteuid().as_raw(),
+                fill: system_entropy,
+                read: read_key_file,
+                persist: persist_key,
+            },
         )
     }
 
     fn load_or_create_with(
         directory: &Path,
-        euid: u32,
-        fill: Entropy,
+        io: &KeyIo,
     ) -> Result<Self, SubjectAppendReceiptRefusalV1> {
         let path = directory.join(APPEND_MAC_KEY_FILE_NAME);
-        match read_key_file(&path, euid) {
-            Ok(key) => Ok(Self(key)),
-            Err(error) => {
-                let cleared =
-                    error.kind() == io::ErrorKind::NotFound || std::fs::remove_file(&path).is_ok();
-                if cleared {
-                    create_key_file(directory, &path, fill).map(Self)
-                } else {
-                    Err(SubjectAppendReceiptRefusalV1::KeyUnavailable)
-                }
+        let mut key = Self(Box::new([0; 32]));
+        match (io.read)(&path, io.euid, &mut key.0) {
+            Ok(()) => Ok(key),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_key_file(directory, &path, io, &mut key.0).map(|()| key)
             }
+            Err(error) if is_corrupt_key(&error) => std::fs::remove_file(&path)
+                .map_err(|_| SubjectAppendReceiptRefusalV1::KeyUnavailable)
+                .and_then(|()| create_key_file(directory, &path, io, &mut key.0))
+                .map(|()| key),
+            Err(_) => Err(SubjectAppendReceiptRefusalV1::KeyUnavailable),
         }
     }
 
     /// The A2 request MAC: keyed BLAKE3 over `domain || field_tag || 0x00 || plaintext`.
+    ///
+    /// The `0x00` after the variable-length `field_tag` is an addition to the
+    /// ADR-137 A2 text (`domain || field_tag || plaintext`), which is
+    /// ambiguous between tag and plaintext. It needs an ADR erratum.
     #[must_use]
     pub fn request_mac(&self, field_tag: &str, plaintext: &[u8]) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new_keyed(&self.0);
@@ -377,8 +397,20 @@ impl SubjectAppendMacKeyV1 {
     }
 }
 
-/// Read and admit the key file, refusing symlinks, devices and wrong shapes.
-fn read_key_file(path: &Path, euid: u32) -> io::Result<[u8; 32]> {
+/// Whether a read failure means the key file has a wrong shape.
+///
+/// A wrong mode, owner, link count or length reads as `InvalidData`, a file
+/// that shrank mid-read as `UnexpectedEof`, and a symlink refused by
+/// `O_NOFOLLOW` as `ELOOP`. Everything else is not evidence of corruption.
+fn is_corrupt_key(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    ) || error.raw_os_error() == Some(libc::ELOOP)
+}
+
+/// Read and admit the key file into `key`, refusing symlinks, devices and wrong shapes.
+fn read_key_file(path: &Path, euid: u32, key: &mut [u8; 32]) -> io::Result<()> {
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -390,8 +422,7 @@ fn read_key_file(path: &Path, euid: u32) -> io::Result<[u8; 32]> {
                     && metadata.nlink() == 1
                     && metadata.len() == 32
                 {
-                    let mut key = [0; 32];
-                    file.read_exact(&mut key).map(|()| key)
+                    file.read_exact(key)
                 } else {
                     Err(io::ErrorKind::InvalidData.into())
                 }
@@ -399,29 +430,47 @@ fn read_key_file(path: &Path, euid: u32) -> io::Result<[u8; 32]> {
         })
 }
 
-/// Fill a new key and store it durably under the reserved name.
+/// Force `0600` regardless of the umask, then write and sync the key bytes.
+fn persist_key(file: &mut File, key: &[u8; 32]) -> io::Result<()> {
+    file.set_permissions(Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(key))
+        .and_then(|()| file.sync_all())
+}
+
+/// Fill a new key in place and store it durably under the reserved name.
+///
+/// A file whose permission, write or sync step failed is unlinked at once so
+/// a partial key is never left under the reserved name.
 fn create_key_file(
     directory: &Path,
     path: &Path,
-    fill: Entropy,
-) -> Result<[u8; 32], SubjectAppendReceiptRefusalV1> {
-    let mut key = [0; 32];
-    let stored = fill(&mut key).ok().and_then(|()| {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-            .and_then(|mut file| file.write_all(&key).and_then(|()| file.sync_all()))
-            .and_then(|()| File::open(directory).and_then(|handle| handle.sync_all()))
-            .ok()
-    });
-    if stored.is_none() {
-        key.zeroize();
-        return Err(SubjectAppendReceiptRefusalV1::KeyUnavailable);
-    }
-    Ok(key)
+    io: &KeyIo,
+    key: &mut [u8; 32],
+) -> Result<(), SubjectAppendReceiptRefusalV1> {
+    (io.fill)(key)
+        .ok()
+        .and_then(|()| {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .ok()
+        })
+        .and_then(|mut file| {
+            let stored = (io.persist)(&mut file, key).is_ok();
+            if !stored {
+                drop(std::fs::remove_file(path));
+            }
+            stored.then_some(())
+        })
+        .and_then(|()| {
+            File::open(directory)
+                .and_then(|handle| handle.sync_all())
+                .ok()
+        })
+        .ok_or(SubjectAppendReceiptRefusalV1::KeyUnavailable)
 }
 
 impl SqliteStore {

@@ -2,7 +2,8 @@
 //! request digest and MAC, and the append-MAC key file custody.
 
 use std::{
-    fs,
+    fs::{self, File},
+    io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
 };
@@ -11,14 +12,15 @@ use pos_core::{
     ids::{EntityId, EventId, TimelineId},
     WallTime, APPEND_IDENTITY_RETENTION_MICROS,
 };
+use pos_crypto::subject_key::subject_owner_id;
 use rusqlite::{params, types::Value, Connection};
 use ulid::Ulid;
 
 use super::{
-    insert_subject_append_receipt, lookup_subject_append_receipt,
-    purge_expired_subject_append_receipts, subject_append_request_digest, SubjectAppendMacKeyV1,
-    SubjectAppendReceiptLookupV1, SubjectAppendReceiptRefusalV1, SubjectAppendReceiptV1,
-    APPEND_MAC_KEY_FILE_NAME,
+    insert_subject_append_receipt, lookup_subject_append_receipt, persist_key,
+    purge_expired_subject_append_receipts, read_key_file, subject_append_request_digest, KeyIo,
+    KeyPersister, KeyReader, SubjectAppendMacKeyV1, SubjectAppendReceiptLookupV1,
+    SubjectAppendReceiptRefusalV1, SubjectAppendReceiptV1, APPEND_MAC_KEY_FILE_NAME,
 };
 use crate::sqlite::SqliteStore;
 
@@ -321,13 +323,7 @@ fn an_insert_stores_the_owner_event_and_retention_expiry() -> TestResult {
         params![KEY_A.as_slice()],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
-    assert_eq!(
-        owner,
-        format!(
-            "subject:{:032x}",
-            u128::from_be_bytes(stored.subject.inner().to_bytes())
-        )
-    );
+    assert_eq!(owner, subject_owner_id(stored.subject)?);
     assert_eq!(digest, DIGEST_A);
     assert_eq!(event, stored.event_id.to_string());
     assert_eq!(
@@ -432,13 +428,7 @@ fn the_request_digest_is_the_documented_blake3_preimage() -> TestResult {
     let predecessor = EventId::new();
     let mac = [0x5a; 32];
     let mut preimage = b"pigloros/subject-data-append-request/v1\0".to_vec();
-    preimage.extend(
-        format!(
-            "subject:{:032x}",
-            u128::from_be_bytes(subject.inner().to_bytes())
-        )
-        .bytes(),
-    );
+    preimage.extend(subject_owner_id(subject)?.bytes());
     preimage.push(0);
     preimage.extend(timeline.inner().to_bytes());
     preimage.extend(b"weights");
@@ -539,6 +529,23 @@ fn the_request_digest_refuses_a_nil_subject_and_a_bad_field_tag() {
     assert!(digest_of(EntityId::new(), timeline, &"a".repeat(128), None, &mac).is_ok());
 }
 
+fn key_io(euid: u32, fill: super::Entropy) -> KeyIo {
+    KeyIo {
+        euid,
+        fill,
+        read: read_key_file,
+        persist: persist_key,
+    }
+}
+
+fn load_with(
+    directory: &Path,
+    euid: u32,
+    fill: super::Entropy,
+) -> Result<SubjectAppendMacKeyV1, SubjectAppendReceiptRefusalV1> {
+    SubjectAppendMacKeyV1::load_or_create_with(directory, &key_io(euid, fill))
+}
+
 fn key_path(directory: &Path) -> std::path::PathBuf {
     directory.join(APPEND_MAC_KEY_FILE_NAME)
 }
@@ -567,7 +574,7 @@ fn write_key(path: &Path, bytes: &[u8], mode: u32) -> TestResult {
 
 fn assert_regenerated(directory: &Path) -> TestResult {
     let path = key_path(directory);
-    let key = SubjectAppendMacKeyV1::load_or_create_with(directory, euid(), fixed_entropy)?;
+    let key = load_with(directory, euid(), fixed_entropy)?;
     assert_eq!(fs::read(&path)?, [7; 32]);
     let metadata = fs::metadata(&path)?;
     assert_eq!(metadata.mode(), 0o100_600);
@@ -588,8 +595,7 @@ fn blake3_mac(key: [u8; 32], field_tag: &str, plaintext: &[u8]) -> [u8; 32] {
 fn a_missing_key_is_created_once_and_then_reloaded() -> TestResult {
     let directory = tempfile::tempdir()?;
     assert_regenerated(directory.path())?;
-    let reloaded =
-        SubjectAppendMacKeyV1::load_or_create_with(directory.path(), euid(), failing_entropy)?;
+    let reloaded = load_with(directory.path(), euid(), failing_entropy)?;
     assert_eq!(
         reloaded.request_mac("f", b"p"),
         blake3_mac([7; 32], "f", b"p"),
@@ -631,11 +637,7 @@ fn each_corrupt_key_file_is_replaced() -> TestResult {
 fn a_key_owned_by_another_user_is_replaced() -> TestResult {
     let directory = tempfile::tempdir()?;
     write_key(&key_path(directory.path()), &[1; 32], 0o600)?;
-    let key = SubjectAppendMacKeyV1::load_or_create_with(
-        directory.path(),
-        euid().wrapping_add(1),
-        fixed_entropy,
-    )?;
+    let key = load_with(directory.path(), euid().wrapping_add(1), fixed_entropy)?;
     assert_eq!(key.request_mac("f", b"p"), blake3_mac([7; 32], "f", b"p"));
     Ok(())
 }
@@ -668,7 +670,7 @@ fn a_directory_in_place_of_the_key_is_unavailable() -> TestResult {
     let directory = tempfile::tempdir()?;
     fs::create_dir(key_path(directory.path()))?;
     assert!(matches!(
-        SubjectAppendMacKeyV1::load_or_create_with(directory.path(), euid(), fixed_entropy),
+        load_with(directory.path(), euid(), fixed_entropy),
         Err(SubjectAppendReceiptRefusalV1::KeyUnavailable)
     ));
     Ok(())
@@ -679,7 +681,7 @@ fn a_missing_state_directory_is_unavailable() -> TestResult {
     let directory = tempfile::tempdir()?;
     let missing = directory.path().join("absent");
     assert!(matches!(
-        SubjectAppendMacKeyV1::load_or_create_with(&missing, euid(), fixed_entropy),
+        load_with(&missing, euid(), fixed_entropy),
         Err(SubjectAppendReceiptRefusalV1::KeyUnavailable)
     ));
     Ok(())
@@ -689,7 +691,7 @@ fn a_missing_state_directory_is_unavailable() -> TestResult {
 fn a_failed_entropy_source_creates_no_key_file() -> TestResult {
     let directory = tempfile::tempdir()?;
     assert!(matches!(
-        SubjectAppendMacKeyV1::load_or_create_with(directory.path(), euid(), failing_entropy),
+        load_with(directory.path(), euid(), failing_entropy),
         Err(SubjectAppendReceiptRefusalV1::KeyUnavailable)
     ));
     assert!(!key_path(directory.path()).exists());
@@ -699,7 +701,7 @@ fn a_failed_entropy_source_creates_no_key_file() -> TestResult {
 #[test]
 fn the_request_mac_is_keyed_and_binds_the_field_tag_and_plaintext() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let key = SubjectAppendMacKeyV1::load_or_create_with(directory.path(), euid(), fixed_entropy)?;
+    let key = load_with(directory.path(), euid(), fixed_entropy)?;
     let mac = key.request_mac("weights", b"plaintext");
     assert_eq!(mac, blake3_mac([7; 32], "weights", b"plaintext"));
     assert_ne!(mac, key.request_mac("weight", b"plaintext"));
@@ -711,8 +713,7 @@ fn the_request_mac_is_keyed_and_binds_the_field_tag_and_plaintext() -> TestResul
     );
     let other = tempfile::tempdir()?;
     write_key(&key_path(other.path()), &[8; 32], 0o600)?;
-    let other_key =
-        SubjectAppendMacKeyV1::load_or_create_with(other.path(), euid(), failing_entropy)?;
+    let other_key = load_with(other.path(), euid(), failing_entropy)?;
     assert_ne!(mac, other_key.request_mac("weights", b"plaintext"));
     assert_eq!(format!("{key:?}"), "SubjectAppendMacKeyV1(..)");
     Ok(())
@@ -745,4 +746,97 @@ fn refusals_display_fixed_text() {
     for (refusal, text) in texts {
         assert_eq!(refusal.to_string(), text);
     }
+}
+
+#[test]
+fn an_unreadable_key_that_is_not_corrupt_is_never_removed() -> TestResult {
+    let readers: [KeyReader; 5] = [
+        |_, _, _| Err(io::Error::from_raw_os_error(libc::EMFILE)),
+        |_, _, _| Err(io::Error::from_raw_os_error(libc::EIO)),
+        |_, _, _| Err(io::Error::from_raw_os_error(libc::EACCES)),
+        |_, _, _| Err(io::ErrorKind::Interrupted.into()),
+        |_, _, _| Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+    ];
+    for (index, read) in readers.into_iter().enumerate() {
+        let directory = tempfile::tempdir()?;
+        let path = key_path(directory.path());
+        write_key(&path, &[1; 32], 0o600)?;
+        let io = KeyIo {
+            read,
+            ..key_io(euid(), fixed_entropy)
+        };
+        assert!(
+            matches!(
+                SubjectAppendMacKeyV1::load_or_create_with(directory.path(), &io),
+                Err(SubjectAppendReceiptRefusalV1::KeyUnavailable)
+            ),
+            "reader {index}"
+        );
+        assert_eq!(fs::read(&path)?, [1; 32], "reader {index} kept the key");
+        assert_eq!(fs::metadata(&path)?.mode(), 0o100_600);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_key_that_shrinks_mid_read_is_replaced() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    write_key(&key_path(directory.path()), &[1; 32], 0o600)?;
+    let io = KeyIo {
+        read: |_, _, _| Err(io::ErrorKind::UnexpectedEof.into()),
+        ..key_io(euid(), fixed_entropy)
+    };
+    SubjectAppendMacKeyV1::load_or_create_with(directory.path(), &io)?;
+    assert_eq!(fs::read(key_path(directory.path()))?, [7; 32]);
+    Ok(())
+}
+
+#[test]
+fn a_dangling_symlink_is_replaced() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    std::os::unix::fs::symlink(
+        directory.path().join("absent-target"),
+        key_path(directory.path()),
+    )?;
+    assert_regenerated(directory.path())
+}
+
+#[test]
+fn a_failed_write_or_sync_unlinks_the_partial_key() -> TestResult {
+    let persisters: [KeyPersister; 2] = [
+        |_, _| Err(io::ErrorKind::Other.into()),
+        |file, _| {
+            file.write_all(&[9; 4])?;
+            Err(io::Error::from_raw_os_error(libc::ENOSPC))
+        },
+    ];
+    for (index, persist) in persisters.into_iter().enumerate() {
+        let directory = tempfile::tempdir()?;
+        let io = KeyIo {
+            persist,
+            ..key_io(euid(), fixed_entropy)
+        };
+        assert!(
+            matches!(
+                SubjectAppendMacKeyV1::load_or_create_with(directory.path(), &io),
+                Err(SubjectAppendReceiptRefusalV1::KeyUnavailable)
+            ),
+            "persister {index}"
+        );
+        assert!(!key_path(directory.path()).exists(), "persister {index}");
+        assert_regenerated(directory.path())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn persisting_a_key_forces_mode_0600_even_from_a_restrictive_open() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("restrictive");
+    let mut file = File::create(&path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o400))?;
+    persist_key(&mut file, &[3; 32])?;
+    assert_eq!(fs::metadata(&path)?.mode(), 0o100_600);
+    assert_eq!(fs::read(&path)?, [3; 32]);
+    Ok(())
 }
