@@ -79,6 +79,28 @@ impl AuthenticatedAdmissionGrant {
     }
 }
 
+impl AuthenticatedAdmissionGrant {
+    /// [`Self::bind_local_network`] when `canonical_policy` is a Local launch
+    /// policy, and `None` for every other execution mode, which has no
+    /// network to plan.
+    ///
+    /// # Errors
+    /// Rejects an undecodable policy, and every refusal of
+    /// [`Self::bind_local_network`] for a Local one.
+    pub fn local_network_if_local(
+        &self,
+        commitment: &SelectorGrantCommitment,
+        canonical_policy: &[u8],
+        plans: &[NetworkExchangePlan],
+    ) -> Result<Option<LocalNetworkAdmission>, SandboxProviderProtocolError> {
+        LaunchPolicy::from_canonical_cbor(canonical_policy).and_then(|policy| {
+            (policy.execution_mode == SandboxExecutionMode::Local)
+                .then(|| self.bind_local_network(commitment, canonical_policy, plans))
+                .transpose()
+        })
+    }
+}
+
 impl LocalNetworkAdmission {
     /// Original authenticated grant retained for the active-attempt binding.
     #[must_use]

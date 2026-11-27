@@ -34,8 +34,8 @@
 //!     runtime that drives it, which outlive reconciliation. Admission is
 //!     then `Open`.
 //!
-//! The SPI1 attempt network is used only by Local attempts, which the port
-//! refuses until #1488 serves it.
+//! The SPI1 attempt network is the Local network port of the execute port:
+//! every Local attempt establishes its namespace through it.
 
 use std::fs::File;
 use std::future::Future;
@@ -56,7 +56,7 @@ use tokio::runtime::Runtime;
 use tokio::time::Instant;
 
 use super::endpoint::{open_parent, DIRECTORY_OPEN, RESOLVE, SANDBOX_STATE};
-use super::port::ExecutePort;
+use super::port::{AttemptNetwork, ExecutePort};
 use super::{ProviderRuntimeError, RuntimeAuthority};
 use crate::{
     fb_tunnels_isolated, reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle,
@@ -126,6 +126,7 @@ pub(super) struct HostReconciliation<N, P> {
     namespaces: ProviderNamespaces,
     network: N,
     egress: P,
+    attempts: Arc<AttemptNetwork>,
     cleanup: CleanupBudget,
     limits: StagingLimits,
     floor: ControlFloor,
@@ -181,6 +182,17 @@ fn netlink_network(
         range,
     );
     (control, LocalEgressProbe::new(Arc::new(port), probe))
+}
+
+/// The Local network port of the SPI1 attempt `range`, which every Local
+/// attempt of the runtime establishes its network through (ADR-069 R14 §3.6).
+pub(super) fn attempt_network(range: NetworkRange) -> Arc<AttemptNetwork> {
+    Arc::new(NamespacedLocalNetwork::new(
+        NetlinkNamespaceControl::new(NetworkNamespaces::system()),
+        HostEgress::new(),
+        NetworkNamespaces::system(),
+        range,
+    ))
 }
 
 /// Step 7 with the bus `connect` yields, and the orphan sweep and egress
@@ -262,6 +274,7 @@ fn open_host<N, P, E>(
                         namespaces,
                         network,
                         egress,
+                        attempts: attempt_network(installation.attempt_range()),
                         cleanup: installation.cleanup_budget(),
                         limits: installation.staging_limits(),
                         floor: retained_floor(admitted),
@@ -289,6 +302,7 @@ where
             namespaces,
             network,
             egress,
+            attempts,
             cleanup: budget,
             limits,
             floor,
@@ -315,6 +329,7 @@ where
                             staging,
                             captures: Arc::new(store),
                             namespaces,
+                            network: attempts,
                             budget,
                             closed: AtomicBool::new(false),
                             transport,

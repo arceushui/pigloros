@@ -12,7 +12,6 @@ use std::{
 
 use crate::{
     adapter_transport::{read_attempt, write_attempt},
-    evaluator_domain::ExecutionMode,
     evaluator_protocol::EvaluationRequest,
     sandbox_provider_protocol::{
         AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, AdmissionLedger, Agr1,
@@ -691,7 +690,6 @@ fn reconstruct(
     (evaluation, request): (&[u8], &[u8]),
     installation: &Arc<AdmittedSelectorProvider>,
     open: impl FnOnce() -> Result<InstalledSelectorState, InstallationError>,
-    supports: impl FnOnce(ExecutionMode) -> bool,
 ) -> Result<Reconstructed, StagingError> {
     let evaluation = EvaluationRequest::from_canonical_cbor(evaluation).map_err(invalid)?;
     let request = SandboxExecuteRequest::from_canonical_cbor(request).map_err(invalid)?;
@@ -713,9 +711,6 @@ fn reconstruct(
     )? != request
     {
         return Err(StagingError::InvalidSource);
-    }
-    if !supports(resolved.attempt().mode) {
-        return Err(StagingError::CapabilityMissing);
     }
     let authority = ProviderImageSnapshot::join_authority(installation, &request, open())?;
     let snapshot =
@@ -882,11 +877,10 @@ impl<C> PreparedProviderExecution<C> {
     ///
     /// In the order of R11 Amendment 1 §7.5 it independently decodes both
     /// records again and reconstructs the case from the retained
-    /// `installation` without reopening SIC1; requires the case's mode to
-    /// be one this provider `supports`; joins the request to the current
-    /// installation through the one SIC1 open (pending SIR1, installation
-    /// digest, authority); checks the image and binary identity; admits the
-    /// launch policy and derives the commitment. Then `claim` takes the
+    /// `installation` without reopening SIC1; joins the request to the
+    /// current installation through the one SIC1 open (pending SIR1,
+    /// installation digest, authority); checks the image and binary identity;
+    /// admits the launch policy and derives the commitment. Then `claim` takes the
     /// caller's lifecycle claim (port step A), and the deadlines, the clock,
     /// the connection identity, the premature bytes, the policy-bound
     /// reservation and the case buffers follow (row R). The pending-control
@@ -899,7 +893,6 @@ impl<C> PreparedProviderExecution<C> {
         source: ExecuteSource,
         ledger: &StagingLedger,
         installation: &Arc<AdmittedSelectorProvider>,
-        supports: impl FnOnce(ExecutionMode) -> bool,
         claim: impl FnOnce(&SandboxExecuteRequest) -> Result<C, E>,
     ) -> Result<Self, Box<ExecuteRefusal<E>>> {
         Self::admit_with(
@@ -907,7 +900,6 @@ impl<C> PreparedProviderExecution<C> {
             ledger,
             installation,
             InstalledSelectorState::open,
-            supports,
             claim,
         )
     }
@@ -917,7 +909,6 @@ impl<C> PreparedProviderExecution<C> {
         ledger: &StagingLedger,
         installation: &Arc<AdmittedSelectorProvider>,
         open: impl FnOnce() -> Result<InstalledSelectorState, InstallationError>,
-        supports: impl FnOnce(ExecutionMode) -> bool,
         claim: impl FnOnce(&SandboxExecuteRequest) -> Result<C, E>,
     ) -> Result<Self, Box<ExecuteRefusal<E>>> {
         let ExecuteSource {
@@ -931,31 +922,26 @@ impl<C> PreparedProviderExecution<C> {
             clock,
             connection,
         } = source;
-        let admitted = reconstruct(
-            (&evaluation.bytes, &request.bytes),
-            installation,
-            open,
-            supports,
-        )
-        .map_err(RefusalCause::Staging)
-        .and_then(|checked| {
-            claim(checked.snapshot.request())
-                .map(|claimed| (checked, claimed))
-                .map_err(RefusalCause::Claim)
-        })
-        .and_then(|(checked, claimed)| {
-            let received = Received {
-                records: [evaluation, request],
-                deadlines,
-                spx_completed,
-                input_start,
-                clock,
-                connection,
-            };
-            reserve(checked, received, ledger, &stream)
-                .map(|reserved| (reserved, claimed))
-                .map_err(RefusalCause::Staging)
-        });
+        let admitted = reconstruct((&evaluation.bytes, &request.bytes), installation, open)
+            .map_err(RefusalCause::Staging)
+            .and_then(|checked| {
+                claim(checked.snapshot.request())
+                    .map(|claimed| (checked, claimed))
+                    .map_err(RefusalCause::Claim)
+            })
+            .and_then(|(checked, claimed)| {
+                let received = Received {
+                    records: [evaluation, request],
+                    deadlines,
+                    spx_completed,
+                    input_start,
+                    clock,
+                    connection,
+                };
+                reserve(checked, received, ledger, &stream)
+                    .map(|reserved| (reserved, claimed))
+                    .map_err(RefusalCause::Staging)
+            });
         drop(control);
         match admitted {
             Ok(((execution, initial_deadline), claim)) => Ok(Self {
@@ -1051,13 +1037,15 @@ impl<C> PreparedProviderExecution<C> {
                 .ok()
         })
         .ok_or(StagingError::SignerFault)?;
-        admitted
-            .authenticate_grant(
+        // A Local attempt's admission is derived from the grant just
+        // authenticated, the same commitment and the exact LPS1, and the
+        // request's plans: none in V1, whose non-empty list row 7 refuses.
+        let local = admitted
+            .authenticate_grant_with_local_network(
                 &grant,
                 request,
-                snapshot.image(),
-                snapshot.launch_policy(),
-                &source.policy.commitment,
+                (snapshot.image(), snapshot.launch_policy()),
+                (&source.policy.commitment, snapshot.launch_policy_bytes()),
             )
             .map_err(|_| StagingError::GrantCommitmentMismatch)?;
         Ok(SignedGrant {
@@ -1067,6 +1055,7 @@ impl<C> PreparedProviderExecution<C> {
                 limits: source.policy.effective_limits().to_vec(),
                 limits_digest: source.policy.effective_limits_digest(),
                 mode: snapshot.launch_policy().execution_mode,
+                local,
                 provider_binary_digest: admitted.manifest().binary_digest,
                 negative_probe_evidence: admitted.host_profile().negative_probe_evidence,
             }),
@@ -2037,13 +2026,7 @@ mod tests {
         ledger: &StagingLedger,
         installation: &Arc<AdmittedSelectorProvider>,
     ) -> Result<PreparedProviderExecution, Box<ExecuteRefusal>> {
-        PreparedProviderExecution::admit(
-            source,
-            ledger,
-            installation,
-            |_| true,
-            |_| Ok::<(), Infallible>(()),
-        )
+        PreparedProviderExecution::admit(source, ledger, installation, |_| Ok::<(), Infallible>(()))
     }
 
     fn prepared_pair(
@@ -2160,7 +2143,6 @@ mod tests {
                 opened += 1;
                 InstalledSelectorState::open()
             },
-            |_| true,
             |_| Ok::<(), Infallible>(()),
         ))?;
         // T2: one SIC1 open, at the held-image join. T5 i: the factory
@@ -2195,39 +2177,15 @@ mod tests {
         let staged = StagedInstallation::stage_execution()?;
         let installation = startup()?;
         let ledger = StagingLedger::new(LARGE);
-        // Row 9: an unsupported mode, before the authority and the image.
-        let (source, mut selector) = source_pair(&staged, &ledger, &installation)?;
-        let mut modes = Vec::new();
-        let (stream, error) = refused(PreparedProviderExecution::admit(
-            source,
-            &ledger,
-            &installation,
-            |mode| {
-                modes.push(mode);
-                false
-            },
-            |_| Ok::<(), Infallible>(()),
-        ))?;
-        assert!(
-            matches!(error, StagingError::CapabilityMissing),
-            "{error:?}"
-        );
-        assert_eq!(modes.len(), 1);
-        drop(stream);
-        assert_eq!(selector.read(&mut [0])?, 0);
-        assert_eq!(ledger.usage(), StagingUsage::default());
         // Port step A: the caller's claim refusal comes back as its own.
         let (source, _selector) = source_pair(&staged, &ledger, &installation)?;
-        let refusal = PreparedProviderExecution::<()>::admit(
-            source,
-            &ledger,
-            &installation,
-            |_| true,
-            |_| Err("claimed"),
-        )
-        .map(drop)
-        .err()
-        .ok_or("admitted")?;
+        let refusal =
+            PreparedProviderExecution::<()>::admit(source, &ledger, &installation, |_| {
+                Err("claimed")
+            })
+            .map(drop)
+            .err()
+            .ok_or("admitted")?;
         assert!(matches!(
             refusal.into_parts().1,
             RefusalCause::Claim("claimed")
@@ -2305,7 +2263,6 @@ mod tests {
             &ledger,
             &installation,
             || InstalledSelectorState::open().map(|state| state.with_installation_digest([2; 32])),
-            |_| true,
             |_| Ok::<(), Infallible>(()),
         ))?;
         assert!(
@@ -3087,6 +3044,30 @@ mod tests {
         Ok(())
     }
 
+    /// An issued grant answers its Local admission with exactly the one it was
+    /// given, and with none otherwise (ADR-069 R14 §3.5).
+    #[test]
+    fn an_issued_grant_carries_the_local_admission_it_was_given() {
+        use crate::sandbox_provider_protocol::{
+            LocalNetworkAdmission, NetworkProxyLimits, SandboxExecutionMode,
+        };
+        let grant = IssuedGrant::fixture([1; 32], Vec::new(), SandboxExecutionMode::Local);
+        assert_eq!(grant.local_network(), None);
+        let admission = LocalNetworkAdmission::fixture(
+            [2; 16],
+            AdmissionAuthority::fixture(),
+            [1, 2, 3],
+            Vec::new(),
+            NetworkProxyLimits {
+                request_bytes: 1,
+                response_bytes: 2,
+                milliseconds: 3,
+            },
+        );
+        let carrying = grant.with_local_network(admission.clone());
+        assert_eq!(carrying.local_network(), Some(&admission));
+    }
+
     /// The admitted facts the terminal records need are retained with the
     /// grant: ELM1 under the digest AGR1 names, the mode, and SPR1's
     /// provider binary and negative-probe digests (Redmine #443 journal
@@ -3099,6 +3080,14 @@ mod tests {
         assert_eq!(
             issued.execution_mode(),
             snapshot.launch_policy().execution_mode
+        );
+        // Only a Local grant carries an admission (ADR-069 R14 §3.5); the
+        // staged installation is Air-Gapped, so a grant that carried one
+        // here would be wired wrongly.
+        assert_eq!(
+            issued.local_network().is_some(),
+            issued.execution_mode()
+                == crate::sandbox_provider_protocol::SandboxExecutionMode::Local
         );
         let provider = snapshot.admitted.provider();
         assert_eq!(
