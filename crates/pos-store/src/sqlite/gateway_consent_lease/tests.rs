@@ -120,6 +120,13 @@ fn stub_journal(store: &SqliteStore, rows: bool) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// A fresh store with the empty journal that L5 requires before it inserts generation one.
+fn store_with_empty_journal() -> Result<SqliteStore, Box<dyn std::error::Error>> {
+    let store = SqliteStore::open_in_memory()?;
+    stub_journal(&store, false)?;
+    Ok(store)
+}
+
 #[test]
 fn a_generation_is_never_zero() {
     assert_eq!(ConsentLeaseGenerationV1::new(0), None);
@@ -197,7 +204,7 @@ fn an_incompatible_table_refuses_a_writable_open() -> TestResult {
 #[test]
 fn the_first_acquisition_commits_generation_one() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     let lease = fixture.acquire(&store)?;
     assert_eq!(lease.generation().get(), 1);
     assert_eq!(lease.store_file_id(), fixture.identity);
@@ -209,7 +216,7 @@ fn the_first_acquisition_commits_generation_one() -> TestResult {
 #[test]
 fn each_acquisition_after_a_release_increments_the_generation() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     assert_eq!(fixture.generation(&store), Ok(1));
     assert_eq!(fixture.generation(&store), Ok(2));
     assert_eq!(fixture.generation(&store), Ok(3));
@@ -220,7 +227,7 @@ fn each_acquisition_after_a_release_increments_the_generation() -> TestResult {
 #[test]
 fn contention_refuses_at_once_and_writes_nothing() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     let held = fixture.acquire(&store)?;
     assert_eq!(fixture.generation(&store), Err(Refusal::LeaseHeld));
     assert_eq!(stored(&store)?, vec![(1, 1, 1)]);
@@ -283,7 +290,7 @@ fn a_failed_pre_screen_is_unavailable() -> TestResult {
 #[test]
 fn a_foreign_identity_releases_the_lease_and_spends_no_generation() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     let SubjectStoreFileIdV1::Linux { device, inode } = fixture.identity else {
         return Err("not a Linux identity".into());
     };
@@ -447,7 +454,7 @@ fn fenced(store: &SqliteStore, expected: u64) -> Result<(), Refusal> {
 #[test]
 fn the_fence_accepts_exactly_the_stored_generation() -> TestResult {
     let fixture = Fixture::new(true)?;
-    let store = SqliteStore::open_in_memory()?;
+    let store = store_with_empty_journal()?;
     let lease = fixture.acquire(&store)?;
     let current = lease.generation().get();
     assert_eq!(fenced(&store, current), Ok(()));
