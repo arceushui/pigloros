@@ -39,7 +39,7 @@ use pos_crypto::{subject_data::subject_data_public_header, subject_key::subject_
 use rand::{rngs::SysRng, TryRng};
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use super::{sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 
@@ -345,7 +345,7 @@ pub fn purge_expired_subject_append_receipts(
 /// that moving the key never leaves a stack copy behind, and every load or
 /// create fills that box in place. It confers no authority and protects no
 /// confidentiality beyond the receipt's request MAC.
-pub struct SubjectAppendMacKeyV1(Box<[u8; 32]>);
+pub struct SubjectAppendMacKeyV1(Box<Zeroizing<[u8; 32]>>);
 
 impl fmt::Debug for SubjectAppendMacKeyV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -353,11 +353,10 @@ impl fmt::Debug for SubjectAppendMacKeyV1 {
     }
 }
 
-impl Drop for SubjectAppendMacKeyV1 {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
+/// `open(2)` flags for reading the key file: no symlinks, no inheritance, no blocking.
+const READ_KEY_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+/// `open(2)` flags for creating the key file: no symlinks, no inheritance.
+const CREATE_KEY_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 type Entropy = fn(&mut [u8]) -> Result<(), ()>;
 type KeyReader = fn(&Path, u32, &mut [u8; 32]) -> io::Result<()>;
@@ -410,7 +409,7 @@ impl SubjectAppendMacKeyV1 {
         io: &KeyIo,
     ) -> Result<Self, SubjectAppendReceiptRefusalV1> {
         let path = directory.join(APPEND_MAC_KEY_FILE_NAME);
-        let mut key = Self(Box::new([0; 32]));
+        let mut key = Self(Box::new(Zeroizing::new([0; 32])));
         match (io.read)(&path, io.euid, &mut key.0) {
             Ok(()) => Ok(key),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -468,7 +467,7 @@ fn is_corrupt_key(error: &io::Error) -> bool {
 fn read_key_file(path: &Path, euid: u32, key: &mut [u8; 32]) -> io::Result<()> {
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .custom_flags(READ_KEY_FLAGS)
         .open(path)
         .and_then(|mut file| {
             file.metadata().and_then(|metadata| {
@@ -509,7 +508,7 @@ fn create_key_file(
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .custom_flags(CREATE_KEY_FLAGS)
                 .open(path)
                 .ok()
         })
