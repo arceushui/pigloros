@@ -86,6 +86,7 @@ impl<'a> Session<'a> {
             .browser_pid
             .get()
             .map(|pid| (pid, crate::Native::inspect_process_with_image(pid)));
+        super::trace::report_stalled_processes("retirement-stalled", self.browser_pid.get());
         let mut stderr = std::io::stderr().lock();
         let _logged_or_unavailable = writeln!(
             stderr,
