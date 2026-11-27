@@ -8,10 +8,10 @@
 //! commitment ([`GuestProviderClient::commitment`]) and runs the exchange
 //! with the process `MAIN_PID` over the execute socket that SIC1 names. A
 //! provider that is still opening answers SPE1 `11`; each such answer is
-//! followed by another exchange while [`EXECUTE_WINDOW`], which starts just before the
-//! first exchange, has not elapsed on the monotonic clock when it arrives. The window bounds when a refused exchange
-//! is asked again, not the length of one exchange, which the case's own
-//! deadline bounds.
+//! followed by another exchange while [`EXECUTE_WINDOW`], which starts just before
+//! the first exchange, has not elapsed on the monotonic clock when it arrives.
+//! The window bounds when a refused exchange is asked again, not the length of
+//! one exchange, which the case's own deadline bounds.
 //!
 //! The report (`GuestProviderClient::execute_report`) is, line by line, one of:
 //!

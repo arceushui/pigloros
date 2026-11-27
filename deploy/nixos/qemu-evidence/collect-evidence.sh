@@ -321,6 +321,7 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   wait "${pid}" || status=$?
   rm -- "${fifo}"
   rm -rf -- "${exports}"
+  exports=""
   printf '%s\n' "${status}" >"${dir}/stage-status"
   # A mount that outlives the runtime (an attempt root that was not detached) is evidence of its
   # own; it is recorded, then detached so that the removal below, and the later cases, can run.
