@@ -29,6 +29,18 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// final step replaces its own image and creates no process.
 const LAUNCHER_EXEC: &str = "launcher/exec.rs";
 
+/// Tokens that include another file's bytes or source. Provider code could hide a forbidden call in
+/// an unscanned file this way, so only the files below (test vectors and test-support fixtures,
+/// never process creation) may use them.
+const INCLUDE_TOKENS: [&str; 2] = ["include!(", "include_bytes!("];
+const INCLUDE_ALLOWED: [&str; 5] = [
+    "pos-reference/src/lib.rs",
+    "pos-reference/src/root_selector.rs",
+    "pos-reference/src/selector/installation.rs",
+    "pos-reference/src/selector/installation/fixture.rs",
+    "pos-sandboxd/src/test_fixtures.rs",
+];
+
 /// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
 /// unchecked system-bus address (`unixexec` and `ibus` start processes), and
 /// zlink's non-atomic Unix stream.
@@ -186,6 +198,17 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
             for token in FORBIDDEN {
                 assert!(
                     !checked.contains(token),
+                    "{}:{}: `{token}` in provider production code",
+                    path.display(),
+                    number + 1
+                );
+            }
+            let may_include = INCLUDE_ALLOWED
+                .iter()
+                .any(|allowed| path.ends_with(allowed));
+            for token in INCLUDE_TOKENS {
+                assert!(
+                    may_include || !line.contains(token),
                     "{}:{}: `{token}` in provider production code",
                     path.display(),
                     number + 1
