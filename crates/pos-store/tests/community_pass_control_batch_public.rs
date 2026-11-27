@@ -223,15 +223,9 @@ fn the_batch_is_exactly_the_cfo1_and_its_listed_cfi1s() -> TestResult {
     let (_, absent) = invocation(Some(pass()?), 3)?;
     let absent_listing = protect(&mut key, &outcome(Some(pass()?), &[absent])?, &[])?;
     let twin = protect(&mut key, &cfi1_bytes, &[])?;
-    let listing_twice = protect(
-        &mut key,
-        &outcome(Some(pass()?), &[cfi1_digest, cfi1_digest])?,
-        &[edge(&cfi1)],
-    )?;
     for records in [
         vec![&listing],
         vec![&listing, &cfi1, &twin],
-        vec![&listing_twice, &cfi1],
         vec![&empty, &cfi1],
         vec![&no_edge, &cfi1],
         vec![&listing, &with_child],
@@ -318,4 +312,23 @@ fn state_protector() -> Fallible<CommunityArtifactProtectorV1> {
             authority_request_digest: Hash::from_bytes([0x35; 32]),
         },
     )?)
+}
+
+/// A CFO1 that lists one CFI1 digest twice is refused: the list and the
+/// edges it derives name the CFI1 twice, which no ARD1 child list can hold.
+#[test]
+fn a_cfo1_listing_a_digest_twice_is_refused() -> TestResult {
+    let mut key = protector(CommunityArtifactPurposeV1::LifecycleControl, COVER)?;
+    let (cfi1_bytes, cfi1_digest) = invocation(Some(pass()?), 1)?;
+    let member = protect(&mut key, &cfi1_bytes, &[])?;
+    let twice = protect(
+        &mut key,
+        &outcome(Some(pass()?), &[cfi1_digest, cfi1_digest])?,
+        &[edge(&member)],
+    )?;
+    assert_eq!(
+        prepare(&key, &[&twice, &member], good()?).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
 }
