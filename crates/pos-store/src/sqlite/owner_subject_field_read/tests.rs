@@ -1,3 +1,4 @@
+#![cfg(any(test, feature = "test-support"))]
 //! The owner field-read port over a qualified store: B6 first, the indexed
 //! latest lookup over the stitched Fork chain, exactly one delivery, and the
 //! closed outer results of ADR-121 §5.
