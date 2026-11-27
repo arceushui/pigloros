@@ -303,10 +303,6 @@ impl World {
         )?)
     }
 
-    fn raw(&self) -> rusqlite::Result<Connection> {
-        Connection::open(self.directory.path().join(MAIN))
-    }
-
     fn locked_keys(&self) -> TestResult<SubjectKeyringV1> {
         Ok(SubjectKeyringV1::new(
             SUBJECT,
@@ -318,19 +314,27 @@ impl World {
     fn read(&self, store: &mut QualifiedSqliteStoreV1, timeline: TimelineId) -> Outcome {
         read_as(store, &self.keys, timeline, SUBJECT)
     }
-
-    fn fence(&self, timeline: TimelineId, lifecycle: i64) -> TestResult {
-        insert_fence(&self.raw()?, timeline, lifecycle)
-    }
 }
 
-fn insert_fence(conn: &Connection, timeline: TimelineId, lifecycle: i64) -> TestResult {
-    conn.execute(
-        "INSERT INTO erasure_fence_rows (timeline_id, erasure_request_id, lifecycle_code)
-         VALUES (?1, ?2, ?3)",
-        params![timeline.to_string(), vec![9_u8; 32], lifecycle],
-    )?;
+/// Change the store through its own guarded transaction and commit.
+///
+/// A second connection that writes the file moves the WAL companion's native
+/// witness, so the next guarded operation would quarantine (ADR-123 §6).
+fn exec(store: &mut QualifiedSqliteStoreV1, sql: &str) -> TestResult {
+    store.guarded(|binding| binding.store().conn.execute_batch(sql))??;
     Ok(())
+}
+
+/// Insert one ADR-097 B6 fence row for `timeline`.
+fn fence(store: &mut QualifiedSqliteStoreV1, timeline: TimelineId, lifecycle: i64) -> TestResult {
+    exec(
+        store,
+        &format!(
+            "INSERT INTO erasure_fence_rows (timeline_id, erasure_request_id, lifecycle_code)
+             VALUES ('{timeline}', x'{}', {lifecycle})",
+            "09".repeat(32)
+        ),
+    )
 }
 
 fn read_as(
@@ -427,7 +431,7 @@ fn the_latest_value_follows_the_stitched_fork_chain() -> TestResult {
     assert_eq!(world.read(&mut store, sibling), present("first"));
 
     // Only the exact Timeline is fenced: no Fork ancestor or descendant is.
-    world.fence(parent, 2)?;
+    fence(&mut store, parent, 2)?;
     assert_eq!(
         world.read(&mut store, parent),
         refused(SubjectFieldOwnerReadErrorV1::ErasureFenced)
@@ -446,23 +450,22 @@ fn an_exact_timeline_fence_row_refuses_before_any_delivery() -> TestResult {
     let mut store = world.open()?;
     let fenced = refused(SubjectFieldOwnerReadErrorV1::ErasureFenced);
 
-    world.fence(TimelineId::new(), 3)?;
+    fence(&mut store, TimelineId::new(), 3)?;
     assert_eq!(world.read(&mut store, world.timeline), present("first"));
 
-    world.fence(world.timeline, 2)?;
+    fence(&mut store, world.timeline, 2)?;
     assert_eq!(world.read(&mut store, world.timeline), fenced);
-    let raw = world.raw()?;
-    raw.execute("DELETE FROM erasure_fence_rows", [])?;
+    exec(&mut store, "DELETE FROM erasure_fence_rows")?;
     assert_eq!(world.read(&mut store, world.timeline), present("first"));
 
     // A row the check cannot parse still refuses.
-    raw.execute_batch("PRAGMA ignore_check_constraints = ON")?;
-    insert_fence(&raw, world.timeline, 9)?;
+    exec(&mut store, "PRAGMA ignore_check_constraints = ON")?;
+    fence(&mut store, world.timeline, 9)?;
     assert_eq!(world.read(&mut store, world.timeline), fenced);
-    raw.execute("DELETE FROM erasure_fence_rows", [])?;
+    exec(&mut store, "DELETE FROM erasure_fence_rows")?;
 
     // An unreadable table refuses too.
-    raw.execute_batch("DROP TABLE erasure_fence_rows")?;
+    exec(&mut store, "DROP TABLE erasure_fence_rows")?;
     assert_eq!(world.read(&mut store, world.timeline), fenced);
     closed(store)
 }
@@ -563,10 +566,9 @@ fn a_missing_index_or_timeline_refuses_as_unavailable_and_never_scans() -> TestR
     let unavailable = refused(SubjectFieldOwnerReadErrorV1::ReadUnavailableBeforeDelivery);
 
     assert_eq!(world.read(&mut store, TimelineId::new()), unavailable);
-    let raw = world.raw()?;
-    raw.execute_batch("DROP INDEX idx_events_entity_type")?;
+    exec(&mut store, "DROP INDEX idx_events_entity_type")?;
     assert_eq!(world.read(&mut store, world.timeline), unavailable);
-    raw.execute_batch(EVENTS_INDEX_SQL)?;
+    exec(&mut store, EVENTS_INDEX_SQL)?;
     assert_eq!(world.read(&mut store, world.timeline), present("first"));
     closed(store)
 }
@@ -597,7 +599,7 @@ fn an_unproved_rollback_quarantines_with_the_classification_of_how_the_read_ende
     seed.append(timeline, "first")?;
     let world = seed.install()?;
     let mut store = world.open()?;
-    world.fence(world.timeline, 2)?;
+    fence(&mut store, world.timeline, 2)?;
     assert_eq!(
         with_early_end(|| world.read(&mut store, world.timeline)),
         refused(SubjectFieldOwnerReadErrorV1::ErasureFencedTransactionFinishFailed)
@@ -608,9 +610,7 @@ fn an_unproved_rollback_quarantines_with_the_classification_of_how_the_read_ende
     seed.append(timeline, "first")?;
     let world = seed.install()?;
     let mut store = world.open()?;
-    world
-        .raw()?
-        .execute_batch("DROP INDEX idx_events_entity_type")?;
+    exec(&mut store, "DROP INDEX idx_events_entity_type")?;
     assert_eq!(
         with_early_end(|| world.read(&mut store, world.timeline)),
         refused(SubjectFieldOwnerReadErrorV1::TransactionFinishFailedBeforeDelivery)
@@ -672,7 +672,7 @@ fn a_registry_that_denies_decryption_wins_over_an_unlocked_keyring() -> TestResu
     seed.append(timeline, "first")?;
     let world = seed.install()?;
     let mut store = world.open()?;
-    world.raw()?.execute("DELETE FROM key_registry", [])?;
+    exec(&mut store, "DELETE FROM key_registry")?;
     assert_eq!(
         world.read(&mut store, world.timeline),
         field(Err(SubjectFieldReadError::Integrity))
