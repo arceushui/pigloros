@@ -470,7 +470,7 @@ fn open_native(path: &Path) -> Option<Retained<SqliteStore>> {
     NATIVE_OPENS.with(|opens| opens.set(opens.get() + 1));
     Connection::open_with_flags_and_vfs(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        OpenFlags::SQLITE_OPEN_READ_WRITE.union(OpenFlags::SQLITE_OPEN_NOFOLLOW),
         c"unix",
     )
     .ok()
@@ -808,10 +808,10 @@ mod tests {
         /// not seen as claimed by a later test.
         fn drop(&mut self) {
             super::retained::reclaim();
-            for key in [self.key, self.other_key] {
-                if let SubjectStoreFileIdV1::Linux { device, inode } = key {
-                    release_identity([device, inode]);
-                }
+            // `other_key` is only a neighbouring inode number; it may be a
+            // concurrent test's real file, so its claim is never released.
+            if let SubjectStoreFileIdV1::Linux { device, inode } = self.key {
+                release_identity([device, inode]);
             }
         }
     }
