@@ -154,6 +154,8 @@ mod consent_revocation_journal;
 mod counterfactual_store;
 mod erasure_admissions;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod erasure_fence_reconcile;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod erasure_fence_rows;
 mod erasure_fence_writers;
 mod fork_attribution_authority_import;
