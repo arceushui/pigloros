@@ -5,6 +5,7 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Arc;
 
+use pos_core::{deletion_receipt, KeyDestructionRequestV1};
 use pos_core::{
     CanonicalBytes, ErasureContainmentGateV1, EventDraft, EventStore, FieldStateV1,
     GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1, KeyRegistrationV1,
@@ -12,6 +13,7 @@ use pos_core::{
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_crypto::signing::generate_keypair;
+use pos_crypto::subject_data::SUBJECT_DATA_EVENT_TYPE;
 use pos_crypto::subject_field_read::SubjectFieldReadError;
 use pos_crypto::subject_key::{
     subject_owner_id, SubjectKeyWrapParamsV1, SubjectKeyWrapV1, SubjectPrfOutputV1,
@@ -42,8 +44,6 @@ type Outcome = (
 const MAIN: &str = "store.db";
 const SUBJECT: EntityId = EntityId::from_ulid(Ulid::from_bytes([0x22; 16]));
 const OTHER: EntityId = EntityId::from_ulid(Ulid::from_bytes([0x33; 16]));
-const INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_events_entity_type
-    ON events(timeline_id, entity_id, event_type, seq)";
 
 /// Distinct, non-repeating bytes for one seed.
 fn pattern<const N: usize>(seed: u8) -> [u8; N] {
@@ -205,11 +205,35 @@ impl Seed {
         Ok(())
     }
 
+    /// Another subject's `subject.data.v1` Event, newer than everything so far.
+    fn append_other_subject_data(&mut self, timeline: TimelineId) -> TestResult {
+        self.store.append(
+            timeline,
+            &[EventDraft::new(
+                OTHER,
+                Kind::new(SUBJECT_DATA_EVENT_TYPE),
+                CanonicalBytes::from_static(b"another subject's data"),
+            )],
+        )?;
+        Ok(())
+    }
+
+    /// Replace the committed registry with `change` applied to it.
+    fn change_registry(
+        &mut self,
+        change: impl FnOnce(&mut KeyRegistryStateV1) -> Result<(), KeyRegistryErrorV1>,
+    ) -> TestResult {
+        let mut registry = self.store.load_key_registry()?.ok_or("registry")?;
+        change(&mut registry)?;
+        self.store.save_key_registry(&registry)?;
+        Ok(())
+    }
+
     fn fork(&mut self, parent: TimelineId, at: u64, name: &str) -> TestResult<TimelineId> {
         Ok(self.store.fork(parent, Seq::from_u64(at), name)?.id())
     }
 
-    /// Close the ordinary store, add the lookup index and install the namespace.
+    /// Close the ordinary store, which created the lookup index, and install the namespace.
     fn install(self) -> TestResult<World> {
         let Self {
             store,
@@ -222,7 +246,6 @@ impl Seed {
         } = self;
         drop(store);
         let path = directory.path().join(MAIN);
-        Connection::open(&path)?.execute_batch(INDEX_SQL)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         install_owner_store_namespace_v1(directory.path(), MAIN)?;
         let metadata = std::fs::metadata(&path)?;
@@ -536,7 +559,7 @@ fn a_missing_index_or_timeline_refuses_as_unavailable_and_never_scans() -> TestR
     let raw = world.raw()?;
     raw.execute_batch("DROP INDEX idx_events_entity_type")?;
     assert_eq!(world.read(&mut store, world.timeline), unavailable);
-    raw.execute_batch(INDEX_SQL)?;
+    raw.execute_batch(EVENTS_INDEX_SQL)?;
     assert_eq!(world.read(&mut store, world.timeline), present("first"));
     closed(store)
 }
@@ -585,5 +608,175 @@ fn an_unproved_rollback_quarantines_with_the_classification_of_how_the_read_ende
         with_early_end(|| world.read(&mut store, world.timeline)),
         refused(SubjectFieldOwnerReadErrorV1::TransactionFinishFailedBeforeDelivery)
     );
+    Ok(())
+}
+
+/// The destruction request of the subject's encryption key.
+fn destruction_request() -> TestResult<KeyDestructionRequestV1> {
+    Ok(KeyDestructionRequestV1::new(
+        KeyIdentityV1::new(
+            OwnerIdV1::new(subject_owner_id(SUBJECT)?)?,
+            KeyRoleV1::SubjectDataEncryption,
+            1,
+        ),
+        SubjectRootKeyV1::from_bytes(pattern(0x10)).material_digest(),
+        Hash::from_bytes([0x44; 32]),
+    ))
+}
+
+#[test]
+fn a_registry_that_denies_decryption_wins_over_an_unlocked_keyring() -> TestResult {
+    // Pending destruction: the keyring still holds the root, the registry
+    // refuses, and no plaintext reaches the callback.
+    let mut seed = seed()?;
+    let timeline = seed.timeline;
+    seed.append(timeline, "first")?;
+    let request = destruction_request()?;
+    seed.change_registry(|registry| registry.begin_key_destruction(request).map(|_| ()))?;
+    let world = seed.install()?;
+    let mut store = world.open()?;
+    assert_eq!(
+        world.read(&mut store, world.timeline),
+        field(Err(SubjectFieldReadError::KeyUnavailable))
+    );
+    closed(store)?;
+
+    // Committed destruction: the value reads as redacted, never as plaintext.
+    let mut seed = self::seed()?;
+    let timeline = seed.timeline;
+    seed.append(timeline, "first")?;
+    seed.change_registry(|registry| {
+        registry.begin_key_destruction(request)?;
+        registry
+            .complete_key_destruction(request, deletion_receipt(&request))
+            .map(|_| ())
+    })?;
+    let world = seed.install()?;
+    let mut store = world.open()?;
+    assert_eq!(
+        world.read(&mut store, world.timeline),
+        field(Ok(FieldStateV1::RedactedDestroyed))
+    );
+    closed(store)?;
+
+    // No registry at all: nothing verifies, so the outcome is `Integrity`.
+    let mut seed = self::seed()?;
+    let timeline = seed.timeline;
+    seed.append(timeline, "first")?;
+    let world = seed.install()?;
+    let mut store = world.open()?;
+    world.raw()?.execute("DELETE FROM key_registry", [])?;
+    assert_eq!(
+        world.read(&mut store, world.timeline),
+        field(Err(SubjectFieldReadError::Integrity))
+    );
+    closed(store)
+}
+
+#[test]
+fn another_subjects_data_event_never_answers_this_subjects_read() -> TestResult {
+    let mut seed = seed()?;
+    let timeline = seed.timeline;
+    seed.append(timeline, "first")?;
+    seed.append_other_subject_data(timeline)?;
+    let world = seed.install()?;
+    let mut store = world.open()?;
+    assert_eq!(world.read(&mut store, world.timeline), present("first"));
+    assert_eq!(
+        read_as(&mut store, &world.keys, world.timeline, OTHER),
+        field(Err(SubjectFieldReadError::Integrity))
+    );
+    closed(store)
+}
+
+#[test]
+fn a_failing_callback_with_an_unproved_rollback_is_a_finish_failure_after_delivery() -> TestResult {
+    let mut seed = seed()?;
+    let timeline = seed.timeline;
+    seed.append(timeline, "first")?;
+    let world = seed.install()?;
+    let mut store = world.open()?;
+    let mut calls = 0;
+    let outcome = with_early_end(|| {
+        OwnerSubjectFieldReaderV1::new(&mut store, &world.keys).with_subject_field_read(
+            world.timeline,
+            SUBJECT,
+            SubjectFieldSelectorV1::PersonaPreferenceWeights,
+            &mut |_| {
+                calls += 1;
+                Err(SubjectFieldReadCallbackErrorV1::Failed)
+            },
+        )
+    });
+    assert_eq!(
+        (outcome, calls),
+        (
+            Err(SubjectFieldOwnerReadErrorV1::TransactionFinishFailedAfterDelivery),
+            1
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn a_connection_without_a_write_transaction_is_unavailable_not_fenced() -> TestResult {
+    let seed = seed()?;
+    let mut calls = 0;
+    let end = read_in_transaction(
+        &seed.store,
+        &seed.keys,
+        (seed.timeline, SUBJECT),
+        SubjectFieldSelectorV1::PersonaPreferenceWeights,
+        &mut |_| {
+            calls += 1;
+            Ok(())
+        },
+    );
+    assert!(matches!(end, Ok(ReadEndV1::Unavailable)));
+    assert_eq!(calls, 0);
+    Ok(())
+}
+
+#[test]
+fn a_fresh_store_gets_the_exact_index_and_reads_end_to_end() -> TestResult {
+    let mut seed = seed()?;
+    let timeline = seed.timeline;
+    seed.append(timeline, "first")?;
+    let raw = Connection::open(seed.directory.path().join(MAIN))?;
+    let mut info =
+        raw.prepare("SELECT name FROM pragma_index_info('idx_events_entity_type') ORDER BY seqno")?;
+    let columns = info
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(info);
+    drop(raw);
+    assert_eq!(columns, ["timeline_id", "entity_id", "event_type", "seq"]);
+    let path = seed.directory.path().join(MAIN);
+    let path = path.to_str().ok_or("path")?;
+    // A second writable open finds its own index and accepts it.
+    drop(SqliteStore::open(path)?);
+    let world = seed.install()?;
+    let mut store = world.open()?;
+    assert_eq!(world.read(&mut store, world.timeline), present("first"));
+    closed(store)
+}
+
+#[test]
+fn a_writable_open_refuses_an_index_of_that_name_with_other_columns() -> TestResult {
+    let seed = seed()?;
+    let path = seed.directory.path().join(MAIN);
+    let Seed {
+        store, directory, ..
+    } = seed;
+    drop(store);
+    Connection::open(&path)?.execute_batch(
+        "DROP INDEX idx_events_entity_type;
+         CREATE INDEX idx_events_entity_type ON events(timeline_id, seq);",
+    )?;
+    let error = SqliteStore::open(path.to_str().ok_or("path")?)
+        .err()
+        .map(|error| format!("{error:?}"));
+    assert!(error.is_some_and(|text| text.contains("idx_events_entity_type")));
+    drop(directory);
     Ok(())
 }

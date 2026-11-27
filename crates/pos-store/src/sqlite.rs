@@ -2366,6 +2366,8 @@ impl SqliteStore {
                     // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_field_read_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())

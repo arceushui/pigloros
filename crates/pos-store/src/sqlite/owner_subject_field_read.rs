@@ -25,10 +25,14 @@
 //!
 //! The lookup names `idx_events_entity_type` with `INDEXED BY`, so a store
 //! without that index refuses with `ReadUnavailableBeforeDelivery` instead of
-//! scanning. This module creates no schema: the qualified constructor never
-//! initializes one (ADR-123 §4), and the ADR-137 writable-open slice owns the
-//! index definition. Only the exact Timeline's B6 row is consulted: no Fork
-//! ancestor or descendant is, so a frozen ancestor segment stays readable.
+//! scanning. A writable open creates the index idempotently and refuses an
+//! index of that name with other text (`prepare_subject_field_read_schema`);
+//! the qualified constructor never initializes a schema (ADR-123 §4). Only
+//! the exact Timeline's B6 row is consulted: no Fork ancestor or descendant
+//! is, so a frozen ancestor segment stays readable. A failed B6 read, a
+//! malformed row or a present row refuses as fenced. A connection without a
+//! write transaction, which `guarded` never gives, is an infrastructure
+//! failure and refuses as unavailable.
 //!
 //! Everything here stays test-support gated until owner activation (#1438).
 
@@ -50,12 +54,20 @@ use pos_crypto::subject_field_read::{
 };
 use rusqlite::{params, OptionalExtension};
 
-use super::erasure_fence_rows::require_no_erasure_fence_rows;
-use super::{sqlite_load_key_registry, SqliteStore};
+use super::erasure_fence_rows::{require_no_erasure_fence_rows, ErasureFenceRefusalV1};
+use super::{normalize_schema_sql, sqlite_load_key_registry, SqliteStore};
 use crate::owner_store_binding::{OwnerStoreBindingErrorV1, QualifiedSqliteStoreV1};
 use crate::subject_data_consumer::{
     deliver_latest, SubjectKeyringV1, PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
 };
+
+/// The ADR-137 A3 lookup index, identical to the one the revocation journal
+/// slice creates, so either writable open yields the same object.
+const EVENTS_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_events_entity_type
+    ON events(timeline_id, entity_id, event_type, seq)";
+
+/// The stored name of [`EVENTS_INDEX_SQL`]'s index.
+const EVENTS_INDEX_NAME: &str = "idx_events_entity_type";
 
 /// The newest `subject.data.v1` Event of one subject within one Fork segment.
 ///
@@ -164,6 +176,7 @@ const fn outer_result(
         (Err(OwnerStoreBindingErrorV1::Quarantined), ReadEndV1::Fenced) => {
             Err(Refusal::ErasureFencedTransactionFinishFailed)
         }
+        // No outcome existed before the unproved rollback, so none was delivered.
         (Err(OwnerStoreBindingErrorV1::Quarantined), ReadEndV1::Unavailable) => {
             Err(Refusal::TransactionFinishFailedBeforeDelivery)
         }
@@ -192,7 +205,12 @@ fn read_in_transaction(
     let SubjectFieldSelectorV1::PersonaPreferenceWeights = field;
     let conn = &store.conn;
     require_no_erasure_fence_rows(conn, timeline_id)
-        .map_err(|_| ReadEndV1::Fenced)
+        .map_err(|refusal| match refusal {
+            ErasureFenceRefusalV1::NotWriteTransaction => ReadEndV1::Unavailable,
+            ErasureFenceRefusalV1::Fenced
+            | ErasureFenceRefusalV1::Unreadable
+            | ErasureFenceRefusalV1::Malformed => ReadEndV1::Fenced,
+        })
         .and_then(|()| {
             latest_subject_data(conn, timeline_id, subject_id)
                 .and_then(|latest| {
@@ -214,7 +232,9 @@ fn deliver_once(
         SubjectFieldReadResultV1,
     ) -> Result<(), SubjectFieldReadCallbackErrorV1>,
 ) -> Result<ReadEndV1, PanicPayload> {
-    let mut held = HeldRegistryV1(registry.cloned());
+    // A missing registry never reaches the shim: `deliver_latest` delivers
+    // `Integrity` first, because no Event verifies without one.
+    let mut held = HeldRegistryV1(registry.cloned().unwrap_or_else(KeyRegistryStateV1::new));
     catch_unwind(AssertUnwindSafe(|| {
         deliver_latest(
             &mut held,
@@ -236,7 +256,7 @@ fn deliver_once(
 /// The transaction holds the `SQLite` write lock, so no rotation or
 /// destruction commits while the callback runs. The store's own
 /// authorization opens a second transaction, which cannot nest here.
-struct HeldRegistryV1(Option<KeyRegistryStateV1>);
+struct HeldRegistryV1(KeyRegistryStateV1);
 
 impl KeyRegistryHistoricalDecryptionPortV1 for HeldRegistryV1 {
     fn with_decryption_authorization<T, F>(
@@ -249,10 +269,35 @@ impl KeyRegistryHistoricalDecryptionPortV1 for HeldRegistryV1 {
         F: FnOnce() -> T,
     {
         self.0
-            .as_mut()
-            .ok_or(KeyRegistryErrorV1::RegistryUnavailable)
-            .and_then(|registry| {
-                registry.with_decryption_authorization(identity, private_material_digest, operation)
+            .with_decryption_authorization(identity, private_material_digest, operation)
+    }
+}
+
+impl SqliteStore {
+    /// Create the lookup index on a writable open, then validate its exact text.
+    pub(super) fn prepare_subject_field_read_schema(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(EVENTS_INDEX_SQL)
+            .and_then(|()| {
+                self.conn.query_row(
+                    "SELECT sql FROM main.sqlite_schema
+                     WHERE type = 'index' AND tbl_name = 'events' AND name = ?1 COLLATE NOCASE",
+                    params![EVENTS_INDEX_NAME],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .map_err(Self::into_storage_error)
+            .and_then(|sql| {
+                // `SQLite` stores the statement without `IF NOT EXISTS`.
+                if normalize_schema_sql(&sql)
+                    == normalize_schema_sql(EVENTS_INDEX_SQL).replacen("ifnotexists", "", 1)
+                {
+                    Ok(())
+                } else {
+                    Err(CoreError::Storage(format!(
+                        "SQLite index {EVENTS_INDEX_NAME} has an incompatible schema"
+                    )))
+                }
             })
     }
 }
