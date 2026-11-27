@@ -1,7 +1,7 @@
 //! The guest test client's view of the selector provider transport.
 //!
 //! Compiled only with the `test-support` feature. It wraps the one selector
-//! transport (execute, SCQ1 and SRQ1) without a second protocol
+//! transport (execute, status via SDQ1, SCQ1 and SRQ1) without a second protocol
 //! implementation: the endpoint stays root-owned and every connection must
 //! come from the named provider process (ADR-069 R11 §5.0 step 8).
 //!
@@ -95,6 +95,24 @@ impl GuestProviderClient {
             )
             .map(GuestTerminal::from)
             .map_err(GuestExecuteError::from)
+    }
+
+    /// Status: one SDQ1 whose runtime-signed SDY1 proves that the provider
+    /// has activated the admitted policy (the selector's own revocation
+    /// synchronisation).
+    ///
+    /// # Errors
+    /// Fails closed when the provider is unreachable or its answer fails
+    /// authentication.
+    pub fn describe(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+        timeout: Duration,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.0
+            .synchronize_revocation(admitted, request_id, nonce, timeout)
     }
 
     /// Send one SCQ1 and authenticate its SCY1.

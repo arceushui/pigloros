@@ -372,3 +372,48 @@ fn every_control_failure_has_its_guest_class() {
         GuestControlError::Rejected(SandboxAdmissionError::Revoked)
     );
 }
+
+#[test]
+fn describe_proves_the_active_policy_through_the_one_transport() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let answer = fixture.sdy1.clone();
+    let served = serve(move |listener| {
+        let mut stream = accept(&listener)?;
+        let deadline = deadline()?;
+        read_frame(&mut stream, &deadline)
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("request frame missing")?;
+        drain(&mut stream, &deadline)?;
+        send(&mut stream, &answer, &deadline)?;
+        finish(&stream)
+    })?;
+    served.client.describe(
+        &fixture.provider,
+        fixture.describe_request_id,
+        fixture.describe_nonce,
+        Duration::from_secs(30),
+    )?;
+    join(served)
+}
+
+#[test]
+fn an_unreachable_provider_fails_describe() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let served = serve(|listener| {
+        let mut stream = accept(&listener)?;
+        let deadline = deadline()?;
+        read_frame(&mut stream, &deadline)
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("request frame missing")?;
+        drain(&mut stream, &deadline)?;
+        finish(&stream)
+    })?;
+    let described = served.client.describe(
+        &fixture.provider,
+        fixture.describe_request_id,
+        fixture.describe_nonce,
+        Duration::from_secs(30),
+    );
+    assert_eq!(described, Err(SelectorBoundaryError::SelectorUnavailable));
+    join(served)
+}
