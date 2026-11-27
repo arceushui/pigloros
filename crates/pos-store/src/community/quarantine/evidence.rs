@@ -52,8 +52,9 @@ use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
 use super::super::vault::{fresh_identity, VaultKeyV1};
 use super::{
-    control_request, failure_record, CommittedQuarantineControlV1, CommunityQuarantineReceiptV1,
-    OperationV1, QuarantineLedgerV1, SetReasonBoundV1, StagedSetReasonV1,
+    control_request, failure_record, ledger_states, CommittedQuarantineControlV1,
+    CommunityQuarantineReceiptV1, OperationV1, QuarantineLedgerV1, QuarantineReasonStateV1,
+    SetReasonBoundV1, StagedSetReasonV1,
 };
 
 /// Preferred CBOR encoding of the empty scope-member array.
@@ -253,6 +254,14 @@ impl MemoryCommunityDomainV1 {
                                 ordinal,
                                 reasons,
                                 evidence_not_after_micros: horizon,
+                                states: ledger_states(
+                                    current,
+                                    operation.call.reason.code(),
+                                    QuarantineReasonStateV1 {
+                                        evidence_not_after_micros: operation.failure_horizon,
+                                        share_spent: true,
+                                    },
+                                ),
                             },
                         },
                     )
