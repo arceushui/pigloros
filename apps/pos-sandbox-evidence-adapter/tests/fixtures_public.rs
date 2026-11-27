@@ -345,6 +345,25 @@ fn the_mode_arguments_are_one_id_and_an_optional_decimal_bound() -> TestResult {
 }
 
 #[test]
+fn a_zero_bound_is_refused_by_every_bounded_fixture_itself() {
+    // The argument parser already refuses a leading zero, so only the fixture's
+    // own rule can refuse a zero that reaches it.
+    let bounded: [fn(u64) -> Fixture; 6] = [
+        Fixture::WorkAreaExhaustion,
+        Fixture::TaskExhaustion,
+        Fixture::MemoryExhaustion,
+        Fixture::WatchdogExpiry,
+        Fixture::OversizedOutput,
+        Fixture::Idle,
+    ];
+    for make in bounded {
+        assert_eq!(make(7).with_bound(Some(0)), None, "{:?}", make(7));
+        assert_eq!(make(7).with_bound(Some(1)), Some(make(1)), "{:?}", make(7));
+        assert_eq!(make(7).with_bound(None), None, "{:?}", make(7));
+    }
+}
+
+#[test]
 fn the_crash_and_escape_failures_have_their_own_codes() {
     assert_eq!(AdapterRunError::Escaped.code(), 3);
     assert_eq!(AdapterRunError::Crashed.code(), 70);
