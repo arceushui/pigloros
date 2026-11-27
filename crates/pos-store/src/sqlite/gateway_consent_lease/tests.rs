@@ -86,12 +86,25 @@ fn stored(store: &SqliteStore) -> rusqlite::Result<Vec<(i64, i64, i64)>> {
     rows.collect()
 }
 
+/// Re-enables check constraints when dropped, even after a failed insert.
+struct ConstraintsIgnored<'a>(&'a rusqlite::Connection);
+
+impl Drop for ConstraintsIgnored<'_> {
+    fn drop(&mut self) {
+        self.0
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")
+            .ok();
+    }
+}
+
 fn insert_unchecked(store: &SqliteStore, values: &str) -> rusqlite::Result<()> {
+    store
+        .conn
+        .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    let _reset = ConstraintsIgnored(&store.conn);
     store.conn.execute_batch(&format!(
-        "PRAGMA ignore_check_constraints = ON;
-         INSERT INTO gateway_consent_lease (singleton, format_version, generation)
-         VALUES {values};
-         PRAGMA ignore_check_constraints = OFF;"
+        "INSERT INTO gateway_consent_lease (singleton, format_version, generation)
+         VALUES {values}"
     ))
 }
 
@@ -452,5 +465,23 @@ fn the_fence_refuses_a_missing_corrupt_or_unreadable_row() -> TestResult {
         .conn
         .execute_batch("DROP TABLE gateway_consent_lease")?;
     assert_eq!(fenced(&store, 1), Err(Refusal::LeaseFenced));
+    Ok(())
+}
+
+#[test]
+fn the_real_table_rejects_a_zero_generation_and_a_foreign_format() -> TestResult {
+    let store = SqliteStore::open_in_memory()?;
+    for values in ["(1, 1, 0)", "(1, 2, 1)", "(2, 1, 1)", "(1, 1, -1)"] {
+        let refusal = store
+            .conn
+            .execute_batch(&format!(
+                "INSERT INTO gateway_consent_lease (singleton, format_version, generation)
+                 VALUES {values}"
+            ))
+            .err()
+            .ok_or("inserted")?;
+        assert!(refusal.to_string().contains("CHECK"), "{values}");
+    }
+    assert_eq!(stored(&store)?, Vec::new());
     Ok(())
 }

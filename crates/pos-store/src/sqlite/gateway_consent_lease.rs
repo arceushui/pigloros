@@ -42,8 +42,7 @@ use rustix::io::{self, Errno};
 
 use super::{sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 use crate::owner_store_interlock::{
-    check_regular, enforce, open_coordination_directory, optional_file, reserved_names, same_file,
-    verify_lock_entry, CheckedNamespace, RESOLVE,
+    open_coordination_directory, reserved_names, verify_lock_entry, CheckedNamespace, RESOLVE,
 };
 
 /// The L5 singleton table that holds the lease generation.
@@ -297,28 +296,18 @@ fn classify(error: Errno) -> GatewayConsentLeaseErrorV1 {
 
 /// Open the existing lease entry of the coordination child and lock it.
 ///
-/// The entry must be the same singly linked regular file before and after
-/// locking. A missing child or entry refuses; nothing is created or unlinked.
+/// The entry is locked first and then verified: it must be a private singly
+/// linked regular file that is still the entry of that name, so a swapped or
+/// unsafe entry refuses. A missing child or entry refuses; nothing is created
+/// or unlinked.
 fn lock_lease(namespace: &CheckedNamespace) -> io::Result<OwnedFd> {
     open_coordination_directory(&namespace.directory).and_then(|child| {
         let [_, name, _] = reserved_names(&namespace.main.stat);
-        optional_file(&child, &name)
-            .and_then(|observed| observed.ok_or(Errno::NOENT))
-            .and_then(|observed| {
-                fs::openat2(&child, &name, LOCK_FLAGS, Mode::empty(), RESOLVE).and_then(
-                    |descriptor| {
-                        check_regular(&descriptor)
-                            .and_then(|stat| enforce(same_file(&observed.stat, &stat)))
-                            .map(|()| descriptor)
-                    },
-                )
-            })
-            .and_then(|descriptor| {
-                verify_lock_entry(&child, &name, &descriptor)
-                    .and_then(|()| fs::flock(&descriptor, FlockOperation::NonBlockingLockExclusive))
-                    .and_then(|()| verify_lock_entry(&child, &name, &descriptor))
-                    .map(|()| descriptor)
-            })
+        fs::openat2(&child, &name, LOCK_FLAGS, Mode::empty(), RESOLVE).and_then(|descriptor| {
+            fs::flock(&descriptor, FlockOperation::NonBlockingLockExclusive)
+                .and_then(|()| verify_lock_entry(&child, &name, &descriptor))
+                .map(|()| descriptor)
+        })
     })
 }
 
@@ -368,17 +357,15 @@ fn next_generation(
             stored
                 .checked_add(1)
                 .ok_or(GatewayConsentLeaseErrorV1::GenerationExhausted)
+                .map(|next| (stored, next))
         })
-        .and_then(|next| {
+        .and_then(|(stored, next)| {
             conn.execute(WRITE_GENERATION_SQL, [next])
                 .map_err(GatewayConsentLeaseErrorV1::from)
-                .map(|_| next)
-        })
-        .and_then(|next| {
-            u64::try_from(next)
-                .ok()
-                .and_then(ConsentLeaseGenerationV1::new)
-                .ok_or(GatewayConsentLeaseErrorV1::LeaseStateCorrupt)
+                .map(|_| {
+                    // `stored` is never negative here, so this equals `next`.
+                    ConsentLeaseGenerationV1(NonZeroU64::MIN.saturating_add(stored.unsigned_abs()))
+                })
         })
 }
 
