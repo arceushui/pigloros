@@ -61,7 +61,7 @@ use zbus::OwnedFd;
 
 use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservationEvidence};
 
-use crate::process_identity::provider_identity;
+use crate::launcher::process_identity::provider_identity;
 
 use crate::{
     observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,

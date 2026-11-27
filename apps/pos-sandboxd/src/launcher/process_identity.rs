@@ -18,10 +18,11 @@ use std::os::fd::{AsFd, OwnedFd};
 
 use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
 use pos_reference::sandbox_provider_protocol::FdIdentity;
-use rustix::{
-    fs::{statx, AtFlags, StatxFlags},
-    process::{getpid, pidfd_open, Pid, PidfdFlags},
-};
+use rustix::fs::{statx, AtFlags, StatxFlags};
+use rustix::process::getpid;
+use rustix::process::pidfd_open;
+use rustix::process::Pid;
+use rustix::process::PidfdFlags;
 
 const MOUNT_ID_REQUEST: StatxFlags = StatxFlags::BASIC_STATS.union(StatxFlags::MNT_ID);
 

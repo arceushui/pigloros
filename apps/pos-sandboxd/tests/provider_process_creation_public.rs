@@ -490,7 +490,7 @@ const LAUNCHER_PROTOCOL_NAMES: [&str; 13] = [
     "pos_reference",
 ];
 /// Crates and path roots the launcher may import from.
-const LAUNCHER_IMPORT_ROOTS: [&str; 14] = [
+const LAUNCHER_IMPORT_ROOTS: [&str; 15] = [
     "std",
     "super",
     "self",
@@ -502,6 +502,7 @@ const LAUNCHER_IMPORT_ROOTS: [&str; 14] = [
     "error",
     "exec",
     "host",
+    "process_identity",
     "rustix",
     "nix",
     "sd_listen_fds",

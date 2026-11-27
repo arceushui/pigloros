@@ -37,6 +37,9 @@ mod environment;
 mod error;
 mod exec;
 mod host;
+// Public for the same reason as `clock`; the provider's barrier reads its own pidfd identity here.
+#[doc(hidden)]
+pub mod process_identity;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
