@@ -167,11 +167,14 @@ pub fn apply(
 /// from an unenforced one. The kernel evidence does (ADR-069 section 8): the
 /// `pids.events.local` `max` delta ends a task-exhaustion attempt with
 /// `TaskLimit` whatever the adapter then exits with (it outranks
-/// `ProcessCrash`), and the `/work` capacity read-back (ELM1 limit 9) shows the
-/// work area's ceiling, while a refused `/work` write (`ENOSPC`) is a denied
-/// operation that ends the attempt `Completed`, as the conformance suite
-/// expects of a contained adapter. An adapter that ended differently on a
-/// refusal would turn the contained work-area case into a failure.
+/// `ProcessCrash`). A refused `/work` write (`ENOSPC`) is a denied operation
+/// that never produces a terminal event, so the attempt ends `Completed`
+/// (ADR-069 R9 section 4.6.5, D6), as the conformance suite expects of a
+/// contained adapter; the broker reads the `/work` capacity (ELM1 limit 9)
+/// before the payload runs and after it exits and compares it with the
+/// requested size, which is read-back evidence only. An adapter that ended
+/// differently on a refusal would turn the contained work-area case into a
+/// failure.
 fn then_report<T>(_effect: T) -> After {
     After::Report
 }

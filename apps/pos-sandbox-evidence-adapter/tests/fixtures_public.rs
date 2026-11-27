@@ -9,7 +9,8 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, UdpSocket};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
@@ -34,7 +35,7 @@ use pos_sandbox_evidence_adapter::{
     apply, exit_code, run, AdapterRunError, After, Fixture, Mode, MODES,
 };
 use rustix::io::Errno;
-use rustix::net::{AddressFamily, SocketType};
+use rustix::net::{bind, getsockname, socket, AddressFamily, SocketType};
 use rustix::process::{kill_process, waitpid, Pid, Signal, WaitOptions, WaitStatus};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -108,13 +109,19 @@ const fn aimed_at(missing: &str, tcp: SocketAddr, resolver: SocketAddr) -> Targe
     }
 }
 
-/// A TCP address (RFC 5737 documentation) that nothing answers at, a local
-/// UDP address that never answers, and the UDP socket that holds the latter:
-/// keep it alive for the whole test, so no other process can take the port.
+/// A loopback TCP address that refuses every connection, a local UDP address
+/// that never answers, and the sockets that hold them: keep them alive for the
+/// whole test, so no other process can take either port.
+///
+/// The TCP socket is bound but never listens, so a connect to it is refused at
+/// once on every host, whatever the runner's routing.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr, UdpSocket)> {
+fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr, (OwnedFd, UdpSocket))> {
+    let closed = socket(AddressFamily::INET, SocketType::STREAM, None)?;
+    bind(&closed, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
+    let tcp = SocketAddrV4::try_from(getsockname(&closed)?)?;
     let silent = UdpSocket::bind("127.0.0.1:0")?;
-    Ok(("192.0.2.1:9".parse()?, silent.local_addr()?, silent))
+    Ok((tcp.into(), silent.local_addr()?, (closed, silent)))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -557,6 +564,7 @@ fn apply_runs_each_effect_and_says_who_writes_the_output() -> TestResult {
         ),
         Ok(After::Report)
     );
+    assert!(!Path::new("/nonexistent/work").exists());
     let mut output = Vec::new();
     assert_eq!(
         apply(Fixture::AdapterCrash, &attempt, &targets, &mut output),
@@ -817,6 +825,10 @@ fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
     // An executable that exits without reading its attempt is not fed (the
     // attempt is larger than a pipe's buffer, so the write fails): nothing is
     // left, and the child is killed and waited for.
+    assert!(
+        Command::new("true").status()?.success(),
+        "the `true` executable must be on PATH for this test"
+    );
     assert_eq!(
         leave_orphan(Path::new("true"), &case_attempt(&vec![7; 1 << 19])),
         None
