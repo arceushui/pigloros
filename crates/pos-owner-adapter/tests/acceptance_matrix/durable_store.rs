@@ -48,7 +48,9 @@ impl DurableEnrollmentStore {
     }
 
     /// The `(owner_id, epoch)` staging records of this store left for P5, in
-    /// order. It reads them through the store's own P5 recovery.
+    /// order. It reads them through the store's own P5 recovery, which also
+    /// deletes foreign and settled records, so a stray settled record is not
+    /// visible here.
     pub(super) fn staging_records(&self) -> Result<Vec<(String, u64)>, CoreError> {
         self.store
             .recover_subject_key_staging(&self.file_bytes)
