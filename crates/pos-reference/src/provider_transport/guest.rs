@@ -338,7 +338,10 @@ fn classify(terminal: GuestTerminal) -> Exchange<GuestExecution> {
     }
 }
 
-/// Ask again while the answer is SPE1 `11` and `clock` is inside `window`.
+/// Ask again after an SPE1 `11` answer while `clock` is inside `window` when it arrives.
+///
+/// The window bounds when a refused exchange is asked again. It does not bound one exchange,
+/// which the case's own deadline bounds, so one slow exchange may spend the whole window.
 fn until_open<T>(
     mut exchange: impl FnMut() -> Result<Exchange<T>, GuestExecuteError>,
     clock: &impl GuestClock,

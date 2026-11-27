@@ -245,3 +245,33 @@ async fn the_execute_argument_selects_the_execute_mode() {
     .await;
     assert!(matches!(outcome, Err(ConformanceError::ExecuteUsage)));
 }
+
+#[test]
+fn a_failed_export_removes_the_files_it_created_and_nothing_else() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    // The second file exists already: the first, created by this call, is removed again, and
+    // the file that was already there is untouched.
+    std::fs::write(directory.path().join("two"), "old")?;
+    let refused = write_export(
+        directory.path(),
+        &[("one", b"first"), ("two", b"second"), ("three", b"third")],
+    );
+    assert!(matches!(refused, Err(ConformanceError::Io(_))));
+    assert!(!directory.path().join("one").exists());
+    assert!(!directory.path().join("three").exists());
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("two"))?,
+        "old"
+    );
+    // Once the obstacle is gone the same call succeeds, so a rerun works.
+    std::fs::remove_file(directory.path().join("two"))?;
+    write_export(
+        directory.path(),
+        &[("one", b"first"), ("two", b"second"), ("three", b"third")],
+    )?;
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("three"))?,
+        "third"
+    );
+    Ok(())
+}
