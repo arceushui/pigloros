@@ -61,7 +61,7 @@ use zbus::OwnedFd;
 
 use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservationEvidence};
 
-use crate::process_identity::own_process_identity;
+use crate::process_identity::provider_identity;
 
 use crate::{
     observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,
@@ -643,7 +643,7 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
         .map_err(io::Error::from)
         .map_err(BarrierError::Channel)
         .and_then(|(provider_end, unit_end)| {
-            let provider = own_process_identity().ok_or(BarrierError::ProviderIdentity);
+            let provider = provider_identity().ok_or(BarrierError::ProviderIdentity);
             provider
                 .and_then(|provider| {
                     layout_digest(attempt.mode())

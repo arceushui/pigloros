@@ -94,6 +94,13 @@ const PROVIDER_IDENTITY: pos_reference::sandbox_provider_protocol::FdIdentity =
         inode: 4_242,
     };
 
+/// The launcher's own identity in the test host: another process than the provider.
+const LAUNCHER_IDENTITY: pos_reference::sandbox_provider_protocol::FdIdentity =
+    pos_reference::sandbox_provider_protocol::FdIdentity {
+        mount_id: 21,
+        inode: 4_243,
+    };
+
 fn parameters(arguments: Vec<String>) -> Result<LaunchParameters, Box<dyn Error>> {
     Ok(LaunchParameters::new(
         ATTEMPT,
@@ -118,6 +125,7 @@ struct TestHost {
     launcher: File,
     launcher_missing: bool,
     peer: Option<pos_reference::sandbox_provider_protocol::FdIdentity>,
+    own: Option<pos_reference::sandbox_provider_protocol::FdIdentity>,
     open: io::Result<Vec<u32>>,
     now: io::Result<u64>,
     executions: Mutex<Vec<Vec<CString>>>,
@@ -139,6 +147,7 @@ impl TestHost {
             launcher: File::open(directory.path().join("launcher"))?,
             launcher_missing: false,
             peer: Some(PROVIDER_IDENTITY),
+            own: Some(LAUNCHER_IDENTITY),
             open: Ok(vec![u32::try_from(release.as_raw_fd())?]),
             now: Ok(1_000),
             executions: Mutex::new(Vec::new()),
@@ -149,6 +158,10 @@ impl TestHost {
 }
 
 impl LaunchHost for TestHost {
+    fn own_identity(&self) -> Option<pos_reference::sandbox_provider_protocol::FdIdentity> {
+        self.own
+    }
+
     fn peer_identity(
         &self,
         _: &OwnedFd,
@@ -787,6 +800,14 @@ fn a_launch_that_cannot_prove_itself_never_sends_ready() -> TestResult {
         assert!(other.ready.is_none());
     }
 
+    // On a kernel without pidfs inodes the launcher's own pidfd has the provider's identity (or
+    // none can be read): the peer check names no process and refuses.
+    for own in [Some(PROVIDER_IDENTITY), None] {
+        let blind = launch(|host| host.own = own, &elf(), Vec::new(), |_, _| Ok(()))?;
+        assert!(matches!(blind.error, LauncherError::Peer), "{own:?}");
+        assert!(blind.ready.is_none());
+    }
+
     let script = launch(|_| {}, b"#!/bin/sh\n", Vec::new(), |_, _| Ok(()))?;
     assert!(matches!(script.error, LauncherError::Adapter));
     assert!(script.ready.is_none());
@@ -1004,6 +1025,10 @@ fn the_process_host_reads_the_real_process() -> TestResult {
         None,
     )?;
     assert!(host.peer_identity(&release).is_some());
+    assert_eq!(
+        host.own_identity(),
+        crate::process_identity::own_process_identity()
+    );
     assert_eq!(
         host.peer_identity(&release),
         crate::process_identity::own_process_identity()

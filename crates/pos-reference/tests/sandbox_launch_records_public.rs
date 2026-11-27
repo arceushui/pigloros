@@ -65,6 +65,12 @@ fn launch() -> Result<LaunchParameters, Box<dyn Error>> {
     )?)
 }
 
+fn opaque_launch_digest() -> Result<[u8; 32], Box<dyn Error>> {
+    unhex("e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281")?
+        .try_into()
+        .map_err(|_| "digest length".into())
+}
+
 fn ready_fields() -> Result<LauncherReadyFields, Box<dyn Error>> {
     Ok(LauncherReadyFields {
         attempt_id: [1; 16],
@@ -81,7 +87,10 @@ fn ready_fields() -> Result<LauncherReadyFields, Box<dyn Error>> {
             mount_id: 7,
             inode: 200,
         },
-        launch_parameter_digest: launch()?.digest,
+        // RDY1 copies the LPV1 digest as an opaque 32-byte value. The vector keeps the digest of the
+        // first LPV1 vector (without `provider-pidfd-identity`), so that the RDY1 and RLS1 goldens
+        // (RLS1 is signed over RDY1) do not move with LPV1's field list.
+        launch_parameter_digest: opaque_launch_digest()?,
         expected_fdl1_digest: [4; 32],
         observed_fdl1_digest: [8; 32],
     })
@@ -404,6 +413,35 @@ fn decoders_reject_wrong_magic_version_digest_and_truncation() -> TestResult {
             &[0, 2],
             Value::Bytes(vec![1; 15])
         )?));
+    }
+    Ok(())
+}
+
+#[test]
+fn lpv1_with_eight_or_ten_fields_is_rejected() -> TestResult {
+    let lpv = launch()?.to_canonical_cbor()?;
+    let document: Value = ciborium::from_reader(lpv.as_slice())?;
+    let Value::Array(wrapper) = document else {
+        return Err("the LPV1 wrapper is not an array".into());
+    };
+    let Some(Value::Array(unsigned)) = wrapper.first() else {
+        return Err("the LPV1 body is not an array".into());
+    };
+    assert_eq!(unsigned.len(), 9);
+    for edit in [
+        |fields: &mut Vec<Value>| {
+            fields.pop();
+        },
+        |fields: &mut Vec<Value>| fields.push(Value::Null),
+    ] {
+        let mut fields = unsigned.clone();
+        edit(&mut fields);
+        let mut encoded = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![Value::Array(fields), wrapper[1].clone()]),
+            &mut encoded,
+        )?;
+        assert!(LaunchParameters::from_canonical_cbor(&encoded).is_err());
     }
     Ok(())
 }

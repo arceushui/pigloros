@@ -61,9 +61,14 @@ pub(super) fn run(
     let layout = validate(inherited, &open)?;
     // The provider is the peer whose pidfd has the identity that LPV1 records for it: neither its
     // uid nor its pid is visible in the unit's namespaces. Any other outcome is a refusal.
-    (host.peer_identity(&layout.release) == Some(parameters.provider_identity))
-        .then_some(())
-        .ok_or(LauncherError::Peer)?;
+    // The launcher's own identity must differ from the provider's: on a kernel without pidfs
+    // inodes (before Linux 6.9) every pidfd has the same identity, which would name no process.
+    (host.peer_identity(&layout.release) == Some(parameters.provider_identity)
+        && host
+            .own_identity()
+            .is_some_and(|own| own != parameters.provider_identity))
+    .then_some(())
+    .ok_or(LauncherError::Peer)?;
     let observed_fdl1_digest = observed_fdl1(parameters.expected_fdl1_digest, &layout.entries)?;
     let adapter = hold_adapter(
         host.open_adapter(&parameters.adapter_path)

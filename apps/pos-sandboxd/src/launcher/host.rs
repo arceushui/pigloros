@@ -11,12 +11,14 @@ use pos_reference::sandbox_provider_protocol::FdIdentity;
 use rustix::fs::{open, Mode, OFlags};
 
 use super::{adapter::open_beneath, descriptors::scan_proc_self_fd, exec::replace_process_image};
-use crate::process_identity::peer_process_identity;
+use crate::process_identity::{own_process_identity, peer_process_identity};
 
 const ROOT_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 
 /// What the launch barrier needs from its surroundings.
 pub(super) trait LaunchHost {
+    /// The process identity of the launcher itself (from a pidfd it opens on itself).
+    fn own_identity(&self) -> Option<FdIdentity>;
     /// The process identity (pidfs mount ID and inode) of the `SO_PEERPIDFD` of the release
     /// channel `release`, or `None` when the kernel gives no pidfd.
     fn peer_identity(&self, release: &OwnedFd) -> Option<FdIdentity>;
@@ -37,6 +39,10 @@ pub(super) trait LaunchHost {
 pub(super) struct ProcessHost;
 
 impl LaunchHost for ProcessHost {
+    fn own_identity(&self) -> Option<FdIdentity> {
+        own_process_identity()
+    }
+
     fn peer_identity(&self, release: &OwnedFd) -> Option<FdIdentity> {
         peer_process_identity(release)
     }
