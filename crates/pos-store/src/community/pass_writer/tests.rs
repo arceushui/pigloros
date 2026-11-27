@@ -326,6 +326,7 @@ fn facts() -> CommunityReservePassFactsV1 {
         }],
         metadata_key: [0x61; 16],
         failure_cohort_key: [0x62; 16],
+        scope_set_digest: hash(90),
     }
 }
 
