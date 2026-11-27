@@ -64,7 +64,6 @@ fsmount
 fsopen
 fspick
 fstat
-fstatat
 fstatfs
 fsync
 ftruncate
@@ -300,7 +299,6 @@ symlinkat
 sync
 sync_file_range
 syncfs
-syscalls
 sysinfo
 syslog
 tee
