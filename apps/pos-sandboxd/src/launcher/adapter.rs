@@ -56,11 +56,14 @@ pub(super) struct HeldExecutable {
 /// `root`. `openat2` would do this in one call, but the attempt unit's `RestrictSUIDSGID=yes`
 /// makes systemd's seccomp filter answer `openat2` with `ENOSYS`, so the launcher cannot use it.
 pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
+    // Leading and doubled separators collapse, as in the kernel; a trailing one names a directory
+    // and is refused (`openat2` answers it with `ENOTDIR`).
+    let path = path.trim_start_matches('/');
     let names: Vec<&str> = path.split('/').filter(|name| !name.is_empty()).collect();
     let Some((last, parents)) = names.split_last() else {
         return Err(io::ErrorKind::InvalidInput.into());
     };
-    if names.iter().any(|name| matches!(*name, "." | "..")) {
+    if path.ends_with('/') || names.iter().any(|name| matches!(*name, "." | "..")) {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     let mut directory: Option<OwnedFd> = None;
