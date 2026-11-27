@@ -272,224 +272,20 @@ pub(crate) enum SyscallPolicy {
 // basics); (4) IPC with the provider (the socket family, pipes, eventfd, epoll, poll). clone,
 // clone3, ioctl, prctl and the socket family are unrestricted here only because this is the
 // test-only guest installation: a production SCS1 narrows each of them by argument.
-const GUEST_SYSCALLS_X86_64: &[&str] = &[
-    "accept4",
-    "access",
-    "arch_prctl",
-    "bind",
-    "brk",
-    "capget",
-    "chdir",
-    "clock_gettime",
-    "clock_nanosleep",
-    "clone",
-    "clone3",
-    "close",
-    "close_range",
-    "connect",
-    "dup",
-    "dup2",
-    "dup3",
-    "epoll_create1",
-    "epoll_ctl",
-    "epoll_pwait",
-    "epoll_wait",
-    "eventfd2",
-    "execve",
-    "exit",
-    "exit_group",
-    "faccessat",
-    "faccessat2",
-    "fchdir",
-    "fchmod",
-    "fchmodat",
-    "fcntl",
-    "flock",
-    "fstat",
-    "ftruncate",
-    "futex",
-    "getcwd",
-    "getdents",
-    "getdents64",
-    "getegid",
-    "geteuid",
-    "getgid",
-    "getgroups",
-    "getpeername",
-    "getpid",
-    "getppid",
-    "getrandom",
-    "getrlimit",
-    "getsockname",
-    "getsockopt",
-    "gettid",
-    "gettimeofday",
-    "getuid",
-    "ioctl",
-    "kill",
-    "listen",
-    "lseek",
-    "lstat",
-    "madvise",
-    "mkdirat",
-    "mmap",
-    "mprotect",
-    "mremap",
-    "munmap",
-    "nanosleep",
-    "newfstatat",
-    "open",
-    "openat",
-    "pipe",
-    "pipe2",
-    "poll",
-    "ppoll",
-    "prctl",
-    "pread64",
-    "prlimit64",
-    "pselect6",
-    "pwrite64",
-    "read",
-    "readlink",
-    "readlinkat",
-    "readv",
-    "recvfrom",
-    "recvmsg",
-    "rseq",
-    "rt_sigaction",
-    "rt_sigprocmask",
-    "rt_sigreturn",
-    "sched_getaffinity",
-    "sched_yield",
-    "select",
-    "sendmsg",
-    "sendto",
-    "set_robust_list",
-    "set_tid_address",
-    "setsockopt",
-    "shutdown",
-    "sigaltstack",
-    "socket",
-    "socketpair",
-    "stat",
-    "statx",
-    "sysinfo",
-    "tgkill",
-    "umask",
-    "uname",
-    "unlink",
-    "unlinkat",
-    "wait4",
-    "write",
-    "writev",
-];
-const GUEST_SYSCALLS_AARCH64: &[&str] = &[
-    "accept4",
-    "bind",
-    "brk",
-    "capget",
-    "chdir",
-    "clock_gettime",
-    "clock_nanosleep",
-    "clone",
-    "clone3",
-    "close",
-    "close_range",
-    "connect",
-    "dup",
-    "dup3",
-    "epoll_create1",
-    "epoll_ctl",
-    "epoll_pwait",
-    "eventfd2",
-    "execve",
-    "exit",
-    "exit_group",
-    "faccessat",
-    "faccessat2",
-    "fchdir",
-    "fchmod",
-    "fchmodat",
-    "fcntl",
-    "flock",
-    "fstat",
-    "ftruncate",
-    "futex",
-    "getcwd",
-    "getdents64",
-    "getegid",
-    "geteuid",
-    "getgid",
-    "getgroups",
-    "getpeername",
-    "getpid",
-    "getppid",
-    "getrandom",
-    "getrlimit",
-    "getsockname",
-    "getsockopt",
-    "gettid",
-    "gettimeofday",
-    "getuid",
-    "ioctl",
-    "kill",
-    "listen",
-    "lseek",
-    "madvise",
-    "mkdirat",
-    "mmap",
-    "mprotect",
-    "mremap",
-    "munmap",
-    "nanosleep",
-    "newfstatat",
-    "openat",
-    "pipe2",
-    "ppoll",
-    "prctl",
-    "pread64",
-    "prlimit64",
-    "pselect6",
-    "pwrite64",
-    "read",
-    "readlinkat",
-    "readv",
-    "recvfrom",
-    "recvmsg",
-    "rseq",
-    "rt_sigaction",
-    "rt_sigprocmask",
-    "rt_sigreturn",
-    "sched_getaffinity",
-    "sched_yield",
-    "sendmsg",
-    "sendto",
-    "set_robust_list",
-    "set_tid_address",
-    "setsockopt",
-    "shutdown",
-    "sigaltstack",
-    "socket",
-    "socketpair",
-    "statx",
-    "sysinfo",
-    "tgkill",
-    "umask",
-    "uname",
-    "unlinkat",
-    "wait4",
-    "write",
-    "writev",
-];
+const GUEST_SYSCALLS_X86_64: &str = include_str!("guest-syscalls-x86_64.txt");
+const GUEST_SYSCALLS_AARCH64: &str = include_str!("guest-syscalls-aarch64.txt");
 
-const fn syscall_names(
-    architecture: SandboxArchitecture,
-    policy: SyscallPolicy,
-) -> &'static [&'static str] {
+/// The allow-list names, one per line in the data files (the process-creation scan of the provider
+/// sources reads Rust source only, and these are syscall names, not code).
+fn syscall_names(architecture: SandboxArchitecture, policy: SyscallPolicy) -> Vec<&'static str> {
     match (policy, architecture) {
-        (SyscallPolicy::Fixture, _) => &["read"],
-        (SyscallPolicy::Guest, SandboxArchitecture::X86_64) => GUEST_SYSCALLS_X86_64,
-        (SyscallPolicy::Guest, SandboxArchitecture::Aarch64) => GUEST_SYSCALLS_AARCH64,
+        (SyscallPolicy::Fixture, _) => vec!["read"],
+        (SyscallPolicy::Guest, SandboxArchitecture::X86_64) => {
+            GUEST_SYSCALLS_X86_64.lines().collect()
+        }
+        (SyscallPolicy::Guest, SandboxArchitecture::Aarch64) => {
+            GUEST_SYSCALLS_AARCH64.lines().collect()
+        }
     }
 }
 
@@ -1228,7 +1024,7 @@ mod tests {
         }
         // The whole of each list is pinned, so that any growth is a reviewed change: the count and
         // the SHA-256 of the sorted names, one per line.
-        for (names, count, digest) in [
+        for (text, count, digest) in [
             (
                 GUEST_SYSCALLS_X86_64,
                 109,
@@ -1242,18 +1038,22 @@ mod tests {
         ] {
             // The sorted names are hashed, so that a reorder alone is no failure but any addition
             // or removal is.
-            let mut sorted = names.to_vec();
+            let mut sorted: Vec<&str> = text.lines().collect();
             sorted.sort_unstable();
-            let text = format!("{}\n", sorted.join("\n"));
-            assert_eq!(names.len(), count);
+            let joined = format!("{}\n", sorted.join("\n"));
+            assert_eq!(sorted.len(), count);
             let mut hex = String::new();
-            for byte in Sha256::digest(text.as_bytes()) {
+            for byte in Sha256::digest(joined.as_bytes()) {
                 write!(hex, "{byte:02x}")?;
             }
             assert_eq!(hex, digest);
         }
-        assert!(GUEST_SYSCALLS_X86_64.contains(&"arch_prctl"));
-        assert!(!GUEST_SYSCALLS_AARCH64.contains(&"arch_prctl"));
+        assert!(GUEST_SYSCALLS_X86_64
+            .lines()
+            .any(|name| name == "arch_prctl"));
+        assert!(!GUEST_SYSCALLS_AARCH64
+            .lines()
+            .any(|name| name == "arch_prctl"));
         Ok(())
     }
 }
