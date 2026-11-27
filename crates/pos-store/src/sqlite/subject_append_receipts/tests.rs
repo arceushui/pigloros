@@ -257,7 +257,8 @@ fn the_table_accepts_one_good_row_and_refuses_each_malformed_column() -> TestRes
             "lower-case event id",
         ),
         (3, Value::Blob(vec![b'A'; 26]), "blob event id"),
-        (4, Value::Text("7".to_owned()), "text expiry"),
+        (4, Value::Text("seven".to_owned()), "text expiry"),
+        (4, Value::Blob(vec![7]), "blob expiry"),
         (4, Value::Real(7.5), "real expiry"),
     ];
     for (column, value, label) in bad {
