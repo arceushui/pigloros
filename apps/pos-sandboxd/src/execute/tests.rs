@@ -649,7 +649,13 @@ impl LaunchBarrier for FakeBarrier {
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
+        network: Option<&(dyn crate::NetworkReadback + Sync)>,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
+        // A Local attempt hands the barrier its network to read back.
+        if let Some(network) = network {
+            record(&self.log, "readback");
+            assert!(network.readback(std::time::Instant::now()).is_err());
+        }
         record(&self.log, "release");
         assert_eq!(cgroup.identity(), FAKE_CGROUP);
         self.hand(attempt);
@@ -752,6 +758,16 @@ struct TornDownConnector {
 impl Drop for TornDownConnector {
     fn drop(&mut self) {
         self.torn_down.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl crate::NetworkReadback for TornDownConnector {
+    fn readback(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> Result<pos_reference::sandbox_provider_protocol::LocalNetworkReadback, crate::ReadbackError>
+    {
+        Err(crate::ReadbackError::Transport)
     }
 }
 
@@ -1052,6 +1068,7 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
             "recheck",
             "start",
             "bind_cgroup",
+            "readback",
             "release"
         ]
     );
@@ -1083,7 +1100,11 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let handed = Arc::clone(&barrier.requested);
     assert_eq!(active.attempt_id(), ATTEMPT);
     let directory = File::open("/")?;
-    let _release = barrier.release(&active, CgroupView::new(directory.as_fd(), FAKE_CGROUP));
+    let _release = barrier.release(
+        &active,
+        CgroupView::new(directory.as_fd(), FAKE_CGROUP),
+        None,
+    );
     let seen = released.lock().map_err(|error| error.to_string())?.clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(
@@ -2037,6 +2058,16 @@ impl crate::RemoveNetwork for PanickingConnector {
     }
 }
 
+impl crate::NetworkReadback for PanickingConnector {
+    fn readback(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> Result<pos_reference::sandbox_provider_protocol::LocalNetworkReadback, crate::ReadbackError>
+    {
+        Err(crate::ReadbackError::Transport)
+    }
+}
+
 impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for PanickingConnector {
     fn connect(
         &mut self,
@@ -2107,6 +2138,16 @@ async fn an_unacknowledged_kill_after_a_protocol_violation_is_reported() -> Test
 struct KillAwareConnector {
     killed: Arc<AtomicBool>,
     saw_kill: Arc<AtomicBool>,
+}
+
+impl crate::NetworkReadback for KillAwareConnector {
+    fn readback(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> Result<pos_reference::sandbox_provider_protocol::LocalNetworkReadback, crate::ReadbackError>
+    {
+        Err(crate::ReadbackError::Transport)
+    }
 }
 
 impl crate::RemoveNetwork for KillAwareConnector {

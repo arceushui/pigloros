@@ -34,6 +34,8 @@ SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ !cancelled() && needs.coverage.result == 'success' && "
     "(needs.owner-bridge-windows.result == 'success' || "
     "(needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && "
+    "(needs.owner-ctap-uhid.result == 'success' || "
+    "(needs.ci_change_scope.outputs.owner_uhid == 'false' && needs.owner-ctap-uhid.result == 'skipped')) && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
@@ -47,8 +49,32 @@ SHIM_ALLOW_ENV = {
         "${{ needs.ci_change_scope.outputs.owner_windows == 'false' && "
         "'crates/pos-owner-bridge-windows/**' || '' }}"
     ),
+    # The pos-owner-ctap sources are hidden from scoring only when the owner
+    # U-tier, whose counters the trusted baseline includes, did not run.
+    "UHID_ALLOW": (
+        "${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && "
+        "'crates/pos-owner-ctap/**' || '' }}"
+    ),
 }
 SHIM_ALLOW_ARG = '${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"} '
+UHID_ALLOW_ARG = '${UHID_ALLOW:+--allow "${UHID_ALLOW}"} '
+# The owner U-tier (ADR-110 E20, Redmine #1476) ran unless the trusted scope
+# explicitly said 'false'; an empty or unknown scope fails closed to the merge.
+UHID_MEASURED = "${{ needs.ci_change_scope.outputs.owner_uhid != 'false' }}"
+UHID_SKIPPED_BASELINE = (
+    "${{ steps.baseline.outputs.run-id != '' && "
+    "needs.ci_change_scope.outputs.owner_uhid == 'false' }}"
+)
+UHID_MERGE_COMMAND = (
+    "python scripts/merge_owner_uhid_lcov.py \\\n"
+    '  --linux "${{ runner.temp }}/cargo-crap-coverage.lcov" \\\n'
+    '  --uhid "${{ runner.temp }}/owner-uhid-lcov/owner-uhid.lcov" \\\n'
+    '  --receipt "${{ runner.temp }}/owner-uhid-lcov/owner-uhid-lcov-receipt.json" \\\n'
+    '  --workspace "${{ github.workspace }}" \\\n'
+    '  --checkout "${{ github.sha }}" \\\n'
+    '  --output "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov"\n'
+    'mv "${{ runner.temp }}/cargo-crap-coverage-uhid.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"\n'
+)
 LINUX_ONLY_COVERAGE_COMMAND = (
     'cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"'
 )
@@ -59,6 +85,9 @@ DROP_SHIM_BASELINE_COMMAND = (
     "test(\"(^|/)crates/pos-owner-bridge-windows/\") | not))' \\\n"
     '  "${baseline}" > "${baseline}.scoped"\n'
     'mv "${baseline}.scoped" "${baseline}"\n'
+)
+DROP_UHID_BASELINE_COMMAND = DROP_SHIM_BASELINE_COMMAND.replace(
+    "(^|/)crates/pos-owner-bridge-windows/", "(^|/)crates/pos-owner-ctap/src/"
 )
 TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -109,6 +138,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/executor/scenario_room/tests.rs",
     "src/decision_preview/tests.rs",
     "src/executor/decision_preview/tests.rs",
+    "src/decision_preview/route/tests.rs",
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",
@@ -132,6 +162,7 @@ GENERATE_BASELINE_COMMAND = (
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
     + SHIM_ALLOW_ARG
+    + UHID_ALLOW_ARG
     + "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
@@ -141,6 +172,7 @@ ANALYZE_COMMAND = (
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
     + SHIM_ALLOW_ARG
+    + UHID_ALLOW_ARG
     + '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
@@ -517,8 +549,8 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage", "owner-bridge-windows"],
-        "cargo-crap must wait for hosted coverage and the native lane",
+        job.get("needs") == ["ci_change_scope", "coverage", "owner-bridge-windows", "owner-ctap-uhid"],
+        "cargo-crap must wait for hosted coverage, the native lane and the owner U-tier",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
@@ -528,14 +560,16 @@ def check_workflow(
     require(job.get("timeout-minutes") == 70, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
-    require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
+    require(len(steps) == 19, "cargo-crap must contain the exact trusted step sequence")
     require([step.get("name") for step in steps] == [
         None, None, "Install cargo-crap", "Download hosted LCOV", "Download hosted native LCOV",
         "Bind native and Linux coverage to this checkout",
         "Use Linux coverage without the unmeasured native shim",
+        "Download owner U-tier LCOV", "Add owner U-tier coverage to this checkout's LCOV",
         "Reject repository cargo-crap configuration",
         "Resolve trusted cargo-crap baseline", "Download trusted base baseline",
         "Drop the unmeasured native shim from the trusted baseline",
+        "Drop the unmeasured owner U-tier sources from the trusted baseline",
         "Generate trusted current baseline", "Analyze CRAP score changes", "Enforce cargo-crap policy",
         "Upload cargo-crap report", "Publish trusted main baseline",
     ], "cargo-crap evidence steps must retain their reviewed order")
@@ -580,12 +614,25 @@ def check_workflow(
         "name": "Use Linux coverage without the unmeasured native shim", "if": NATIVE_SKIPPED,
         "run": LINUX_ONLY_COVERAGE_COMMAND,
     }, "cargo-crap may score Linux LCOV alone only when the native lane is out of scope")
+    require(named_step(steps, "Download owner U-tier LCOV") == {
+        "name": "Download owner U-tier LCOV", "if": UHID_MEASURED, "uses": DOWNLOAD_ACTION,
+        "with": {"name": "owner-uhid-lcov-${{ github.sha }}", "path": "${{ runner.temp }}/owner-uhid-lcov"},
+    }, "cargo-crap must download the owner U-tier LCOV for this checkout")
+    require(named_step(steps, "Add owner U-tier coverage to this checkout's LCOV") == {
+        "name": "Add owner U-tier coverage to this checkout's LCOV", "if": UHID_MEASURED,
+        "run": UHID_MERGE_COMMAND,
+    }, "cargo-crap must add the actual owner U-tier counters before scoring")
     require(named_step(steps, "Drop the unmeasured native shim from the trusted baseline") == {
         "name": "Drop the unmeasured native shim from the trusted baseline",
         "if": "${{ steps.baseline.outputs.run-id != '' && "
               "needs.ci_change_scope.outputs.owner_windows == 'false' }}",
         "run": DROP_SHIM_BASELINE_COMMAND,
     }, "only an out-of-scope native lane may drop shim entries from the trusted baseline")
+    require(named_step(steps, "Drop the unmeasured owner U-tier sources from the trusted baseline") == {
+        "name": "Drop the unmeasured owner U-tier sources from the trusted baseline",
+        "if": UHID_SKIPPED_BASELINE,
+        "run": DROP_UHID_BASELINE_COMMAND,
+    }, "only a skipped owner U-tier may drop pos-owner-ctap entries from the trusted baseline")
     require(
         named_step(steps, "Reject repository cargo-crap configuration")
         == {

@@ -26,8 +26,17 @@ sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
 zeroize = { workspace = true }
 
+# ADR-110 E20 AM-110g: the hidraw transport, the tty prompt and the process hardening are
+# Linux-only safe Rust over rustix. The crate-local features are named here and the workspace
+# entry stays fs/std; pty serves only the pseudo-terminal tests.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["termios", "event", "process"] }
+
 [dev-dependencies]
 pos-owner-bridge = { path = "../pos-owner-bridge", features = ["test-support"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["pty"] }
 
 [lints]
 workspace = true
@@ -35,4 +44,18 @@ workspace = true
 [[test]]
 name = "ceremonies"
 path = "tests/ceremonies/main.rs"
+required-features = ["test-support"]
+
+# The P-tier tests of the Linux adapters over datagram pairs, pseudo-terminals and a temporary
+# sysfs, and the U-tier tests over a kernel uhid device (ADR-110 E20 LG; Redmine #1476). The
+# U-tier tests run only when OWNER_CTAP_UHID names a scenario.
+[[test]]
+name = "hostio"
+path = "tests/hostio/main.rs"
+required-features = ["test-support"]
+
+# The virtual FIDO device of the U-tier: a uhid device backed by the software authenticator.
+[[example]]
+name = "uhid-fido"
+path = "examples/uhid_fido.rs"
 required-features = ["test-support"]

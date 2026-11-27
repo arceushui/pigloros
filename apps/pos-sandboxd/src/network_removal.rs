@@ -10,11 +10,11 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use pos_reference::sandbox_provider_protocol::NetworkEndpointConnector;
+use pos_reference::sandbox_provider_protocol::{LocalNetworkReadback, NetworkEndpointConnector};
 
-use crate::{NetworkRemovalFailure, RemoveNetwork};
+use crate::{NetworkReadback, NetworkRemovalFailure, ReadbackError, RemoveNetwork};
 
 /// What one execution's connectors reported.
 #[derive(Debug, Default)]
@@ -85,6 +85,12 @@ impl<C: RemoveNetwork> OwnedConnector<C> {
 impl<C: NetworkEndpointConnector + RemoveNetwork> NetworkEndpointConnector for OwnedConnector<C> {
     fn connect(&mut self, endpoint: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         self.connector.connect(endpoint, timeout)
+    }
+}
+
+impl<C: NetworkReadback + RemoveNetwork> NetworkReadback for OwnedConnector<C> {
+    fn readback(&self, deadline: Instant) -> Result<LocalNetworkReadback, ReadbackError> {
+        self.connector.readback(deadline)
     }
 }
 

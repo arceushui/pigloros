@@ -20,7 +20,7 @@ use super::NamespaceName;
 /// The calling thread's network namespace file.
 const THREAD_NAMESPACE: &str = "/proc/thread-self/ns/net";
 /// `NSFS_MAGIC`: the filesystem of a namespace file.
-const NSFS_MAGIC: i128 = 0x6e73_6673;
+pub(super) const NSFS_MAGIC: i128 = 0x6e73_6673;
 /// Open read-only and close on exec.
 pub(super) const READ_ONLY: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
 /// Create a new entry, read-only and close on exec, and fail if it exists.
