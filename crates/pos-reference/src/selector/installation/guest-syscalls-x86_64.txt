@@ -11,6 +11,7 @@ arch_prctl
 bind
 bpf
 brk
+cacheflush
 capget
 capset
 chdir
@@ -19,8 +20,11 @@ chown
 chroot
 clock_adjtime
 clock_getres
+clock_getres_time64
 clock_gettime
+clock_gettime64
 clock_nanosleep
+clock_nanosleep_time64
 clock_settime
 clone
 clone3
@@ -77,6 +81,8 @@ fstatfs
 fsync
 ftruncate
 futex
+futex_time64
+futex_waitv
 futimesat
 get_kernel_syms
 get_mempolicy
@@ -87,9 +93,13 @@ getcwd
 getdents
 getdents64
 getegid
+getegid32
 geteuid
+geteuid32
 getgid
+getgid32
 getgroups
+getgroups32
 getitimer
 getpeername
 getpgid
@@ -100,7 +110,9 @@ getppid
 getpriority
 getrandom
 getresgid
+getresgid32
 getresuid
+getresuid32
 getrlimit
 getrusage
 getsid
@@ -109,6 +121,7 @@ getsockopt
 gettid
 gettimeofday
 getuid
+getuid32
 getxattr
 init_module
 inotify_add_watch
@@ -148,6 +161,8 @@ lookup_dcookie
 lremovexattr
 lseek
 lsetxattr
+lsm_get_self_attr
+lsm_list_modules
 lstat
 madvise
 mbind
@@ -164,6 +179,7 @@ mlock
 mlock2
 mlockall
 mmap
+mmap2
 modify_ldt
 mount
 mount_setattr
@@ -177,6 +193,7 @@ mq_timedreceive
 mq_timedsend
 mq_unlink
 mremap
+mseal
 msgctl
 msgget
 msgrcv
@@ -242,6 +259,8 @@ renameat
 renameat2
 request_key
 restart_syscall
+riscv_flush_icache
+riscv_hwprobe
 rmdir
 rseq
 rt_sigaction
@@ -279,6 +298,7 @@ set_mempolicy
 set_robust_list
 set_thread_area
 set_tid_address
+set_tls
 setdomainname
 setfsgid
 setfsuid
@@ -307,6 +327,7 @@ shutdown
 sigaltstack
 signalfd
 signalfd4
+sigreturn
 socket
 socketpair
 splice
@@ -338,12 +359,14 @@ times
 tkill
 truncate
 tuxcall
+ugetrlimit
 umask
 umount2
 uname
 unlink
 unlinkat
 unshare
+uretprobe
 uselib
 userfaultfd
 ustat
