@@ -455,7 +455,7 @@ where
         })
 }
 
-fn deliver_latest<S: KeyRegistryHistoricalDecryptionPortV1>(
+pub(crate) fn deliver_latest<S: KeyRegistryHistoricalDecryptionPortV1>(
     store: &mut S,
     keys: &SubjectKeyringV1,
     registry: Option<&KeyRegistryStateV1>,

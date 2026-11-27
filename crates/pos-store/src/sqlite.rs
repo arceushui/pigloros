@@ -184,6 +184,8 @@ mod local_erasure;
 mod local_replica_residual;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub(crate) mod owner_store_binding;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod owner_subject_field_read;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
