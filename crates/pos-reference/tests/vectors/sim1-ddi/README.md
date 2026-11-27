@@ -2,8 +2,9 @@
 
 These test-only fixtures are externally generated images used by the
 `sandbox_admission_contract_public` tests. Each SIM1 carries the exact 32-byte
-verity salt and the release certificate's kernel key description. There is one Discoverable Disk Image per supported
-architecture. Directories use systemd-repart's `--architecture` names:
+verity salt and the release certificate's kernel key description. There is one
+Discoverable Disk Image per supported architecture. Directories use
+systemd-repart's `--architecture` names:
 `x86-64` is SIM1 `x86_64` and `arm64` is `aarch64`. Each image has an EROFS
 root, its dm-verity hash partition and a detached RSA-2048, SHA-256,
 no-attributes PKCS#7 signature over the exact 64 lowercase hexadecimal
@@ -80,7 +81,7 @@ signed/unsigned attributes. Every algorithm identifier carries an explicit
 ASN.1 NULL parameter: SHA-256 (digest set and SignerInfo), `rsaEncryption`
 (SignerInfo and SPKI) and `sha256WithRSAEncryption` (certificate). The
 signatures are 256 bytes. The verifier's accepted webpki constant
-  (`RSA_PKCS1_2048_8192_SHA256`) verifies them in the public cases below.
+(`RSA_PKCS1_2048_8192_SHA256`) verifies them in the public cases below.
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
@@ -139,8 +140,10 @@ JSON fields in a copy of the expanded image; no signature is regenerated.
   derived from `--seed` (`derive_salt` and
   `salt_size = sizeof(p->verity_salt)` in `src/repart/repart.c`). For the
   260.5 producer used here, `verity.json` records the salt that `describe.py`
-  read from each verity superblock. SIM1 carries that exact salt; admission
-  checks it against the held image's superblock and the live dm-verity table.
+  read from each verity superblock. SIM1 carries that salt; provider admission
+  checks it against the superblock in the held image. Attachment readback
+  verifies the dm-verity device and its loop backing but does not inspect the
+  live dm-verity table.
 - **No release trust installation.** The
   release certificate is compiled into the appliance kernel's
   `.builtin_trusted_keys`. These fixture certificates are not, and these

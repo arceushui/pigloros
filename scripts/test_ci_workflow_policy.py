@@ -283,10 +283,10 @@ PREFLIGHT_POLICY_STEPS = {
             "run": "python scripts/test_air_gapped_seccomp_exec.py",
         },
         {
-            "name": "Check the community Plugin handoff READMEs",
+            "name": "Check current community Plugin adapter documentation",
             "run": (
-                "python scripts/check_handoff_readme.py\n"
-                "python scripts/test_check_handoff_readme.py\n"
+                "python scripts/check_plugin_adapter_docs.py\n"
+                "python scripts/test_check_plugin_adapter_docs.py\n"
             ),
         },
         {

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CHECKER = ROOT / "scripts/check_handoff_readme.py"
+CHECKER = ROOT / "scripts/check_plugin_adapter_docs.py"
 SUPERVISOR = "crates/pos-plugin-supervisor/README.md"
 ADAPTER = "apps/pos-plugin-conformance-adapter/README.md"
 
@@ -119,7 +119,7 @@ def main() -> None:
     check_both_reported()
     check_missing_files()
     check_repository()
-    print("the handoff README checker rejects every missing sentence in both READMEs")
+    print("the adapter documentation checker rejects every missing statement")
 
 
 if __name__ == "__main__":
