@@ -1,9 +1,8 @@
 # systemd Sandbox Provider components
 
-This package holds the systemd-specific implementation of Accepted ADR-069 and
-ADR-072. It is separate from the reference evaluator and provider-neutral wire
-contracts. Redmine #214 tracks the delivered component foundation. Complete
-daemon/runtime delivery remains tracked by epic #287 tickets #437–#444.
+This package implements the Linux systemd Sandbox Provider. The provider-neutral protocol and
+reference evaluator live in `crates/pos-reference`. The `pos-sandboxd` binary provides the
+`provider-runtime`, `launch-barrier`, and `recovery-peer` modes described below.
 
 `SystemCallFilter` compiles a canonical selected SCS1 into the exact `(bas)`
 requested property, checks the selected digest and architecture, and compares
@@ -11,11 +10,9 @@ typed readback with the separate complete expected array without normalization.
 The selected digest and architecture must come from authenticated admission;
 this component neither grants admission nor establishes kernel enforcement.
 
-Public integration tests use both checked-in production architecture records
-and the selected zbus 6.0.0 wire serializer. Workspace GitHub
-test, coverage and mutation gates execute those tests; lint checks their code.
-No daemon, test launcher, host group expansion, direct process fallback or
-runtime admission shortcut is supplied by this slice.
+Checked-in public tests exercise the systemd adapters and their host-owned ports. Production
+execution goes through the provider runtime and its admission path. There is no direct process
+fallback.
 
 `SystemdTransientUnitTransport` consumes that closed property bundle and calls
 the generated systemd `StartTransientUnit` proxy with the fixed `fail` job mode
@@ -32,8 +29,8 @@ typed systemd D-Bus. Stop uses `replace` mode so a queued start job cannot
 block cleanup; start retains `fail` mode. A completed stop job or acknowledged
 SIGKILL is not proof that the unit or cgroup is absent. The separate cgroup
 observer can verify process emptiness, but not complete cleanup. The bounded
-`execute` orchestration and launcher readiness/release barrier are implemented
-below; complete resource cleanup and lifecycle recovery remain #1199 and #1200.
+`execute` orchestration and the launcher readiness/release barrier are implemented below. The
+provider runtime performs restart reconciliation before opening admission.
 
 `wait_for_attempt_unit_absence` queries the exact attempt name with typed
 `GetUnit` until systemd reports `org.freedesktop.systemd1.NoSuchUnit`, under
@@ -41,7 +38,7 @@ one caller-supplied absolute deadline. A loaded object, including an inactive
 or failed unit, keeps waiting; all other errors reject. The sealed result is
 only a point-in-time manager observation. It does not fence later starts or
 prove process/resource absence, authorize unmount or intent deletion, or reopen
-admission. Complete lifecycle ownership and cleanup remain #1199 and #1200.
+admission. The runtime keeps admission closed until reconciliation completes.
 
 `stop_attempt_unit` joins the retained cgroup's bounded stop/grace/escalation
 with exact-name unit removal. After kernel process emptiness, it resets only
@@ -52,8 +49,7 @@ acknowledgement, including `NoSuchUnit`, cannot substitute for the fresh query.
 The lifecycle controller retains exclusive ownership and captures terminal
 systemd state before teardown, since unloading discards that state. The sealed
 joint observation proves neither a later-start fence nor complete resource
-cleanup; mount/device/directory/intent cleanup and restart reconciliation remain
-#1199 and #1200.
+cleanup. The lifecycle controller and restart reconciliation own those steps.
 
 `VerifiedRootMount::detach` consumes the retained mount, rechecks the exact
 durable directory record and private parent identities, then repeats the
@@ -76,8 +72,8 @@ unavailable sysfs, malformed evidence and backwards generations cannot. Other
 held references delay removal and exhaust the same deadline. Errors, timeout
 and cancellation (even before the first poll) quarantine the owner. Intent and
 directories remain; success grants no lifecycle, intent-deletion or admission
-authority. Unit tests reuse the attachment kernel port and fixtures; positive
-mounted-host conformance remains #444.
+authority. Unit tests reuse the attachment kernel port and fixtures. The separate QEMU evidence
+guest checks the mounted-host path.
 
 `PreparedAttemptDirectory::remove_unmounted` consumes the held directory
 ownership, rechecks its durable identity record and empty unmounted tree, then
@@ -88,8 +84,8 @@ retains exclusive ownership and stops the unit and unmounts the root first.
 The durable intent remains unchanged for later full reconciliation. Read-only
 recovery inventory recognizes the root-removed/attempt-present crash frontier,
 while every surviving directory must match its recorded identity. This stage
-does not prove other resource absence or reopen admission; full cleanup remains
-#1199 and #1200.
+does not prove other resource absence or reopen admission. Restart reconciliation performs the
+remaining cleanup before it opens admission.
 
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
@@ -99,11 +95,11 @@ converted from milliseconds to microseconds with overflow rejection. Values
 that pinned systemd cannot represent as exact finite ceilings fail before
 submission; the generated service proxy then reads back each typed `t` value.
 This is requested-state verification, not ELM1 authentication or proof that the
-kernel enforced the effective limit. Provider admission remains in #437–#438;
-kernel limit reads and signed limit evidence remain in #443.
+kernel enforced the effective limit. Provider admission and kernel enforcement are separate
+checks; the runtime's evidence path reports observed values.
 
-`MountfsdImageActivator` is the private ADR-087 `ImageActivator` transport
-(#439). It connects only to `/run/systemd/io.systemd.MountFileSystem`,
+`MountfsdImageActivator` is the private `ImageActivator` transport. It connects only to
+`/run/systemd/io.systemd.MountFileSystem`,
 requires a root peer, and performs one `MountImage` call per connection: the
 held image descriptor travels as index 0 with the fixed read-only,
 non-interactive `root=signed+erofs:=absent` request, and the reply must return
@@ -115,23 +111,22 @@ NUL-terminated message. The captured bytes are then parsed under a closed
 systemd v260.2 schema. Under ported v260.2 `image_policy_equivalent()` rules,
 the effective image policy must be equivalent to the request or, because
 v260.2 intersects it with a default that carries no filesystem flags, to the
-request with only its filesystem flags removed (accepted ADR-087 Part
-A.1 effective-policy amendment). EROFS stays enforced by the SIM1 precheck, the
+request with only its filesystem flags removed. EROFS stays enforced by the SIM1 precheck, the
 reply's `fileSystemType` and kernel readback. Every rejection closes all
 received descriptors. The result is a quarantined root mount, not proof of the
 image, the mount or its dm-verity identity.
 
 `ActivationImage`'s only constructor is
 `ActivationImage::from_admission(&HeldImageAdmission)`. It duplicates exactly
-the held image that #438 admitted, close-on-exec, and takes the root partition
+the held image admitted by the host, close-on-exec, and takes the root partition
 and architecture from the same SIM1, so no caller can activate an unadmitted
 descriptor.
 
-`activate_admitted_root(&HeldImageAdmission, &PreparedAttemptDirectory)` (#440)
+`activate_admitted_root(&HeldImageAdmission, &PreparedAttemptDirectory)`
 composes the attempt:
 
 - It requires the kernel command line to carry the one plain
-  `systemd.allow_userspace_verity=0` word (ADR-087 Part C.3); otherwise it
+  `systemd.allow_userspace_verity=0` word; otherwise it
   returns host feature unavailable before mountfsd is called.
 - It bounds the connection and the `MountImage` call to 60 s each.
 - It attaches the sealed root mount by descriptor onto the held attempt root
@@ -141,11 +136,11 @@ composes the attempt:
   backing identity. It then re-admits the held image.
 - Any failure after attachment detaches the mount.
 
-The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
-cleanup (#1199/#1200) and packaged-build conformance (#444) remain separate.
+The provider does not verify the live dm-verity table during activation. The QEMU evidence guest
+records that state separately. Restart reconciliation handles lifecycle cleanup.
 
 With the `test-support` feature, the `packaged_conformance` module and the
-`pos-sandboxd-conformance` binary drive this path in the #444 QEMU evidence
+`pos-sandboxd-conformance` binary drive this path in the QEMU evidence
 guest only (`deploy/nixos/qemu-evidence`). The binary stages the dev/test
 installation around one image, admits it, registers and prepares one attempt,
 and calls `activate_admitted_root`. While its standard input stays open, it
@@ -161,9 +156,9 @@ builds.
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
 back as a typed `a(ss)` value. A zero ceiling requests no mount at all, because
 tmpfs reads `size=0` as unbounded. The image must provide the `/work`
-directory, and #444 records the effective mount.
+directory, and the QEMU evidence collector records the effective mount.
 
-`execute` (#441) composes one reserved, admitted attempt from its rechecked
+`execute` composes one reserved, admitted attempt from its rechecked
 root to its end. `AdmittedAttempt::from_entry` takes the facts of an
 `AdmittedEntry` only together with the directory prepared for that attempt and
 image. The attempt's planned mode must equal the admitted launch policy's. The
@@ -182,7 +177,7 @@ is kept; after a watchdog expiry the unit is killed while the proxy thread is
 still being joined. The Local
 network port owns its namespace, and the execute path removes it on every
 path, serving or not, and at the normal end, reporting a removal that failed
-as `network_removal` of the result (ADR-069 R14 N7). A failed removal leaves
+as `network_removal` of the result. A failed removal leaves
 the attempt's `cleanup.result` at 1 and quarantines the lifecycle. A
 cancelled execution future drops its network without a report; the port's
 slot quarantine is the record then. The unit host, the barrier and the Local
@@ -197,7 +192,7 @@ network are ports, so the composition is exercised without systemd.
   planned endpoints against the admitted attempt and its launch policy, and
   the namespace's and the channel's attempt; the token carries the attempt it
   checked. The proxy serves on a blocking thread that the attempt watchdog
-  closes. `NamespacedLocalNetwork` (#911) establishes the attempt's network
+  closes. `NamespacedLocalNetwork` establishes the attempt's network
   namespace, veth pair and nftables firewall for exactly the admitted
   endpoints, in the lowest free slot of the installation's reserved range, and
   reads it all back before it returns; its connector opens each connection
@@ -215,8 +210,8 @@ network are ports, so the composition is exercised without systemd.
 - Air-Gapped and Fork carry no network authority and no live descriptor.
 
 The result carries the ordered NXT1 transcript digests for SPR1 and the proxy
-termination for the SAU1 terminal classification; signing and classification
-are #443, and complete resource/lifecycle cleanup is #1199/#1200. A watchdog that
+termination for the SAU1 terminal classification. The evidence classifier signs and classifies
+the result. A watchdog that
 closed the channel is reported by `ServedProxy::watchdog_expired`, not by the
 termination, which reads a closed channel as a clean close.
 
@@ -277,13 +272,11 @@ refuses the release if any changed (`BarrierError::Refused` carries the typed
 `|| root.recheck(&directory, &entry)`, the cancellation flag the attempt
 lifecycle sets, and the observed readback-set digest behind `ObservedReadback`.
 
-Not composed here, and stated so that nothing is assumed: the observed
-readback-set digest itself (#443 owns the kernel observations and their
-digest, and the provider must supply an `ObservedReadback` before it can
-release), the adapter's mount and inode identity (the composition root
-supplies it in `BarrierEvidence`), the setting of the cancellation flag
-(#1199/#1200), adapter stdin and stdout transport, and the host egress table
-and orphan sweep of the Local namespace (#911 slice 4).
+The release barrier does not build the observed readback-set digest; its caller supplies an
+`ObservedReadback`. The composition root supplies the adapter's mount and inode identity in
+`BarrierEvidence`. The attempt lifecycle supplies the cancellation flag. The barrier also does not
+provide adapter stdin or stdout transport. The provider runtime composes the Local network and its
+orphan sweep with restart reconciliation before it opens admission.
 `AdmittedAttempt::check_local` binds an admission against the launch-policy
 view and the authority heads the attempt was admitted with; that the recheck
 closure belongs to the same admitted entry is the caller's contract
@@ -298,11 +291,11 @@ start one), and
 and manifests, because zbus receives system-bus descriptors without
 `MSG_CMSG_CLOEXEC`.
 
-## Launcher mode and release barrier (#441)
+## Launcher mode and release barrier
 
 The package now builds one binary, `pos-sandboxd`, whose mode is chosen by
-argv. One mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
-Launcher, started by the provider as the transient unit's main process. It
+argv. One mode is `launch-barrier <lpv1-hex>`: the Sandbox Release Launcher,
+started by the provider as the transient unit's main process. It
 adopts the descriptors systemd passes (`sd-listen-fds`), validates their names,
 types, count, order and the absence of any other open descriptor, accepts the
 release channel only from a root `SO_PEERCRED` peer, opens and hashes the
@@ -315,14 +308,13 @@ outcome, including EOF, ends the process without running adapter bytes.
 
 The launcher code path never calls admission or the verifier (a hosted source
 test enforces it). CI builds the binary for `x86_64` and `aarch64`
-`unknown-linux-musl` and requires no `PT_INTERP` and no dynamic section.
-ADR-087 A.3 governs the daemon mode; the launcher's final exec creates no
-process.
+`unknown-linux-musl` and requires no `PT_INTERP` and no dynamic section. The
+launcher's final exec creates no process.
 
-## Provider runtime mode (#1358)
+## Provider runtime mode
 
 The other mode is `provider-runtime`, the provider daemon that the root
-selector starts as its runtime unit (ADR-069 R11 §5). Before any socket
+selector starts as its runtime unit. Before any socket
 exists it binds its startup authority: SIC1, the `/proc/self/exe`
 self-binding, SPI1, the slot count and the runtime key. It then binds both
 SIC1 endpoints under the R11 §6 rules (no endpoint under
@@ -330,10 +322,9 @@ SIC1 endpoints under the R11 §6 rules (no endpoint under
 sends `READY=1` as one datagram to `NOTIFY_SOCKET`, and serves in state
 `Starting`. `describe` gets the signed SDY1 of the startup authority; every
 other operation gets a signed SPE1 `11` once it passes validation precedence
-steps 1 to 6. A control connection is closed unanswered until the
-RCC1/RCU1 responder lands. Restart reconciliation, which opens admission, is
-the next #1358 slice. The mode reads no environment variable but
-`NOTIFY_SOCKET`.
+steps 1 to 6. The runtime answers root control connections through its RCC1/RCU1 revocation
+responder. It runs restart reconciliation before opening admission. Startup errors keep admission
+closed. The mode reads `NOTIFY_SOCKET` for service readiness.
 
 `release_after_ready` is the provider half: it accepts one `ReadyV1` only from
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
@@ -342,10 +333,10 @@ held or observed evidence, rechecks current authority through the
 `RuntimeAttestationSigner` and verified under the admitted runtime key before
 it is sent.
 
-## Recovery peer mode (#349)
+## Recovery peer mode
 
 `recovery-peer <32 lowercase hex endpoint ID>` answers one RCC1/RCU1
-exchange of a pending SIR1 (ADR-069 R12 §5), after the root selector proved
+exchange of a pending SIR1 after the root selector proved
 the previous runtime terminated. It reads only the runtime key ID and public
 key of SIR1's previous-provider binding (after checking the SIR1
 self-digest), requires the SPI1 key file to hold that key, binds
@@ -370,10 +361,10 @@ against the kernel, runs the 100 ms exchange, and always stops the peer unit
 and removes the exact leaf within 5 s. Only then does it publish the next
 SIC1 and remove SIR1.
 
-## Local attempt namespaces (#911)
+## Local attempt namespaces
 
-The Local network is built in-process over netlink (owner decisions of
-2026-11-09): `netlink-packet-route`, `netlink-packet-netfilter` and
+The Local network is built in-process over netlink: `netlink-packet-route`,
+`netlink-packet-netfilter` and
 `netlink-packet-core` encode and decode, rustix carries the sockets, and no
 process is created. Each attempt namespace is created by a dedicated thread
 that unshares its network namespace and is pinned by a bind mount under
@@ -388,16 +379,15 @@ Kernel requirements: network namespaces (`CONFIG_NET_NS`), veth
 `CONFIG_NF_TABLES_INET`, `CONFIG_NFT_CT`) and conntrack, and IPv6. The
 provider needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` and a writable `/run/netns`.
 The host must set `net.core.fb_tunnels_only_for_init_net` to at least 1
-(ADR-069 R14 N12), so that the kernel creates no fallback tunnel devices
+so that the kernel creates no fallback tunnel devices
 (`sit0`, `tunl0`, `gre0`, ...) in new namespaces when the `sit`, `ipip`,
 `ip_gre`, `ip6_tunnel` or `ip_vti` modules are loaded: the attempt read-back
 accepts only the loopback and the attempt's veth end, and every unit's
 `PrivateNetwork=true` namespace, in every execution mode, must hold only `lo`
-and no route off `lo`. `deploy/sysctl.d/60-piglor-sandbox.conf` is the drop-in
-that sets it; installing it is deployment's job, and nothing in this repository
-installs it yet. The #444 QEMU guest does not set the key either: the #444
-work wires the drop-in into the guest (`guest.nix`, a boot-sysctl expectation
-of 1, the pinned hashes) when this lands. The runtime reads the sysctl at
+and no route off `lo`. `deploy/sysctl.d/60-piglor-sandbox.conf` sets the value.
+The QEMU evidence guest installs this drop-in through
+`deploy/nixos/qemu-evidence/guest.nix`; other deployments must install it before
+starting the provider. The runtime reads the sysctl at
 startup, before it connects the bus, and exits without binding its sockets
 (admission closed) when the value is below 1 or cannot be read. After
 `ReadyV1`, the first kernel observation enters the unit's retained `ns/net`
@@ -406,8 +396,8 @@ descriptor and reads its links and main table; any other link, any route off
 KOE1 status 2. At the release recheck a transport failure is barrier failure 6
 and a changed namespace is 7.
 
-A Local attempt's KOE1 also carries `network-readback` (ADR-069 R14 section
-3.2): the attempt namespace's nsfs identity (read from the descriptor the
+A Local attempt's KOE1 also carries `network-readback`: the attempt namespace's
+nsfs identity (read from the descriptor the
 proxy holds, and checked again through its pin), both namespace ids, the veth
 pair with its addresses and routes, the firewall generation and chains
 (`NFT_MSG_GETGEN` brackets the read, at most three reads), and the attempt's own
@@ -420,7 +410,7 @@ KOE1 status 2 at the first observation; at the release recheck the first is
 barrier failure 6 and the second is 7. A Local attempt is never released
 without its network (`BarrierError::LocalNetworkMissing`).
 
-Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
+Host egress is IPv4 only:
 an IPv6 endpoint is admitted only when it is an address of the host itself,
 and the provider changes no IPv6 setting. The provider owns one host table,
 `inet piglor_sandbox`: its `forward` chain (filter, policy accept, so other
@@ -441,7 +431,7 @@ restored, the table stays and the sweep fails. The provider never reads another 
 policy and never changes one.
 
 `NamespacedLocalNetwork::probe_egress` proves that forwarded sandbox traffic
-passes the host. Restart reconciliation (`reconcile_restart`, #1200) runs it
+passes the host. Restart reconciliation (`reconcile_restart`) runs it
 through `LocalEgressProbe` while admission is still closed: after every
 attempt unit is gone, still-mounted roots are detached and the orphan sweep
 has removed the previous runtime's namespaces, veth ends, host table and
@@ -462,7 +452,7 @@ range or any host address or route. The probe establishes a real attempt
 network for a reserved probe attempt whose one endpoint is a target
 namespace behind the host on its own veth pair (`piglor-t0`), connects, and
 requires the connection to arrive from the host's address, so forwarding and
-masquerade both work. Every failure is an error (ADR-069 §1: an absent or
+masquerade both work. Every failure is an error: an absent or
 ineffective property closes admission). The probe removes everything it
 made, and the restart sweep removes `piglor-t0` and the probe's namespaces
 by name. Because its target sits behind a veth pair rather than the host's

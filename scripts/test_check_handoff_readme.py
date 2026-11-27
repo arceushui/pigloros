@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixture tests for the handoff README checker (ADR-061 revision 8, #620)."""
+"""Fixture tests for the community Plugin README checker."""
 
 from __future__ import annotations
 
@@ -13,48 +13,48 @@ CHECKER = ROOT / "scripts/check_handoff_readme.py"
 SUPERVISOR = "crates/pos-plugin-supervisor/README.md"
 ADAPTER = "apps/pos-plugin-conformance-adapter/README.md"
 
-OWNER = "The EAI1/EAO1 subject adapter binary is owned by #194."
+ADAPTER_SENTENCE = "The EAI1/EAO1 subject adapter is `apps/pos-plugin-conformance-adapter`."
 EVIDENCE = "Results are Local-relaxation engineering evidence, not hosted conformance."
 WORKER = "The pos-plugin-worker binary must be built into the directory of this binary."
 
-BOTH = f"# Title\n\n{OWNER} {EVIDENCE}\n"
-ALL_THREE = f"# Title\n\n{OWNER} {EVIDENCE} {WORKER}\n"
+BOTH = f"# Title\n\n{ADAPTER_SENTENCE} {EVIDENCE}\n"
+ALL_THREE = f"# Title\n\n{ADAPTER_SENTENCE} {EVIDENCE} {WORKER}\n"
 
-WRAPPED_OWNER = OWNER.replace(" is ", "\nis ")
+WRAPPED_ADAPTER = ADAPTER_SENTENCE.replace(" adapter is ", " adapter\nis ")
 WRAPPED_EVIDENCE = EVIDENCE.replace(" not ", "\n  not ")
 WRAPPED_WORKER = WORKER.replace(" built ", "\nbuilt ")
-REWORDED_OWNER = OWNER.replace("owned by", "owned by the team of")
+REWORDED_ADAPTER = ADAPTER_SENTENCE.replace("is `", "is the `")
 
 # Each case is the pair (supervisor README, adapter README); None means no file.
 ACCEPTED = {
     "all sentences": (BOTH, ALL_THREE),
     "other text around them": (
-        f"intro\n\n{OWNER}\n\nmiddle\n\n{EVIDENCE}\n\noutro\n",
-        f"intro\n\n{OWNER}\n\n{EVIDENCE}\n\nmiddle\n\n{WORKER}\n\noutro\n",
+        f"intro\n\n{ADAPTER_SENTENCE}\n\nmiddle\n\n{EVIDENCE}\n\noutro\n",
+        f"intro\n\n{ADAPTER_SENTENCE}\n\n{EVIDENCE}\n\nmiddle\n\n{WORKER}\n\noutro\n",
     ),
     "line-wrapped sentences": (
-        f"{WRAPPED_OWNER}\n{WRAPPED_EVIDENCE}\n",
-        f"{WRAPPED_OWNER}\n{WRAPPED_EVIDENCE}\n{WRAPPED_WORKER}\n",
+        f"{WRAPPED_ADAPTER}\n{WRAPPED_EVIDENCE}\n",
+        f"{WRAPPED_ADAPTER}\n{WRAPPED_EVIDENCE}\n{WRAPPED_WORKER}\n",
     ),
 }
 # Each rejected case names the README that the checker must report.
 REJECTED = {
     "supervisor empty": ("", ALL_THREE, SUPERVISOR),
-    "supervisor ownership only": (OWNER + "\n", ALL_THREE, SUPERVISOR),
+    "supervisor adapter path only": (ADAPTER_SENTENCE + "\n", ALL_THREE, SUPERVISOR),
     "supervisor evidence only": (EVIDENCE + "\n", ALL_THREE, SUPERVISOR),
-    "supervisor ownership reworded": (f"{REWORDED_OWNER}\n{EVIDENCE}\n", ALL_THREE, SUPERVISOR),
-    "supervisor evidence cased": (f"{OWNER}\n{EVIDENCE.lower()}\n", ALL_THREE, SUPERVISOR),
+    "supervisor adapter path reworded": (f"{REWORDED_ADAPTER}\n{EVIDENCE}\n", ALL_THREE, SUPERVISOR),
+    "supervisor evidence cased": (f"{ADAPTER_SENTENCE}\n{EVIDENCE.lower()}\n", ALL_THREE, SUPERVISOR),
     "adapter empty": (BOTH, "", ADAPTER),
-    "adapter lacks ownership": (BOTH, f"{EVIDENCE} {WORKER}\n", ADAPTER),
-    "adapter lacks evidence": (BOTH, f"{OWNER} {WORKER}\n", ADAPTER),
+    "adapter lacks adapter path": (BOTH, f"{EVIDENCE} {WORKER}\n", ADAPTER),
+    "adapter lacks evidence": (BOTH, f"{ADAPTER_SENTENCE} {WORKER}\n", ADAPTER),
     "adapter lacks the worker location": (BOTH, BOTH, ADAPTER),
-    "adapter ownership reworded": (BOTH, f"{REWORDED_OWNER} {EVIDENCE} {WORKER}\n", ADAPTER),
+    "adapter path reworded": (BOTH, f"{REWORDED_ADAPTER} {EVIDENCE} {WORKER}\n", ADAPTER),
     "adapter worker reworded": (
         BOTH,
-        f"{OWNER} {EVIDENCE} {WORKER.replace('built', 'placed')}\n",
+        f"{ADAPTER_SENTENCE} {EVIDENCE} {WORKER.replace('built', 'placed')}\n",
         ADAPTER,
     ),
-    "adapter worker cased": (BOTH, f"{OWNER} {EVIDENCE} {WORKER.lower()}\n", ADAPTER),
+    "adapter worker cased": (BOTH, f"{ADAPTER_SENTENCE} {EVIDENCE} {WORKER.lower()}\n", ADAPTER),
 }
 
 

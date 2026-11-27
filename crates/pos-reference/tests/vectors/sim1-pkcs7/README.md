@@ -1,11 +1,10 @@
 # SIM1 PKCS#7 interoperability fixture
 
-This test-only fixture records the RSA-2048, SHA-256, detached no-attributes
-profile selected by [Accepted ADR-087](https://redmine.piglor.com/projects/pigloros/wiki/ADR-087_Systemd_mountfsd_SIM1_activation_boundary).
-It exercises the pinned parsing and signature libraries through their public
-APIs. It does not prove SIM1 admission, TRS1 authorization, certificate path or
-time validation, held-image identity, or systemd/kernel activation. Those are
-separate acceptance requirements of existing #437–#444.
+This test-only fixture records an RSA-2048, SHA-256, detached, no-attributes
+signature profile. It exercises the pinned parsing and signature libraries
+through their public APIs. It does not prove SIM1 admission, TRS1 authorization,
+certificate path or time validation, held-image identity, or systemd/kernel
+activation; those behaviors are outside these dependency tests.
 
 The signature was produced independently of the Rust verifier using OpenSSL
 3.0.13 (library 3.0.13), following the detached signing form in
@@ -198,7 +197,7 @@ signing command above. Their private keys were discarded:
   This changes only certificate-set ordering; certificate and signature bytes
   remain unchanged. The verifier rejects the unsorted input.
   At the test time the root is expired, while leaf and intermediate are valid:
-  this exercises ADR-087's explicit root-time policy.
+  this exercises the verifier's explicit root-time policy.
 - `optional-usage-proof.der`: self-signed serial 20, subject
   `CN=SIM1 fixture optional usage`, `-days 3650`, and critical CA:FALSE.
   KU and EKU are absent, proving that their presence is not mandatory.

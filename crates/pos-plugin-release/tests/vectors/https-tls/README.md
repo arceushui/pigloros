@@ -1,9 +1,8 @@
 # HTTPS and OCI release-source TLS fixtures (test-only)
 
-These fixtures serve the in-process TLS servers of
-`tests/https_release_public.rs` (Redmine #426) and
-`tests/oci_registry_public.rs` (Redmine #427), both under ADR-061 amendment
-revision 1. No test reaches the internet.
+These fixtures serve the in-process TLS servers in
+`tests/https_release_public.rs` and `tests/oci_registry_public.rs`. No test
+reaches the internet.
 
 **Every file here is test-only.** `server.key.der` is the private key of the
 test server certificate. It is committed on purpose so that the tests can run

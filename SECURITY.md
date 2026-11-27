@@ -2,20 +2,12 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+This repository does not designate any release versions as supported for
+security updates.
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
-
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+Use [GitHub's private vulnerability reporting form](https://github.com/arceushui/pigloros/security/advisories/new).
+Do not post vulnerability details in a public issue. Include the affected
+commit or release, impact, and steps to reproduce. The maintainer will follow
+up through the private advisory.

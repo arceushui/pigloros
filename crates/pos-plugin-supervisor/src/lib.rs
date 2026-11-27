@@ -22,10 +22,9 @@
 //! cgroup or seccomp layer of its own (ADR-072). A worker compromised through
 //! a Wasmtime defect is therefore not network-denied.
 //!
-//! Results are engineering evidence only. The Local relaxation is not a
-//! hosted, Candidate or Stable execution boundary and claims no hosted
-//! conformance; hosted execution waits for Sandbox Provider launch in a later
-//! accepted revision.
+//! Results from this Local execution boundary are engineering evidence only.
+//! This crate does not compose Sandbox Provider admission, network isolation,
+//! or kernel readback.
 //!
 //! The crate also exports the worker-side helpers (`prepare_worker_process`,
 //! `read_request`, `write_response`, `open_descriptors`) and the frame and

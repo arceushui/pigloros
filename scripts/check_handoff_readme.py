@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Check the #194 handoff READMEs of the community Plugin host (ADR-061 revision 8, #620).
+"""Check current documentation for the community Plugin conformance adapter.
 
 Two READMEs carry pinned sentences, each verbatim and in one piece:
 
-- `crates/pos-plugin-supervisor/README.md`: the ownership of the EAI1/EAO1 subject adapter
-  binary and the evidence level of the results (revision 7, #585);
-- `apps/pos-plugin-conformance-adapter/README.md`: the same two sentences and the worker
-  location sentence (revision 8 decision 14; the third sentence is owner decision O-17).
+- `crates/pos-plugin-supervisor/README.md`: the adapter path and the evidence level of results;
+- `apps/pos-plugin-conformance-adapter/README.md`: the same path and evidence statements, plus
+  the worker location needed to run the adapter.
 
 Line wraps and runs of whitespace between words are ignored; a file may contain other text.
 """
@@ -16,7 +15,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-OWNER = "The EAI1/EAO1 subject adapter binary is owned by #194."
+ADAPTER_SENTENCE = "The EAI1/EAO1 subject adapter is `apps/pos-plugin-conformance-adapter`."
 EVIDENCE = "Results are Local-relaxation engineering evidence, not hosted conformance."
 WORKER = "The pos-plugin-worker binary must be built into the directory of this binary."
 
@@ -24,8 +23,8 @@ SUPERVISOR_README = "crates/pos-plugin-supervisor/README.md"
 ADAPTER_README = "apps/pos-plugin-conformance-adapter/README.md"
 
 READMES = {
-    SUPERVISOR_README: (OWNER, EVIDENCE),
-    ADAPTER_README: (OWNER, EVIDENCE, WORKER),
+    SUPERVISOR_README: (ADAPTER_SENTENCE, EVIDENCE),
+    ADAPTER_README: (ADAPTER_SENTENCE, EVIDENCE, WORKER),
 }
 
 
@@ -53,7 +52,7 @@ def main() -> None:
     ]
     if found:
         raise SystemExit("\n".join(found))
-    print("both handoff READMEs state the #194 ownership, evidence level and worker location")
+    print("both Plugin READMEs state the adapter path and evidence level")
 
 
 if __name__ == "__main__":

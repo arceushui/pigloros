@@ -1,10 +1,8 @@
 # SIM1 DDI fixtures from systemd-repart offline signing
 
-These test-only fixtures are the externally generated images for
-[ADR-087](https://redmine.piglor.com/projects/pigloros/wiki/ADR-087_Systemd_mountfsd_SIM1_activation_boundary)'s
-#437 fixture acceptance, under the accepted ADR-069/ADR-087 amendments that
-make SIM1 carry the exact 32-byte verity salt and the release certificate's
-kernel key description. There is one Discoverable Disk Image per supported
+These test-only fixtures are externally generated images used by the
+`sandbox_admission_contract_public` tests. Each SIM1 carries the exact 32-byte
+verity salt and the release certificate's kernel key description. There is one Discoverable Disk Image per supported
 architecture. Directories use systemd-repart's `--architecture` names:
 `x86-64` is SIM1 `x86_64` and `arm64` is `aarch64`. Each image has an EROFS
 root, its dm-verity hash partition and a detached RSA-2048, SHA-256,
@@ -39,15 +37,15 @@ nix --extra-experimental-features 'nix-command flakes' shell \
 systemd store paths were
 `/nix/store/kmzlca218j6j1ar292fxj7707qzypij8-systemd-260.5` (x86-64) and
 `/nix/store/jnsrd8c9vfdwv114xnkryg2ng2nsrcn0-systemd-260.5` (arm64). This is the
-fixture producer only; it is not the reviewed appliance systemd build, whose
-identity and source delta remain #444 evidence.
+fixture producer only; it is not the reviewed appliance systemd build.
 
-The workflow differs from the man-page example only where ADR-087 is stricter
-or the example is incomplete:
+The generator differs from the man-page example where the verifier contract
+requires stricter inputs or the example is incomplete:
 
 - `jq --join-output` writes the root hash; the example's `--raw-output0`
-  appends a NUL byte, which ADR-087 forbids in the signed content.
-- `openssl smime -sign` adds the explicit `-md sha256` that ADR-087 requires.
+  appends a NUL byte, which is not part of the signed content.
+- `openssl smime -sign` uses the explicit `-md sha256` digest required by the
+  verifier.
 - The root definition adds `CopyFiles=/`, without which `--copy-source` copies
   nothing, and both verity definitions pin 4096-byte data and hash blocks.
 - Both `systemd-repart` invocations use `--offline=yes`, the same `--seed` and an
@@ -75,14 +73,14 @@ has two levels. Certificates are self-signed serial 30 with critical
 2026-10-18 through 2036-10-15. Certificate subjects are
 `CN=PiglorOS SIM1 DDI fixture x86-64` and `CN=PiglorOS SIM1 DDI fixture arm64`.
 
-The producer's actual CMS encodings, as ADR-087 requires them to be recorded:
+The producer's actual CMS encodings are:
 SignedData v1 with one SHA-256 digest identifier, id-data with absent
 eContent, one v1 issuer-and-serial SignerInfo, one certificate, and no CRLs or
 signed/unsigned attributes. Every algorithm identifier carries an explicit
 ASN.1 NULL parameter: SHA-256 (digest set and SignerInfo), `rsaEncryption`
 (SignerInfo and SPKI) and `sha256WithRSAEncryption` (certificate). The
 signatures are 256 bytes. The verifier's accepted webpki constant
-(`RSA_PKCS1_2048_8192_SHA256`) verifies them in the public cases below.
+  (`RSA_PKCS1_2048_8192_SHA256`) verifies them in the public cases below.
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
@@ -127,10 +125,9 @@ A separate fixture-integrity case runs no production code: it checks that
 the `root-verity-sig` partition, identified by its DPS type, embeds the same
 proof, signer fingerprint and root hash that systemd will read.
 
-Provider admission (`provider_admission`, #438) reads that partition from the
+Provider admission reads that partition from the
 held image and requires its JSON `rootHash` and `signature` to equal SIM1's
-root hash and PKCS#7 proof exactly, on both architectures (ADR-087 Part B.4,
-revision 31, accepted in revision 32). The in-crate
+root hash and PKCS#7 proof exactly, on both architectures. The in-crate
 installation fixture therefore binds each image's own `root-hash.txt`,
 `proof.der` and `signer.der` into SIM1 and TRS1. The negative cases edit
 JSON fields in a copy of the expanded image; no signature is regenerated.
@@ -142,14 +139,12 @@ JSON fields in a copy of the expanded image; no signature is regenerated.
   derived from `--seed` (`derive_salt` and
   `salt_size = sizeof(p->verity_salt)` in `src/repart/repart.c`). For the
   260.5 producer used here, `verity.json` records the salt that `describe.py`
-  read from each verity superblock. Accepted ADR-069 makes SIM1
-  carry that exact salt; checking it against the held image's superblock is
-  #438 and against the live dm-verity table is #440.
-- **No release trust installation.** Under accepted ADR-087 the
+  read from each verity superblock. SIM1 carries that exact salt; admission
+  checks it against the held image's superblock and the live dm-verity table.
+- **No release trust installation.** The
   release certificate is compiled into the appliance kernel's
   `.builtin_trusted_keys`. These fixture certificates are not, and these
   fixtures install nothing.
 - **No activation evidence.** Nothing here mounts an image, activates
-  dm-verity or exercises the kernel keyring. Supported systemd/kernel evidence
-  on both architectures runs on the pinned appliance under hosted QEMU TCG in
-  #444.
+  dm-verity or exercises the kernel keyring. Separate hosted QEMU TCG evidence
+  covers systemd and kernel behavior on both architectures.

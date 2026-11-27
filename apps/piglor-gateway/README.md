@@ -1,26 +1,25 @@
 # piglor-gateway
 
-The local-first HTTP Gateway: the only public application boundary of PiglorOS (ADR-022). Its
-canonical, language-neutral contract is [Gateway v1](../../contracts/gateway/v1/README.md): an
+The local HTTP Gateway exposes PiglorOS's versioned API. Its language-neutral contract is
+[Gateway v1](../../contracts/gateway/v1/README.md): an
 OpenAPI 3.1.1 description, JSON Schema 2020-12 schemas, an RFC 9457 problem registry, golden
 examples, and a frozen compatibility baseline. A client needs only that contract, never this
 crate's Rust source.
 
-This process is not the product MVP. It serves Timeline creation, Event polling, authenticated
+It serves Timeline creation, Event polling, authenticated
 `world.action.v1` proposals, Society Signals, the public Prediction Ledger and the Principal's own
-`GET /v1/session` (see [Session](#session)). Every loopback
-operation except `/health` and the public Ledger reads is protected by the host-pinned Local
-Principal (see [Local Principal](#local-principal)): `GatewayAuthenticationAdapter`
+`GET /v1/session` (see [Session](#session)). Protected loopback routes require the host-pinned
+Local Principal (see [Local Principal](#local-principal)): `GatewayAuthenticationAdapter`
 implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, and
 `GatewayAuthorization` evaluates the pinned Principal, consent, capability, delegation, expiry
 and revocation state. A host without a provisioned Local Principal answers every protected
-operation `401 unauthenticated`. Scenario Rooms (#303), Preferences and OptionSpecs (#304),
-Decision Previews (#305), consent revocation and erasure (#309, see [Consents](#consents)) are
-served. Until an EPF1 is installed (#1364, #461) the release composition answers every fresh
-`createDecisionPreview` with `409 incompatible-profile`; exact retries and reads are still
-answered. The other Wave 9 resource families (simulated actions, Projections, ensembles, Replays,
-evidence and exports) are Draft operations of the contract that their owner tickets (#306 to
-#308) will serve. WebSocket streaming remains deferred.
+operation `401 unauthenticated`. Scenario Rooms, Preferences, OptionSpecs, Decision Previews,
+consent revocation, and erasure are served. The release composition currently has no installed
+EPF1, so a fresh `createDecisionPreview` returns `409 incompatible-profile`; exact retries and
+reads of existing previews remain available. When configured, the loopback router also registers
+the OwnTracks ingress route, which uses its paired enrollment credential instead of the Local
+Principal. The Gateway v1 contract labels each operation as served or draft. The non-loopback
+listener exposes only the public Prediction Ledger routes.
 
 ## Run
 
@@ -36,7 +35,7 @@ cargo run -p piglor-gateway --locked -- \
 ### Execution mode
 
 `serve` requires `--profile`, the Gateway execution-mode profile the process and its store serve
-under (ADR-134): `gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`. The binary is the same
+under: `gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`. The binary is the same
 for both modes. The profiles are release-compiled from the public declaration
 [`execution-mode-profiles.json`](../../contracts/gateway/v1/execution-mode-profiles.json) and are
 composition-verified: they are not installed EPF1 profiles and claim no reproducibility.
@@ -47,7 +46,7 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
   network. Air-Gapped accepts no grant, so it refuses OwnTracks, a non-loopback bind and any
   network `LEDGER_SOURCE`; `LEDGER_SOURCE` must always be a local path. Each refusal happens before
   the store, the ledger or a listener opens.
-- **Air-Gapped serves only without a network path (ADR-135 §4).** Before the store, ledger or
+- **Air-Gapped serves only without a network path.** Before the store, ledger or
   listeners open, `air-gapped-no-route` reads this process's `/proc/self` facts and refuses unless
   its network namespace holds only `lo` (plus the kernel's fallback tunnel devices, without
   addresses, routes or multicast memberships), it holds none of `CAP_NET_ADMIN`, `CAP_NET_RAW` and
@@ -91,7 +90,7 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
 ## Local Principal
 
 Loopback reachability is the Local trust boundary and one host-pinned Local Principal acts behind
-it (owner decision D1 on #302); there is no credential scheme on the v1 routes. A protected request
+it; there is no credential scheme on the v1 routes. A protected request
 names the entity it acts as in the `x-piglor-actor-entity` header, and the Principal's grant must
 cover that entity and the operation. The Principal is provisioned once, explicitly, by the one-shot
 [systemd unit](../../deploy/systemd/piglor-gateway-local-principal-provision.service) while the
@@ -109,8 +108,8 @@ The grantable operations are `consent.revoke`, `session.read`, `timeline.create`
 `timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create`,
 `world.action.v1.submit`, `preference.create`, `preference.read`, `option-spec.create`,
 `option-spec.read`, `scenario-room.create`, `scenario-room.derive`, `scenario-room.read`,
-`decision-preview.create` and `decision-preview.read` (ADR-140), plus the Principal network
-capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
+`decision-preview.create` and `decision-preview.read`, plus the Principal network
+capability `gateway.network.v1`, which authorizes no operation in v1
 and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
 Fork-admission credentials and provision:
 
@@ -137,9 +136,9 @@ host answers every protected route `401` before reading the request body.
 
 ### Consents
 
-The document may also bind consents (#309, ADR-039) with a `[consent]` table: the subject who
+The document may also bind consents with a `[consent]` table: the subject who
 consents and the actor the consents grant (both listed actors, shared by every consent), and one
-`[[consent.grants]]` entry per consent, naming the ADR-059 purpose it covers and its data
+`[[consent.grants]]` entry per consent, naming the purpose it covers and its data
 categories (operation resources):
 
 ```toml
@@ -182,7 +181,7 @@ restarted host then sees it.
 
 ### Preferences and OptionSpecs
 
-`POST /v1/preferences` and `POST /v1/option-specs` (#304) create revision 1 of a user-authored
+`POST /v1/preferences` and `POST /v1/option-specs` create revision 1 of a user-authored
 Preference or OptionSpec, or with `parent` its next revision; `GET .../{id}/revisions/{revision}`
 reads one. Each needs its own grant, and the acting entity is the revision's subject: only that
 subject is answered, any other caller gets `404`. The Gateway stores the revisions in its own
@@ -190,22 +189,22 @@ database tables, outside every Timeline, each in one transaction with its idempo
 the execution-mode binding it was produced under, so they survive a restart. A parent must be the
 current head (`409 append-conflict`), and only `Idempotency-Key` makes a retry return the original
 revision. Erasure (the host-only `GatewayRevisionPortV1::erase_gateway_revision`, which the subject
-erasure workflow #309 drives) deletes the row under `secure_delete`, checkpoints the write-ahead
+erasure workflow drives) deletes the row under `secure_delete`, checkpoints the write-ahead
 log, rewrites the request digest of the idempotency record to a constant and keeps a payload-free
 tombstone, so the subject then reads `410 deleted`, its retries under the key answer `410` and
 every other caller gets `404` (or `409` for a retry under the same key). The contract README states the digests.
 
 ### Session
 
-`GET /v1/session` (#1362) is a protected read like every other operation: the request names its
+`GET /v1/session` is a protected read like every other operation: the request names its
 actor, and the Principal's grant must cover that actor and `session.read`. The answer is derived
 by the host alone: the Principal's ID and the actors of its grant, the names of every grantable
 operation and capability its recorded grant covers for that actor (decided by the same evaluator
 as every request, recording nothing), its consents (each named by the `EventId` of its
 `consent.granted.v1` Event, `granted` or `revoked`), the current execution mode with the operator's `--network-grant` values and the
 Principal's network posture (`absent` in Air-Gapped mode; `capability-granted` in Local mode only
-with `gateway.network.v1`, otherwise `denied`), and the EPF1 `execution_profile`, `unavailable`
-until #461. `generation` is the head position of the recorded authority (both grants when it
+with `gateway.network.v1`, otherwise `denied`), and the EPF1 `execution_profile`, which is
+`unavailable` in the release composition. `generation` is the head position of the recorded authority (both grants when it
 binds consents) plus the consent Timeline head, so it advances with every grant, consent or
 revocation. The contract's `Session` schema states the provenance digest.
 
@@ -216,7 +215,7 @@ succeeds), or stop the Gateway, create a new database and provision the new docu
 
 ### Local erasure authority
 
-The single-host erasure authority (ADR-136) is activated by a bundle that a TPS1 root signs. Its
+The single-host erasure authority is activated by a bundle that a TPS1 root signs. Its
 offline first step is the one-shot
 [systemd unit](../../deploy/systemd/piglor-gateway-local-erasure-provision.service), run after the
 Local Principal is provisioned:
@@ -305,15 +304,14 @@ authority, which admits no Local erasure and refuses a store that holds erasure 
 Once the host is recovered, a startup sweep deletes unreferenced erasure evidence objects once and
 logs only its count (`Swept(n)` or `Skipped`); a skipped sweep never fails startup. The erasure
 driver then runs once at startup and every 10 seconds (the compiled `LOCAL_ERASURE_DRIVER_TICK`).
-Its admission trigger, which runs it at once after an erasure admission, is wired by the erasure
-routes of the next ADR-136 slice (C5c) and is not active yet. Each run submits one driver step per
+An erasure admission wakes the driver immediately. Each run submits one driver step per
 store command until no request has a step due, so other Gateway requests interleave between steps,
 and logs how many request steps failed and were deferred to a later run, when any were. Composition
 opens only an existing store bound to a compiled execution mode; it never creates a database. **The step that purges the local replica runs `VACUUM` inside its one
 store command and holds every other Gateway request for its duration**, which grows with the store.
 
 **Closing admissions.** `piglor-gateway erasure-admissions close <sqlite-path>` durably closes new
-erasure admissions (#1408), `open` reopens them, and `status` prints `Erasure admissions: open` or
+erasure admissions, `open` reopens them, and `status` prints `Erasure admissions: open` or
 `closed`. `close` and `open` print one audit line naming the previous and the new state, such as
 `Erasure admissions closed (were open)`. `close` and `open` take the store's exclusive mode lock, so
 they refuse to run while `serve` holds the store: stop `serve`, change the record, and start `serve`
@@ -338,23 +336,24 @@ cannot be read refuses fresh requests as a retryable `503 temporarily-unavailabl
 
 The provisioning commands keep the closed erasure authority, so they must all run before the first
 erasure request: a store that holds one refuses them. The shipped
-[serve unit](../../deploy/systemd/piglor-gateway.service) does not pass the flag: nothing provisions
-the trust state store until #448, and a serve that requires the Local erasure authority without it
-refuses to start. Rolling back means removing the drop-in; a store that holds erasure requests then
-refuses the closed composition until the flag is restored.
+[serve unit](../../deploy/systemd/piglor-gateway.service) does not pass the flag. The deployment
+must provide the trust state store, release trust credential, and four erasure credentials before
+enabling this mode. Without those inputs, a serve that requires the Local erasure authority refuses
+to start. A store that holds erasure requests also refuses the closed composition if the flag is
+removed.
 
 ### Separate deterministic experiment host
 
 The Gateway remains an ingress/store façade; it does not run simulation drivers. A store a Gateway
-has served is bound to its execution mode (ADR-134), and only Gateway processes write a bound
-store, so `pos-experiment` cannot append to it. Run the ADR-019 two-process demonstration against
-a SQLite file no Gateway has served; see the
+has served is bound to its execution mode, and only Gateway processes write a bound store, so
+`pos-experiment` cannot append to it. Use a separate SQLite file for the simulation demo; see the
 [`pos-experiment` demo guide](../pos-experiment/README.md).
 
 Binding a non-loopback address (with `--network-grant public-read-only`) serves only the public
 Prediction Ledger routes:
 `/`, `/ledger`, `/health`, and `/v1/ledger`. Timeline polling and all mutation
-routes are absent from that public surface until #68 provides authentication.
+routes are absent from that public surface. The loopback listener adds those operations behind
+the Local Principal authorization boundary.
 Bind `127.0.0.1` to use the complete local Gateway API. The Compose default
 publishes the container only on the host loopback interface; an intentional
 public Ledger deployment may publish the container port because its
@@ -370,26 +369,43 @@ served responses recorded by the gateway-client-conformance fixtures, or the fro
 disagree. The table below summarizes the served routes; the contract wins. `/` and `/ledger`
 are HTML conveniences outside the JSON contract.
 
-| Method | Path | Body | Response |
-|--------|------|------|----------|
-| `GET` | `/health` | — | `{ "ok": true }` |
-| `GET` | `/` | — | `302` redirect to `/ledger` |
-| `GET` | `/ledger` | — | Public Prediction Ledger HTML |
-| `GET` | `/v1/ledger` | — | Public Prediction Ledger JSON |
-| `POST` | `/v1/timelines` | `{ "name": "..." }` | `{ "id", "name", "head" }` |
-| `GET` | `/v1/timelines/:id/events?from_seq=0&limit=100` | — | `{ "events": [EventView], "next_from_seq", "next_cursor" }` |
-| `POST` | `/v1/timelines/:id/actions` (header `Idempotency-Key`) | `{ "entity_id", "capability", "payload", "event_type"? }` | `EventView` |
-| `POST` | `/v1/timelines/:id/signals` | `{ "entity_id", "dimension", "value", ... }` | `EventView` |
-| `POST` | `/v1/ledger/predictions` | `NewPrediction` | `201` `{ "prediction_id" }` when Ledger writes are enabled |
-| `POST` | `/v1/bridges/owntracks` | OwnTracks `location` (Basic authentication) | `[]`, only when the OwnTracks bridge is configured |
+| Method | Path |
+|--------|------|
+| `GET` | `/health` |
+| `GET` | `/` |
+| `GET` | `/ledger` |
+| `GET` | `/v1/ledger` |
+| `POST` | `/v1/ledger/predictions` |
+| `POST` | `/v1/timelines` |
+| `GET` | `/v1/timelines/{timeline_id}/events` |
+| `POST` | `/v1/timelines/{timeline_id}/actions` |
+| `POST` | `/v1/timelines/{timeline_id}/signals` |
+| `GET` | `/v1/session` |
+| `POST` | `/v1/scenario-rooms` |
+| `POST` | `/v1/scenario-rooms/{room_id}/revisions` |
+| `GET` | `/v1/scenario-rooms/{room_id}/revisions/{revision}` |
+| `POST` | `/v1/me/consent-revocations` |
+| `POST` | `/v1/me/erasures` |
+| `GET` | `/v1/me/erasures/{erasure_id}` |
+| `POST` | `/v1/preferences` |
+| `GET` | `/v1/preferences/{preference_id}/revisions/{revision}` |
+| `POST` | `/v1/option-specs` |
+| `GET` | `/v1/option-specs/{option_spec_id}/revisions/{revision}` |
+| `POST` | `/v1/decision-previews` |
+| `GET` | `/v1/decision-previews/{preview_id}` |
+| `POST` | `/v1/bridges/owntracks` (when enabled) |
 
-- **Actions:** `event_type` defaults to `world.action.v1`; `capability` must be exactly `world.action.v1.submit`. Legacy `world.action` and `world.action.submit` are unsupported. The JSON payload requires `actor_entity_id`, `body_entity_id`, `action_kind` (`impulse` or `target_velocity`), `params` (exactly two JSON float numbers ordered X, Z, in metres per second), `action_scope` (0), `catalogue_version`, and `tick`. Unknown payload fields, integers, strings, extra components, nonfinite values, and binary32 overflow are rejected. The Gateway rounds each finite source to binary32 before storing the shortest exact canonical CBOR float encoding; raw proposed actions must already contain that normalized pair. `impulse` adds the pair to horizontal velocity, while `target_velocity` sets it; vertical Y velocity is unchanged, and position advances over the pinned timestep. The pair is never rounded at the 100 mm position/sensor floor. The WAC1 array remains bounded to 4,096 bytes. A host-bound Gateway authorizer must allow the Principal/entity operation at the current authority fence before any domain approval; the World approver then checks actor identity, the known body ID, and the pinned actuator catalogue, and its approved draft stays tentative. The Gateway commits it only through atomic host admission (ADR-021): inside one host-owned store command it rechecks authorization, persists the Principal's authority chain, and the store compares that chain, the erasure generation, the observed Logical Head, and the remaining Event budget at its commit serialization point. The response is the committed Event named by the authoritative admission receipt. Every action carries an `Idempotency-Key` header of 1 to 128 visible ASCII characters; without one it is `400` `invalid-request`. An exact retry under the same key returns `200` with the original committed Event without re-running approval, a different request under the same key is `409` `idempotency-conflict`, and an action whose observed head moved is `409` `append-conflict`; a rejected action is never retried by the Gateway. An unprovisioned Gateway fails closed with `401`; a provisioned one still has no installed World action catalogue (#461), so an authorized action is refused without a commit.
+The four public routes are `/`, `/ledger`, `/health`, and `GET /v1/ledger`. The remaining routes
+are registered on the loopback router. Protected routes require the matching Local Principal grant.
+The optional OwnTracks route requires its paired enrollment credential.
+
+- **Actions:** `event_type` defaults to `world.action.v1`; `capability` must be exactly `world.action.v1.submit`. Legacy `world.action` and `world.action.submit` are unsupported. The JSON payload requires `actor_entity_id`, `body_entity_id`, `action_kind` (`impulse` or `target_velocity`), `params` (exactly two JSON float numbers ordered X, Z, in metres per second), `action_scope` (0), `catalogue_version`, and `tick`. Unknown payload fields, integers, strings, extra components, nonfinite values, and binary32 overflow are rejected. The Gateway rounds each finite source to binary32 before storing the shortest exact canonical CBOR float encoding; raw proposed actions must already contain that normalized pair. `impulse` adds the pair to horizontal velocity, while `target_velocity` sets it; vertical Y velocity is unchanged, and position advances over the pinned timestep. The pair is never rounded at the 100 mm position/sensor floor. The WAC1 array remains bounded to 4,096 bytes. A host-bound Gateway authorizer must allow the Principal/entity operation at the current authority fence before any domain approval; the World approver then checks actor identity, the known body ID, and the pinned actuator catalogue, and its approved draft stays tentative. The Gateway commits it only through atomic host admission: inside one host-owned store command it rechecks authorization, persists the Principal's authority chain, and the store compares that chain, the erasure generation, the observed Logical Head, and the remaining Event budget at its commit serialization point. The response is the committed Event named by the authoritative admission receipt. Every action carries an `Idempotency-Key` header of 1 to 128 visible ASCII characters; without one it is `400` `invalid-request`. An exact retry under the same key returns `200` with the original committed Event without re-running approval, a different request under the same key is `409` `idempotency-conflict`, and an action whose observed head moved is `409` `append-conflict`; a rejected action is never retried by the Gateway. An unprovisioned Gateway fails closed with `401`. An authorized action also fails closed when no matching execution profile is installed.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
-- **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive and starts a fresh read. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event. A host-owned Gateway also returns `next_cursor`, which binds that sequence, Timeline, and installed erasure inventory generation. Continue a page with `?cursor=<next_cursor>`; a generation change rejects the cursor with `409` `append-conflict`, so restart from a fresh `from_seq`. `cursor` and `from_seq` cannot appear together. A future independent client will continue polling until exhaustion; this transport behavior is not, by itself, product MVP evidence.
+- **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive and starts a fresh read. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event. A host-owned Gateway also returns `next_cursor`, which binds that sequence, Timeline, and installed erasure inventory generation. Continue a page with `?cursor=<next_cursor>`; a generation change rejects the cursor with `409` `append-conflict`, so restart from a fresh `from_seq`. `cursor` and `from_seq` cannot appear together. Continue polling until the response reports exhaustion.
 - **Response budget:** each polling response is at most 1 MiB. The Gateway may return fewer than `limit` Events to stay within that budget. Polling uses the store's bounded-read seam and requests exactly `limit + 1` candidates so the first omitted Event becomes the cursor. The internal read byte bound covers all selected candidates at their per-field maxima; the separate wire-size check trims the page to 1 MiB. The memory adapter derives Fork-segment lengths from Timeline heads and seeks directly into contiguous per-Timeline Event vectors. SQLite derives the same segment ranges from indexed Timeline metadata and uses `(timeline_id, seq)` primary-key range predicates with `LIMIT` in both phases: it first selects only `seq`, `typeof(payload)`, `length(CAST(payload AS BLOB))`, and `length(CAST(event_type AS BLOB))`, validates them, and only then fetches at most the same bounded number of full Events in the same snapshot transaction. Neither adapter scans preceding Event history for a late cursor. SQLite files must use UTF-8 encoding, Event sequences must be contiguous from 1 through `timelines.head_seq`, and offline imports must preserve payloads with SQLite `BLOB` storage class. Existing SQLite files are sequence-validated once when opened; supported import APIs validate committed batches as they arrive. Opening UTF-16 or non-contiguous databases, or polling non-BLOB payload rows, fails closed with an actionable store error. Direct SQL mutation that bypasses `EventStore` while the database is open is outside the supported write boundary. Stored payloads over 256 KiB or imported `event_type` values over 64 KiB return a deterministic `413` `resource-limit-exceeded` problem. The metadata ceiling reserves at most 384 KiB for worst-case JSON escaping; together with the maximum payload's 512 KiB hex form and fixed Event fields this fits the 1 MiB envelope. The exact response-size check still handles decoded payload expansion. For Gateway-authored Events, admission serializes an exact `EventView`-equivalent envelope with worst-case sequence and cursor widths.
 - **Fork traversal bound:** one poll traverses at most 64 parent links. Imported deeper chains and corrupt ancestry cycles fail with a `413` problem before an unbounded ancestry collection can grow. The bound does not change shallow Fork pagination, including Timelines exposing 10,001 logical Events.
 - **Timeline bound:** one Gateway process accepts at most 64 **root** Timelines. Forks, identity-preserving imported children and the host Timelines (the Consent Timeline, the Local Principal's authority Timeline and the Erasure Host Timeline) do not consume root capacity. Quota checks use a bounded scalar store seam that stops at quota + 1 and never lists or clones Timeline metadata.
-- **Owner:** `POST /v1/timelines` records the actor its decision admitted as the owner of the new root (ADR-136 §1), so a Local erasure of that actor selects the root and the Forks that inherit its owner; an unprotected composition creates an unowned root. Scenario Room Timelines stay unowned and are never selected by an erasure.
+- **Owner:** `POST /v1/timelines` records the actor its decision admitted as the owner of the new root, so a Local erasure of that actor selects the root and the Forks that inherit its owner; an unprotected composition creates an unowned root. Scenario Room Timelines stay unowned and are never selected by an erasure.
 - **Host Timelines:** no client route reads, appends to or acts on a host Timeline, and a local Fork admission naming one as its parent is refused exactly as for a parent the store does not hold (`404 not-found-or-unavailable` on HTTP, code 4 on the Fork-admission socket).
 - **Event bound:** each Timeline accepts at most 10,000 **owned** Events. A Fork's inherited parent Events remain readable but do not consume its own ceiling. This bounds incremental storage per Timeline without discouraging Forks.
 - **Errors:** every failure, including malformed JSON bodies, unknown paths and unserved methods (`405`), is an RFC 9457 `application/problem+json` body whose `code` is one of the closed families of `problem-types.json` (see the [contract guide](../../contracts/gateway/v1/README.md#problems)). A path under another API major such as `/v2/...` is `400` `unsupported-version`; any other unrouted path is `404` `not-found-or-unavailable`. `detail` wording is not part of the contract.
@@ -455,13 +471,13 @@ and caps cumulative response bytes at 64 MiB.
 
 **Live bus:** `subscribe()` may return `Lagged` if a client falls behind; resync via event poll — the store is authoritative.
 
-## Deferred (ADR-014)
+## Not served by the Gateway
 
 - `GET /v1/timelines/:id/stream` (WebSocket)
-- Auth / passkeys (#68)
+- Passkey or external account authentication
 - TLS, rate limits, multi-tenant hosting
 
-## Local Fork admission (ADR-107)
+## Local Fork admission
 
 Local Fork admission is a Linux systemd deployment. The managed Gateway starts
 it only with `--require-local-fork-authority`; the fixed socket pathname and
@@ -473,7 +489,7 @@ directory, so direct invocation fails before it opens the authority database.
 The managed service has exactly three separate encrypted systemd credentials:
 `pigloros.fork-admission-auth` (FACR1),
 `pigloros.fork-admission-host-signer` (FAHK1), and
-`pigloros.fork-classifier-profile` (FCP1, ADR-099 r11 / ADR-107 r6). The
+`pigloros.fork-classifier-profile` (FCP1). The
 one-shot provisioner reads only FACR1 and FAHK1. Create separate envelopes
 with systemd 250 or newer; `host+tpm2` is the production default:
 
@@ -530,8 +546,8 @@ fails if authority state already exists. The listener requires a complete
 bounded FAL1 request ending in EOF and exposes no append-permit or public
 permit-issuance path.
 
-The HTTP routes and the listener share the one erasure host of the database
-(ADR-109 revision 9): the process opens exactly one read-write adapter, owned
+The HTTP routes and the listener share the one erasure host of the database:
+the process opens exactly one read-write adapter, owned
 by the Gateway's store executor, so listener writes never make HTTP protected
 operations fail with `503`. Managed startup fails closed in this order:
 validation of the three managed credentials (FACR1, FAHK1, and the FCP1
@@ -545,7 +561,7 @@ drains the executor. A new admitted Fork runs inside the host's erasure
 topology transition and returns code 0 only after the successor inventory is
 published; while the host is not Ready it fails closed with code 5. A saturated
 executor or a lost reply answers code 6, and an exact retry recovers a
-committed result through FRP1. Code 8 (appended for ADR-134 §8) answers a
+committed result through FRP1. Code 8 answers a
 Bind or Fork whose store binding another process changed: the FAC1 committed
 nothing, the Gateway stops serving and exits nonzero, and the client retries
 against the restarted Gateway.
@@ -573,7 +589,7 @@ install -o root -g root -m 0600 pigloros.fork-classifier-profile.cred \
   /etc/credstore.encrypted/pigloros.fork-classifier-profile.cred
 ```
 
-Startup order is fixed (ADR-109 revision 12): the three exact credential
+Startup order is fixed: the three exact credential
 files, FACR1/FAHK1, and the strict FCP1 decode are checked before the database
 opens; after the erasure host opens, a read-only preflight on its adapter
 requires every durable FCS1 to equal one FCP1 row byte-for-byte, before the

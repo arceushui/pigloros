@@ -1,8 +1,7 @@
 # systemd v260.2 production syscall records
 
-These are the production SCS1 records selected by ADR-069 for the first
-systemd Sandbox Provider Adapter. They are authority inputs, not host-derived
-runtime defaults:
+These are the production SCS1 records used by the systemd Sandbox Provider.
+They are authority inputs, not host-derived runtime defaults:
 
 - `systemd-v260.2-x86_64.scs1.cbor`
 - `systemd-v260.2-aarch64.scs1.cbor`
@@ -26,10 +25,11 @@ The materializer requires the exact systemd Git HEAD and checks the source-file,
 libseccomp archive, and archive-contained syscall-table SHA-256 digests against
 the pinned inputs. It recursively expands `@system-service`, maps names through
 the pinned target interfaces, emits explicit sorted names, requires the six
-launcher/provider syscalls named by ADR-069, and writes canonical SCS1 bytes.
-Target materialization includes native syscall numbers, not libseccomp `PNR`
-pseudo-syscall names. The only exception is aarch64 `poll`, expressly retained
-by ADR-069. It describes the required systemd `SystemCallFilter` D-Bus property
+launcher/provider syscalls, and writes canonical SCS1 bytes. Target
+materialization includes native syscall numbers, not libseccomp `PNR`
+pseudo-syscall names. The aarch64 `poll` entry is retained in the systemd
+filter property representation even though it is not a native aarch64 kernel
+syscall. It describes the required systemd `SystemCallFilter` D-Bus property
 readback, not a native aarch64 kernel rule. The pinned expansion yields 315
 x86_64 names and 275 aarch64 names; the two arrays are architecture-specific.
 Requested and expected-readback arrays are deliberately distinct. The pinned
@@ -37,11 +37,13 @@ systemd transient-unit allow-list setter inserts `@default` before the supplied
 names, and its D-Bus getter retains resolvable PNR identifiers. The offline
 materializer enumerates those implicit additions into the expected array:
 333 names for x86_64 and 300 for aarch64. These additional readback names do not
-claim native kernel rules and are never added to the requested arrays. Actual
-runtime readback and kernel enforcement proof remain in epic #287 tickets
-#441, #443, and #444.
+claim native kernel rules and are never added to the requested arrays. The
+provider verifies the effective `SystemCallFilter` D-Bus readback against this
+expected array. These records describe systemd's requested and effective
+filter properties; they do not by themselves prove kernel enforcement.
 
-Production code must consume these checked-in records through APT1/SIC1; it
+Production code must consume these checked-in records through authenticated
+APT1/SIC1 admission; it
 must never invoke `systemd-analyze`, expand groups, infer architecture, or add
 names from the running host.
 

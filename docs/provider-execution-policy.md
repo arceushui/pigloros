@@ -1,9 +1,9 @@
 # Provider execution policy admission
 
-The #441 execution composition implements the source exchange proposed in
-[ADR-122 revision 3](https://redmine.piglor.com/projects/pigloros/wiki/ADR-122_Provider_execution_policy_provenance).
-The ADR remains Proposed. This document describes the implementation, not a
-change to its formal decision status or permission to activate a daemon.
+This document describes the provider execution and admission path implemented
+by `apps/pos-sandboxd`. The runtime binds its service endpoints, reports
+systemd readiness, and keeps execution admission closed until startup
+reconciliation succeeds.
 
 The selector sends canonical EVR1 and then SPX1, each with its own four-byte
 big-endian length prefix and 16 MiB payload ceiling. The provider authenticates
@@ -23,7 +23,8 @@ verification inside a private staging file produces the admitted entry.
 Execution derives systemd limits, `/work` and the watchdog from that entry.
 The release barrier takes its expected RBS1 digest from the same context. A
 different context, including otherwise equal IDs with different policy, cannot
-replace the rechecked root. Observed readback remains the #443 evidence port.
+replace the rechecked root. The production release barrier also obtains kernel
+readback through `KernelObservedReadback` and binds its digest into `ReleaseV1`.
 
 The owner configures only the aggregate staging byte cap. Retained canonical
 EVR1/SPX1 buffers, reconstructed case buffers and payload storage share that
@@ -56,7 +57,9 @@ fresh ledger; this slice exposes no reopen operation.
 
 Selector and provider must be upgraded together while admission is closed.
 There is no SPX1-only fallback. The record schemas and digest preimages are
-unchanged, but the live connection sequence is incompatible. #442 must restore
-retained reservations and ceilings before reopening after restart; #443 owns
-durable evidence and observed readback, #444 owns packaged conformance, and #911
-owns actual Local networking. No listener or daemon is activated by this code.
+unchanged, but the live connection sequence is incompatible. At startup, the
+provider runtime binds its endpoints and serves in `Starting` state while
+restart reconciliation checks units, mounts, namespaces, egress state, staged
+inputs and captured network data. It opens execution admission only after that
+reconciliation succeeds; a startup error leaves admission closed. The
+`recovery-peer` mode handles the separate bounded recovery exchange.

@@ -1,16 +1,14 @@
 # Public dev/test root-hash trust domain
 
-The key pairs in this directory are **public** and belong to the PiglorOS
-dev/test trust domain (#444 owner decision D2, 2026-11-15). They are **never a
-production trust root**. Do not use them to sign anything that a release
-appliance or any other host should trust.
+The key pairs in this directory are public development and test material. They
+are not production trust roots. Do not use them to sign evidence for a release
+appliance or another production host.
 
-- `root-hash-dev-test.crt` is compiled into the kernel of the #444 QEMU
-  evidence guest (ADR-087 Part C.1). Its private key,
-  `root-hash-dev-test.key`, is committed so that anyone can rebuild the
-  signed evidence images byte for byte (#444 owner decision Q1, 2026-11-16).
-- No kernel trusts `root-hash-untrusted-dev-test`. The evidence guest uses it
-  for the wrong-key and `verity.d` refusal cases.
+- `root-hash-dev-test.crt` is included in the QEMU evidence guest's kernel
+  trust store. Its matching private key is committed so contributors can
+  reproduce the signed development evidence images.
+- The QEMU evidence guest does not trust `root-hash-untrusted-dev-test`. It
+  uses that key for the wrong-root and `verity.d` refusal cases.
 
-The release root-hash key stays offline (ADR-087 Part C.4). A released build
-gets fresh evidence under that release certificate.
+The release root-hash private key is not stored in this repository. A released
+build must use evidence signed under its release certificate.

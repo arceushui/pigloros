@@ -1,11 +1,9 @@
 # Community lifecycle native entry inventory
 
-This inventory belongs to #560 and the accepted ADR-129 Linux activation
-profile. The source baseline before this batch is
-`da6a7e1cacbefce0902b52c39dc1b8f855849bd0`. It covers the supported
-PiglorOS factories in `crates/`, `apps/` and `plugins/`. Test-only raw
-connections remain isolated adversarial/ordinary fixtures. A fixture marker or
-passing refusal test is not native owner qualification.
+This inventory describes the checked-in native SQLite entry points in
+`crates/`, `apps/` and `plugins/`. Test-only raw connections remain isolated
+adversarial or ordinary fixtures. A refusal test alone does not prove that
+every production path is protected.
 
 ## Native constructors
 
@@ -19,8 +17,8 @@ passing refusal test is not native owner qualification.
 | Same file, `require_owned_secret_key_binding` | The same private path pair and opener before managed signing-key deletion | The same database check precedes key-path resolution and native open |
 
 The two ledger constructors are production entries in addition to the
-illustrative ADR-129 baseline table. They must not bypass the reserved namespace
-merely because the key owner is a different role.
+store-opening paths. They must not bypass the reserved namespace merely
+because the key owner is a different role.
 
 The crate-internal factories in `crates/pos-store/src/sqlite.rs` own the store's
 ordinary native opening and private provisioning-file creation effects. The filename factory is

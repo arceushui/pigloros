@@ -1,31 +1,32 @@
 # pos-plugin-supervisor
 
-The community Plugin worker supervisor and the host pass member (ADR-061 Sandboxed Community
-Plugin Runtime and Decentralized Artifact Trust, revision 7; #542, #543, #583 to #585).
+The community Plugin worker supervisor and host-pass integration. It launches a fresh worker
+subprocess for each Component invocation; the worker runs the Component in Wasmtime. This Local
+relaxation does not compose the Sandbox Provider's admission, network isolation or kernel readback
+boundary.
 
-## Handoff to #194
+## Pass outcome records
 
-`CommunityPluginSubjectOutcomeV1` is the stable outcome record of one Plugin in one host pass.
-`CommunityPluginSubjectOutcomeV1::assemble(entry, tick, mode, receipt)` builds it, and is
-total, from a `MemberPassV1` of `CommunityPassOutcomeV1::gates` and the invocation receipt
-found with `CommunityPluginHandleV1::receipt_for()` for the entry's `invocation_id`. The
-caller passes no receipt when the entry has no `invocation_id`: `assemble` compares no IDs.
+`CommunityPluginSubjectOutcomeV1` records one Plugin's result in one host pass.
+`CommunityPluginSubjectOutcomeV1::assemble(entry, tick, mode, receipt)` builds it from the entry's
+`MemberPassV1` and, when the member's Driver launched, its invocation receipt. The caller finds
+the receipt with `CommunityPluginHandleV1::receipt_for()` for the entry's `invocation_id`. It
+passes no receipt when that ID is absent; `assemble` does not compare IDs.
 
-The record carries the exact closed strings of decisions 3 and 5 of ADR-061 (Sandboxed Community
-Plugin Runtime and Decentralized Artifact Trust) revision 7 (error, basis and class names), the
-content-validation fact and the execution profile digest. It
-carries no claim of signature validity: a release that fails the gate is `Refused`, and
-nothing else says it was verified.
+The result vocabulary is closed: `Staged`, `Committed`, `Refused`, `Trapped`, `Failed`, `NotRun`
+or `Discarded`. Refused and failed results include a closed error and class name; a refusal may
+also include its trust or revocation basis. The record carries the content-validation result and
+execution-profile digest. It makes no claim of signature validity: a release that fails the gate
+is `Refused`, and nothing else in the record says it was verified.
 
-The EAI1/EAO1 subject adapter binary is owned by #194.
+The EAI1/EAO1 subject adapter is `apps/pos-plugin-conformance-adapter`.
 
 Results are Local-relaxation engineering evidence, not hosted conformance.
 
-The adapter is `apps/pos-plugin-conformance-adapter` (ADR-061 revision 8, #194): it reads one
-EAI1 attempt, runs the sub-cases of its payload through this crate's supervisor and the real
-`pos-plugin-worker`, and writes one EAO1 observation. Its README has the contract, and its
-acceptance tests are `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`.
+The adapter reads one EAI1 attempt, runs the payload's sub-cases through this crate's supervisor
+and the real `pos-plugin-worker`, and writes one EAO1 observation. Its README describes the wire
+behavior. Profile acceptance tests are in
+`apps/pos-plugin-worker/tests/conformance_adapter_public.rs`.
 
-`scripts/check_handoff_readme.py` checks the ownership sentence and the evidence sentence
-above, and the same two sentences and the worker-location sentence of the adapter README, on
-every CI run.
+Build `pos-plugin-worker` into the adapter binary's directory so the adapter can resolve it next
+to its executable.

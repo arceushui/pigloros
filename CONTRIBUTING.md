@@ -28,9 +28,10 @@ Read these files before making a change:
 - [`docs/test-policy.md`](docs/test-policy.md) — test, coverage, and change-risk policy.
 - [`docs/merge-queue.md`](docs/merge-queue.md) — how pull requests are approved and merged through the merge queue.
 
-Keep current contributor instructions in Git. Dated plans, execution notes,
-and architectural decisions belong in the linked Redmine or Notion records,
-not in a second copy of this guide.
+Keep current contributor instructions and public behavior documentation in Git.
+Dated plans, execution notes and private decision history are project records;
+they are not evidence of current implementation behavior and are not required to
+understand the public contract.
 
 ## Set up an isolated worktree
 
@@ -65,7 +66,8 @@ hosted required checks.
 
 Before editing, classify the change and identify its public seam. New crates,
 plugins, binaries, durable public APIs, storage or security boundaries,
-protocols, and coordinate models require an accepted ADR before implementation.
+protocols and coordinate models require a reviewed architecture decision before
+implementation.
 Tests should exercise public interfaces rather than implementation details.
 
 Use the existing repository commands and policy tools. A one-off script that
@@ -463,6 +465,8 @@ sequenceDiagram
 Before requesting review, confirm:
 
 - the change is on a task worktree and the branch is based on current `main`;
+- before each push, the branch includes the latest `origin/main` and, for a
+  stacked pull request, its updated parent branch;
 - the diff is focused and does not include secrets, generated noise, or
   unrelated formatting;
 - public terminology matches [`CONTEXT.md`](CONTEXT.md);

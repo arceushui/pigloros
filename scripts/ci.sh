@@ -65,7 +65,7 @@ echo "==> MemoryStore benchmark CI policy"
 python3 "$ROOT/scripts/check_memory_store_benchmark_ci_policy.py"
 python3 "$ROOT/scripts/test_check_memory_store_benchmark_ci_policy.py"
 
-echo "==> Plugin trust and composition fallback registries, fixture instant and handoff README policies"
+echo "==> Plugin trust and composition fallback registries, fixture instant and adapter README policy"
 python3 "$ROOT/scripts/check_plugin_trust_registry_impls.py"
 python3 "$ROOT/scripts/test_check_plugin_trust_registry_impls.py"
 python3 "$ROOT/scripts/check_composition_fallback_registry_impls.py"
