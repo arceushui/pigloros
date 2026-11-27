@@ -14,11 +14,13 @@ Principal (see [Local Principal](#local-principal)): `GatewayAuthenticationAdapt
 implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, and
 `GatewayAuthorization` evaluates the pinned Principal, consent, capability, delegation, expiry
 and revocation state. A host without a provisioned Local Principal answers every protected
-operation `401 unauthenticated`. The other Wave 9 resource
-families (Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections, ensembles,
-Replays, evidence, exports and erasure) are Draft operations of the contract that their owner
-tickets (#303 to #309) will serve; consent revocation is served (#309, see
-[Consents](#consents)). WebSocket streaming remains deferred.
+operation `401 unauthenticated`. Scenario Rooms (#303), Preferences and OptionSpecs (#304),
+Decision Previews (#305), consent revocation and erasure (#309, see [Consents](#consents)) are
+served. Until an EPF1 is installed (#1364, #461) the release composition answers every fresh
+`createDecisionPreview` with `409 incompatible-profile`; exact retries and reads are still
+answered. The other Wave 9 resource families (simulated actions, Projections, ensembles, Replays,
+evidence and exports) are Draft operations of the contract that their owner tickets (#306 to
+#308) will serve. WebSocket streaming remains deferred.
 
 ## Run
 
@@ -106,9 +108,9 @@ operations = ["session.read", "timeline.create", "timeline.events.read", "timeli
 The grantable operations are `consent.revoke`, `session.read`, `timeline.create`,
 `timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create`,
 `world.action.v1.submit`, `preference.create`, `preference.read`, `option-spec.create`,
-`option-spec.read`, `scenario-room.create`, `scenario-room.derive` and `scenario-room.read`, plus
-the
-Principal network capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
+`option-spec.read`, `scenario-room.create`, `scenario-room.derive`, `scenario-room.read`,
+`decision-preview.create` and `decision-preview.read` (ADR-140), plus the Principal network
+capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
 and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
 Fork-admission credentials and provision:
 

@@ -68,6 +68,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/executor/scenario_room/tests.rs",
     "src/decision_preview/tests.rs",
     "src/executor/decision_preview/tests.rs",
+    "src/decision_preview/route/tests.rs",
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",
@@ -461,6 +462,87 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     capture_output=True, text=True, check=True, cwd=ROOT,
                 )
                 self.assertEqual([line for line in result.stdout.split("\n") if line], expected)
+
+    def test_owner_uhid_sources_are_hidden_only_when_the_lane_is_skipped(self) -> None:
+        for name in ("Generate trusted current baseline", "Analyze CRAP score changes"):
+            for uhid in (
+                "crates/pos-owner-ctap/**",
+                "${{ needs.ci_change_scope.outputs.owner_uhid != 'true' && "
+                "'crates/pos-owner-ctap/**' || '' }}",
+                "${{ needs.ci_change_scope.outputs.owner_uhid == 'false' && 'crates/**' || '' }}",
+                None,
+            ):
+                with self.subTest(step=name, uhid=uhid):
+                    def change(workflow: dict) -> None:
+                        env = self.cargo_crap_step(workflow, name)["env"]
+                        if uhid is None:
+                            del env["UHID_ALLOW"]
+                        else:
+                            env["UHID_ALLOW"] = uhid
+
+                    self.assert_rejected(change)
+            with self.subTest(step=name, change="unconditional allow"):
+                def allow_always(workflow: dict) -> None:
+                    step = self.cargo_crap_step(workflow, name)
+                    step["run"] = step["run"].replace(
+                        CHECKER.UHID_ALLOW_ARG, "--allow 'crates/pos-owner-ctap/**' "
+                    )
+
+                self.assert_rejected(allow_always)
+
+    def test_uhid_allow_expands_only_for_a_skipped_lane(self) -> None:
+        for value, expected in (
+            ("crates/pos-owner-ctap/**", ["--allow", "crates/pos-owner-ctap/**"]),
+            ("", []),
+        ):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["bash", "-c", "printf '%s\\n' " + CHECKER.UHID_ALLOW_ARG],
+                    env=dict(os.environ, UHID_ALLOW=value),
+                    capture_output=True, text=True, check=True, cwd=ROOT,
+                )
+                self.assertEqual([line for line in result.stdout.split("\n") if line], expected)
+
+    def test_owner_uhid_baseline_drop_requires_an_explicitly_skipped_lane(self) -> None:
+        name = "Drop the unmeasured owner U-tier sources from the trusted baseline"
+        for key, value in (
+            ("if", CHECKER.UHID_MEASURED),
+            ("if", "${{ needs.ci_change_scope.outputs.owner_uhid != 'true' }}"),
+            ("if", "${{ true }}"),
+            ("continue-on-error", True),
+            ("run", "true"),
+        ):
+            with self.subTest(control=key, value=value):
+                self.assert_rejected(
+                    lambda workflow: self.cargo_crap_step(workflow, name).update({key: value})
+                )
+        with self.subTest(control="unconditional"):
+            self.assert_rejected(lambda workflow: self.cargo_crap_step(workflow, name).pop("if"))
+
+    def test_baseline_uhid_filter_drops_only_the_ctap_sources_and_fails_closed(self) -> None:
+        entries = [
+            {"file": "/w/crates/pos-owner-ctap/src/tty.rs", "function": "a"},
+            {"file": "C:\\w\\crates\\pos-owner-ctap\\src\\hidraw.rs", "function": "b"},
+            {"file": "crates/pos-owner-ctap/src/c.rs", "function": "c"},
+            {"file": "/w/crates/pos-owner-ctap/tests/hostio/main.rs", "function": "d"},
+            {"file": "/w/crates/pos-owner-ctap-extra/src/e.rs", "function": "e"},
+            {"file": "/w/crates/pos-owner-bridge/src/f.rs", "function": "f"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / "cargo-crap-baseline.json"
+            baseline.write_text(json.dumps({"version": "0.2.2", "entries": entries}), encoding="utf-8")
+            env = dict(os.environ, RUNNER_TEMP=directory)
+            subprocess.run(["bash", "-c", CHECKER.DROP_UHID_BASELINE_COMMAND], env=env, check=True)
+            kept = json.loads(baseline.read_text(encoding="utf-8"))
+            self.assertEqual([entry["function"] for entry in kept["entries"]], ["d", "e", "f"])
+            baseline.write_text("not json", encoding="utf-8")
+            result = subprocess.run(["bash", "-c", CHECKER.DROP_UHID_BASELINE_COMMAND],
+                                    env=env, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            baseline.unlink()
+            result = subprocess.run(["bash", "-c", CHECKER.DROP_UHID_BASELINE_COMMAND],
+                                    env=env, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_baseline_shim_filter_keeps_every_other_entry_and_fails_closed(self) -> None:
         entries = [
@@ -1654,7 +1736,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
                     owner = "success" if event != "pull_request" or rust == "true" else "skipped"
                     env.update(EVENT_NAME=event, RUST_SCOPE_RESULT=rust, OWNER_WINDOWS_SCOPE="true",
-                               MUTATION_RESULT=mutation, OWNER_WINDOWS_RESULT=owner,
+                               OWNER_UHID_SCOPE="true", MUTATION_RESULT=mutation,
+                               OWNER_WINDOWS_RESULT=owner, OWNER_UHID_RESULT=owner,
                                CARGO_CRAP_RESULT=result)
                     completed = subprocess.run(["bash", "-c", step["run"]], env=env,
                                                capture_output=True, check=False)

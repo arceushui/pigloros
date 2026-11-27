@@ -22,6 +22,9 @@ pub(super) const ERASURE_SLOT: &str = "{erasure}";
 /// The route-table segment a path names a revision number by: a positive decimal integer
 /// without a leading zero.
 const REVISION_SEGMENT: &str = "{revision}";
+/// The route-table segment a path names a Decision Preview by: any non-empty segment. No
+/// capture fills it, as no fixture Gateway admits a preview before an EPF1 is installed (#305).
+const PREVIEW_SEGMENT: &str = "{preview}";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,8 +192,9 @@ impl ExchangeV2 {
 /// One route of the documented Gateway route table (requirements section 2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RouteV2 {
-    /// The path without its query; [`TIMELINE_SLOT`] and [`ROOM_SLOT`] stand for one
-    /// non-empty segment and `{revision}` for a positive decimal segment.
+    /// The path without its query; [`TIMELINE_SLOT`], [`ROOM_SLOT`], [`ERASURE_SLOT`] and
+    /// `{preview}` stand for one non-empty segment and `{revision}` for a positive decimal
+    /// segment.
     path: &'static str,
     /// The capability an attempt must hold for the route.
     capability: &'static str,
@@ -200,7 +204,7 @@ pub(super) struct RouteV2 {
 }
 
 /// The route table of the requirements text, section 2, in its order.
-const ROUTES: [RouteV2; 13] = [
+const ROUTES: [RouteV2; 15] = [
     RouteV2 {
         path: "/health",
         capability: "gateway.health.read",
@@ -266,6 +270,16 @@ const ROUTES: [RouteV2; 13] = [
         capability: "scenario-room.read",
         events: 0,
     },
+    RouteV2 {
+        path: "/v1/decision-previews",
+        capability: "decision-preview.create",
+        events: 0,
+    },
+    RouteV2 {
+        path: "/v1/decision-previews/{preview}",
+        capability: "decision-preview.read",
+        events: 0,
+    },
 ];
 
 impl RouteV2 {
@@ -280,8 +294,8 @@ impl RouteV2 {
     }
 
     /// Whether `base`, a path without its query, names this route: as many `/`-separated
-    /// segments, each the route's literal segment, any non-empty segment for a Timeline, room
-    /// or erasure slot, or a positive decimal for the revision segment.
+    /// segments, each the route's literal segment, any non-empty segment for a Timeline, room,
+    /// erasure or preview segment, or a positive decimal for the revision segment.
     fn matches(self, base: &str) -> bool {
         terminated_segments(self.path)
             .zip(terminated_segments(base))
@@ -297,12 +311,14 @@ fn terminated_segments(path: &str) -> impl Iterator<Item = Option<&str>> {
 
 /// Whether a path segment names the route-table segment it pairs with.
 ///
-/// A Timeline, room or erasure slot takes any non-empty segment and the revision segment a positive
-/// decimal; any other segment must be the literal itself, and the end of one path only pairs
-/// with the end of the other.
+/// A Timeline, room, erasure or preview segment takes any non-empty segment and the revision
+/// segment a positive decimal; any other segment must be the literal itself, and the end of one
+/// path only pairs with the end of the other.
 fn segment_matches(pair: (Option<&str>, Option<&str>)) -> bool {
     match pair {
-        (Some(TIMELINE_SLOT | ROOM_SLOT | ERASURE_SLOT), Some(segment)) => !segment.is_empty(),
+        (Some(TIMELINE_SLOT | ROOM_SLOT | ERASURE_SLOT | PREVIEW_SEGMENT), Some(segment)) => {
+            !segment.is_empty()
+        }
         (Some(REVISION_SEGMENT), Some(segment)) => is_revision(segment),
         (template, segment) => template == segment,
     }
@@ -397,8 +413,8 @@ mod tests {
         include_str!("../../../../scripts/generate_gateway_conformance_fixtures.py");
 
     /// The `(path, capability)` rows of the requirements' route table (section 2), with `:id`
-    /// written as the Timeline slot, `:room` as the room slot and `:revision` as the revision
-    /// segment.
+    /// written as the Timeline slot, `:room` as the room slot, `:erasure` as the erasure slot,
+    /// `:preview` as the preview segment and `:revision` as the revision segment.
     fn documented_routes() -> Vec<(String, String)> {
         let section = REQUIREMENTS
             .split("## 2. Routes and capabilities")
@@ -416,6 +432,7 @@ mod tests {
                     path.replace(":id", TIMELINE_SLOT)
                         .replace(":room", ROOM_SLOT)
                         .replace(":erasure", ERASURE_SLOT)
+                        .replace(":preview", PREVIEW_SEGMENT)
                         .replace(":revision", REVISION_SEGMENT),
                     capability.to_owned(),
                 ))
@@ -461,7 +478,7 @@ mod tests {
         assert_eq!(generator_capabilities(), capabilities);
         assert_eq!(
             ROUTES.map(RouteV2::events),
-            [0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 2, 2, 0]
+            [0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 2, 2, 0, 0, 0]
         );
     }
 
@@ -489,6 +506,7 @@ mod tests {
                 .replace(TIMELINE_SLOT, "t")
                 .replace(ROOM_SLOT, "r")
                 .replace(ERASURE_SLOT, "e")
+                .replace(PREVIEW_SEGMENT, "p")
                 .replace(REVISION_SEGMENT, "1");
             // A path ending in a slot names that route for any segment, so
             // its longer neighbour is a further segment.
@@ -515,6 +533,8 @@ mod tests {
             "/v1/scenario-rooms/r/revisions/",
             "/v1/scenario-rooms/r/revisions/x1",
             "/v1/scenario-rooms/r/revisions/1/x",
+            "/v1/decision-previews/",
+            "/v1/decision-previews/p/x",
             "/v2/session",
             "/v2/timelines/t/events",
             "",

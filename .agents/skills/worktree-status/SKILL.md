@@ -10,6 +10,10 @@ agents unless the user separately asks for an action.
 
 ## Gather
 
+For repository mutations requested alongside a status report, use
+[using-git-worktrees](../using-git-worktrees/SKILL.md). For hosted-check readiness,
+use [ci-verification](../ci-verification/SKILL.md).
+
 1. List live agents. Record agent name and running/completed state. Do not
    infer an agent from a worktree name.
 2. List Git worktrees. For each, inspect:
@@ -53,6 +57,12 @@ Passing focused tests is not completion or merge readiness when the aggregate
 rollup is red, pending, skipped unexpectedly, or unknown—even if the failure
 appears inherited or unrelated.
 
+Name the current blocker, its affected consumer or acceptance frontier, the next
+bounded deliverable, and its completion gate. Reconcile disagreeing status readers
+against the same run and raw artifacts. Hosted stack relationships and Git
+ancestry are separate facts; report which one blocks delivery. Keep an explicit
+live owner for the next transition after a delegated phase completes.
+
 ## Your intervention
 
 End with a separate **Your intervention** section. Include only decisions the
@@ -66,8 +76,8 @@ user must make, each with the recommendation and consequence:
 - approve merging/pushing when the user has reserved that authority.
 
 Do **not** ask the user to intervene for routine implementation, routine test
-failures that are in scope to fix, a clean dormant worktree, or an ordinary
-rebase that can be performed safely. If no decision is needed, write:
+failures that are in scope to fix, a clean dormant worktree, or authorized
+conflict repair that can be performed safely. If no decision is needed, write:
 
 `Your intervention: none — <brief reason>.`
 
