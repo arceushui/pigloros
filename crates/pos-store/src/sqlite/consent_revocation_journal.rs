@@ -121,19 +121,19 @@ impl SqliteStore {
     fn refuse_foreign_journal_object(&self, object: &JournalSchemaObject) -> Result<(), CoreError> {
         self.conn
             .query_row(
-                "SELECT type, tbl_name FROM main.sqlite_schema WHERE name = ?1 COLLATE NOCASE",
-                params![object.name],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                "SELECT type = ?2 AND tbl_name = ?3 COLLATE NOCASE
+                 FROM main.sqlite_schema WHERE name = ?1 COLLATE NOCASE",
+                params![object.name, object.kind, object.table],
+                |row| row.get::<_, bool>(0),
             )
             .optional()
             .map_err(Self::into_storage_error)
-            .and_then(|found| match found {
-                Some((kind, table))
-                    if kind != object.kind || !table.eq_ignore_ascii_case(object.table) =>
-                {
+            .and_then(|matches| {
+                if matches == Some(false) {
                     Err(incompatible(object))
+                } else {
+                    Ok(())
                 }
-                _ => Ok(()),
             })
     }
 
