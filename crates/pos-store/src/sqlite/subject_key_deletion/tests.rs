@@ -644,6 +644,23 @@ fn finalization_applies_the_registry_tombstone_with_the_rows_retained() -> TestR
 }
 
 #[test]
+fn finalizing_a_different_request_after_destruction_is_not_pending() -> TestResult {
+    let (mut store, request) = pending()?;
+    destroy_all_kinds(&store, &request)?;
+    store.complete_subject_key_destruction_with_receipts(request)?;
+    let other = KeyDestructionRequestV1::new(
+        request.identity,
+        request.expected_material_digest,
+        Hash::from_bytes([99; 32]),
+    );
+    refused(
+        store.complete_subject_key_destruction_with_receipts(other),
+        "is not pending",
+    );
+    Ok(())
+}
+
+#[test]
 fn finalization_refuses_an_unreadable_registry_and_commits_nothing() -> TestResult {
     let (mut store, request) = pending()?;
     destroy_all_kinds(&store, &request)?;

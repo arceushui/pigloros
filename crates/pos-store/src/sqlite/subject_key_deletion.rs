@@ -439,6 +439,15 @@ impl SqliteStore {
             })
     }
 
+    /// Load the durable registry, refusing when it is unavailable.
+    fn available_key_registry(&self) -> Result<KeyRegistryStateV1, CoreError> {
+        self.load_key_registry()
+            .map_err(sealed)
+            .and_then(|registry| {
+                registry.ok_or_else(|| refusal("durable key registry is unavailable"))
+            })
+    }
+
     /// Require that the registry holds exactly `request` as pending.
     ///
     /// A `Started` or `Confirmed` row is only meaningful after the D2 step 2
@@ -447,39 +456,31 @@ impl SqliteStore {
         &self,
         request: &KeyDestructionRequestV1,
     ) -> Result<(), CoreError> {
-        self.load_key_registry()
-            .map_err(sealed)
-            .and_then(|registry| {
-                registry.ok_or_else(|| refusal("durable key registry is unavailable"))
-            })
-            .and_then(|registry| {
-                if registry
-                    .pending_destruction_requests()
-                    .any(|pending| pending == *request)
-                {
-                    Ok(())
-                } else {
-                    Err(refusal("subject key destruction is not pending"))
-                }
-            })
+        self.available_key_registry()
+            .and_then(|registry| require_pending_in(&registry, request))
     }
 
-    /// Like [`Self::require_pending_destruction`], but a request whose
+    /// Like [`Self::require_pending_destruction`], but a request whose own
     /// tombstone is already committed also passes, so a repeated finalization
     /// reaches the registry's `AlreadyDestroyed` outcome.
+    ///
+    /// The tombstone must carry this request's receipt, which binds the
+    /// identity, material digest and authorization; a different request on a
+    /// destroyed identity refuses as not pending.
     fn require_pending_or_destroyed(
         &self,
         request: &KeyDestructionRequestV1,
     ) -> Result<(), CoreError> {
-        let destroyed = self
-            .load_key_registry()
-            .map_err(sealed)?
-            .is_some_and(|registry| registry.tombstone(request.identity).is_some());
-        if destroyed {
-            Ok(())
-        } else {
-            self.require_pending_destruction(request)
-        }
+        self.available_key_registry().and_then(|registry| {
+            let own_tombstone = registry
+                .tombstone(request.identity)
+                .is_some_and(|tombstone| tombstone.deletion_receipt == deletion_receipt(request));
+            if own_tombstone {
+                Ok(())
+            } else {
+                require_pending_in(&registry, request)
+            }
+        })
     }
 
     /// Run one receipt write inside its own `BEGIN IMMEDIATE`.
@@ -633,6 +634,21 @@ impl SqliteStore {
                 .map_err(sealed)
             });
         finish_scope(&self.conn, scope, result)
+    }
+}
+
+/// Require that `registry` holds exactly `request` as `DestructionPending`.
+fn require_pending_in(
+    registry: &KeyRegistryStateV1,
+    request: &KeyDestructionRequestV1,
+) -> Result<(), CoreError> {
+    if registry
+        .pending_destruction_requests()
+        .any(|pending| pending == *request)
+    {
+        Ok(())
+    } else {
+        Err(refusal("subject key destruction is not pending"))
     }
 }
 
