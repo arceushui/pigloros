@@ -697,7 +697,7 @@ impl<'a> ClassifiedTickAuthorityV1<'a> {
 /// - **Not idempotent.** Replaying a committed call fails the basis recheck,
 ///   and a prior `FOP1` under a derived operation ID is corrupt authority.
 /// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
-///   is unsupported until #447.
+///   is unsupported by these recording methods.
 /// - **No deletion.** An admitted Fork is never deleted (ADR-099 revision
 ///   13): the generic `delete_timeline` refuses it with
 ///   `AdmittedForkNotDeletable` before any mutation. Its `FOP1` rows therefore

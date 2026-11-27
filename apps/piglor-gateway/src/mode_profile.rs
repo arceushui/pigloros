@@ -89,7 +89,7 @@ const INGRESS_FORK_ADMISSION_SOCKET: u8 = 3;
 /// Revocation freshness of a mode whose single bound store makes revocation
 /// state current by construction (D10).
 const REVOCATION_CURRENT_BY_CONSTRUCTION: u8 = 1;
-/// The `epf1_field` of the security revision until #461 installs an EPF1.
+/// The `epf1_field` value for a security revision with no installed EPF1.
 const EPF1_EXPLICIT_ABSENT: u8 = 0x00;
 
 /// Closed failures of composing, binding and migrating a Gateway execution
