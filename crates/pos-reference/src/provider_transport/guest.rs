@@ -342,12 +342,17 @@ fn classify(terminal: GuestTerminal) -> Exchange<GuestExecution> {
 ///
 /// The window bounds when a refused exchange is asked again. It does not bound one exchange,
 /// which the case's own deadline bounds, so one slow exchange may spend the whole window.
+///
+/// The number of pauses is bounded by the window too, whatever the clock says: one pause per
+/// [`OPEN_RETRY_INTERVAL`] of it, rounded up, then one last exchange. A clock that never advances
+/// therefore ends the wait instead of keeping it asking.
 fn until_open<T>(
     mut exchange: impl FnMut() -> Result<Exchange<T>, GuestExecuteError>,
     clock: &impl GuestClock,
     window: Duration,
 ) -> Result<T, GuestWaitError> {
-    loop {
+    let pauses = window.as_nanos().div_ceil(OPEN_RETRY_INTERVAL.as_nanos());
+    for _ in 0..pauses {
         match exchange().map_err(GuestWaitError::Execute)? {
             Exchange::Done(value) => return Ok(value),
             Exchange::Refused(Some(SandboxProviderErrorCode::SandboxUnavailable))
@@ -357,6 +362,10 @@ fn until_open<T>(
             }
             Exchange::Refused(code) => return Err(GuestWaitError::Refused(code)),
         }
+    }
+    match exchange().map_err(GuestWaitError::Execute)? {
+        Exchange::Done(value) => Ok(value),
+        Exchange::Refused(code) => Err(GuestWaitError::Refused(code)),
     }
 }
 

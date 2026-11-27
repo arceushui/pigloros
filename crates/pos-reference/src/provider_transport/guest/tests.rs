@@ -537,6 +537,101 @@ fn the_wait_ends_with_the_last_refusal_when_its_window_is_over() {
     assert_eq!((exchanges, clock.pauses.borrow().len()), (4, 3));
 }
 
+/// A clock that stands still: pausing does not advance it.
+struct StuckClock {
+    pauses: std::cell::Cell<u32>,
+}
+
+impl GuestClock for StuckClock {
+    fn elapsed(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn pause(&self, _interval: Duration) {
+        self.pauses.set(self.pauses.get() + 1);
+    }
+}
+
+#[test]
+fn a_clock_that_never_advances_still_ends_the_wait() {
+    let clock = StuckClock {
+        pauses: std::cell::Cell::new(0),
+    };
+    let mut exchanges = 0_u32;
+    let outcome: Result<u8, _> = until_open(
+        || {
+            exchanges += 1;
+            Ok(starting())
+        },
+        &clock,
+        3 * OPEN_RETRY_INTERVAL,
+    );
+    assert_eq!(
+        outcome,
+        Err(GuestWaitError::Refused(Some(
+            SandboxProviderErrorCode::SandboxUnavailable
+        )))
+    );
+    // One pause per interval of the window, then the last exchange.
+    assert_eq!((exchanges, clock.pauses.get()), (4, 3));
+}
+
+#[test]
+fn the_last_exchange_after_the_pauses_may_still_succeed() {
+    let clock = FakeClock::default();
+    let mut answers = vec![Exchange::Done(9), starting(), starting(), starting()];
+    let outcome = until_open(
+        || answers.pop().ok_or(GuestExecuteError::BeforeAdmission),
+        &clock,
+        3 * OPEN_RETRY_INTERVAL,
+    );
+    assert_eq!(outcome, Ok(9));
+    assert_eq!(clock.pauses.borrow().len(), 3);
+}
+
+#[test]
+fn a_partial_interval_of_window_still_gets_its_pause() {
+    // 2.5 intervals round up to 3 pauses, so the exchange at 3 s is the last one.
+    let clock = FakeClock::default();
+    let mut exchanges = 0_u32;
+    let outcome: Result<u8, _> = until_open(
+        || {
+            exchanges += 1;
+            Ok(starting())
+        },
+        &clock,
+        OPEN_RETRY_INTERVAL * 5 / 2,
+    );
+    assert!(outcome.is_err());
+    assert_eq!((exchanges, clock.pauses.borrow().len()), (4, 3));
+}
+
+#[test]
+fn a_slow_exchange_that_spends_the_window_is_not_asked_again() {
+    for spent in [3 * OPEN_RETRY_INTERVAL, 4 * OPEN_RETRY_INTERVAL] {
+        let clock = FakeClock::default();
+        let mut exchanges = 0_u32;
+        let outcome: Result<u8, _> = until_open(
+            || {
+                exchanges += 1;
+                // The exchange itself takes the whole window (exactly, or more).
+                clock.now.set(spent);
+                Ok(starting())
+            },
+            &clock,
+            3 * OPEN_RETRY_INTERVAL,
+        );
+        assert_eq!(
+            outcome,
+            Err(GuestWaitError::Refused(Some(
+                SandboxProviderErrorCode::SandboxUnavailable
+            )))
+        );
+        assert_eq!(exchanges, 1);
+        assert!(clock.pauses.borrow().is_empty());
+    }
+}
+
 #[test]
 fn any_other_answer_ends_the_wait_at_once() {
     let refusals = [
