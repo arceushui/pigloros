@@ -81,18 +81,31 @@ fn expected_sql(object: &JournalSchemaObject) -> String {
     normalize_schema_sql(object.create).replacen("ifnotexists", "", 1)
 }
 
+/// The refusal for an object that is missing, of another type or table, or with other text.
+fn incompatible(object: &JournalSchemaObject) -> CoreError {
+    CoreError::Storage(format!(
+        "SQLite {} {} is missing or has an incompatible schema",
+        object.kind, object.name
+    ))
+}
+
 impl SqliteStore {
-    /// Create the journal objects on a writable open, then validate their exact text.
+    /// Refuse foreign objects, create the journal objects, then validate their text.
     pub(super) fn prepare_consent_revocation_journal_schema(&self) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(
-                &JOURNAL_SCHEMA_OBJECTS
-                    .iter()
-                    .map(|object| object.create)
-                    .collect::<Vec<_>>()
-                    .join(";\n"),
-            )
-            .map_err(Self::into_storage_error)
+        JOURNAL_SCHEMA_OBJECTS
+            .iter()
+            .try_for_each(|object| self.refuse_foreign_journal_object(object))
+            .and_then(|()| {
+                self.conn
+                    .execute_batch(
+                        &JOURNAL_SCHEMA_OBJECTS
+                            .iter()
+                            .map(|object| object.create)
+                            .collect::<Vec<_>>()
+                            .join(";\n"),
+                    )
+                    .map_err(Self::into_storage_error)
+            })
             .and_then(|()| {
                 JOURNAL_SCHEMA_OBJECTS
                     .iter()
@@ -100,26 +113,45 @@ impl SqliteStore {
             })
     }
 
-    /// Refuse a missing object, one of another type or table, or one whose text differs.
+    /// Refuse an object of that name that has another type or belongs to another table.
+    ///
+    /// This runs before the `CREATE ... IF NOT EXISTS` statements, so the
+    /// refusal is this module's fixed text and not `SQLite`'s own wording.
+    fn refuse_foreign_journal_object(&self, object: &JournalSchemaObject) -> Result<(), CoreError> {
+        self.conn
+            .query_row(
+                "SELECT type, tbl_name FROM main.sqlite_schema WHERE name = ?1",
+                params![object.name],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(Self::into_storage_error)
+            .and_then(|found| match found {
+                Some(found) if found != (object.kind.to_owned(), object.table.to_owned()) => {
+                    Err(incompatible(object))
+                }
+                _ => Ok(()),
+            })
+    }
+
+    /// Refuse a created object whose stored text differs from the ADR text.
     fn validate_consent_revocation_journal_object(
         &self,
         object: &JournalSchemaObject,
     ) -> Result<(), CoreError> {
         self.conn
             .query_row(
-                "SELECT sql FROM main.sqlite_schema
-                 WHERE type = ?1 AND name = ?2 AND tbl_name = ?3",
-                params![object.kind, object.name, object.table],
+                "SELECT sql FROM main.sqlite_schema WHERE name = ?1",
+                params![object.name],
                 |row| row.get::<_, String>(0),
             )
-            .optional()
             .map_err(Self::into_storage_error)
-            .and_then(|sql| match sql {
-                Some(sql) if normalize_schema_sql(&sql) == expected_sql(object) => Ok(()),
-                _ => Err(CoreError::Storage(format!(
-                    "SQLite {} {} is missing or has an incompatible schema",
-                    object.kind, object.name
-                ))),
+            .and_then(|sql| {
+                if normalize_schema_sql(&sql) == expected_sql(object) {
+                    Ok(())
+                } else {
+                    Err(incompatible(object))
+                }
             })
     }
 }

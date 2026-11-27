@@ -486,7 +486,12 @@ fn an_events_index_name_on_another_table_refuses_a_writable_open() -> TestResult
         "DROP INDEX idx_events_entity_type;
          CREATE INDEX idx_events_entity_type ON key_registry(singleton);",
     )?;
-    assert!(refusal.contains(EVENTS_INDEX), "{refusal}");
+    assert_eq!(
+        refusal,
+        format!(
+            "storage error: SQLite index {EVENTS_INDEX} is missing or has an incompatible schema"
+        ),
+    );
     Ok(())
 }
 
@@ -496,7 +501,10 @@ fn a_view_in_place_of_the_table_refuses_a_writable_open() -> TestResult {
         "DROP TABLE consent_revocation_journal;
          CREATE VIEW consent_revocation_journal AS SELECT 1 AS state;",
     )?;
-    assert!(refusal.contains("view"), "{refusal}");
+    assert_eq!(
+        refusal,
+        format!("storage error: SQLite table {TABLE} is missing or has an incompatible schema"),
+    );
     Ok(())
 }
 
@@ -506,6 +514,11 @@ fn a_table_squatting_an_index_name_refuses_a_writable_open() -> TestResult {
         "DROP INDEX idx_events_entity_type;
          CREATE TABLE idx_events_entity_type (value INTEGER);",
     )?;
-    assert!(refusal.contains(EVENTS_INDEX), "{refusal}");
+    assert_eq!(
+        refusal,
+        format!(
+            "storage error: SQLite index {EVENTS_INDEX} is missing or has an incompatible schema"
+        ),
+    );
     Ok(())
 }
