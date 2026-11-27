@@ -1024,13 +1024,13 @@ mod tests {
         for (text, count, digest) in [
             (
                 GUEST_SYSCALLS_X86_64,
-                112,
-                "e1708bd49b72aec18207db3e9d610470696796ccb7ee66b507f706c6d73ed862",
+                152,
+                "71892635c59fc2093bdf232c94cc9701482aa9ff25c51903d280f5f0a11ff6a8",
             ),
             (
                 GUEST_SYSCALLS_AARCH64,
-                99,
-                "3e8d8e5331db84566b6496e85f5f057b943d0ec3f715cb7238d2eeede17cb8bb",
+                140,
+                "a39c9edf364fb0a2447772a8b9857f0670dccc9261c35e81b10e1c9d02829255",
             ),
         ] {
             // The sorted names are hashed, so that a reorder alone is no failure but any addition
@@ -1045,12 +1045,30 @@ mod tests {
             }
             assert_eq!(hex, digest);
         }
-        assert!(GUEST_SYSCALLS_X86_64
-            .lines()
-            .any(|name| name == "arch_prctl"));
-        assert!(!GUEST_SYSCALLS_AARCH64
-            .lines()
-            .any(|name| name == "arch_prctl"));
         Ok(())
+    }
+
+    /// systemd adds its `@default` and `@sandbox` sets to every allow-list it is given, and reads
+    /// the union back sorted. The SCS1 `expected-effective-names` is compared with that readback
+    /// exactly, so each guest list holds the whole set already (systemd 260.5, `seccomp-util.c`).
+    #[test]
+    fn the_guest_lists_hold_every_name_systemd_adds_to_an_allow_list() {
+        let implicit: Vec<&str> = include_str!("guest-syscalls-systemd-default.txt")
+            .lines()
+            .collect();
+        assert_eq!(implicit.len(), 70);
+        for text in [GUEST_SYSCALLS_X86_64, GUEST_SYSCALLS_AARCH64] {
+            let names: Vec<&str> = text.lines().collect();
+            for name in &implicit {
+                assert!(names.contains(name), "{name}");
+            }
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                names, sorted,
+                "sorted and unique, as systemd reads them back"
+            );
+        }
     }
 }
