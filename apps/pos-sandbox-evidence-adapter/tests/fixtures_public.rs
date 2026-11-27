@@ -34,7 +34,7 @@ use pos_sandbox_evidence_adapter::{
     apply, exit_code, run, AdapterRunError, After, Fixture, Mode, MODES,
 };
 use rustix::net::{AddressFamily, SocketType};
-use rustix::process::{kill_process, Pid, Signal};
+use rustix::process::{kill_process, waitpid, Pid, Signal, WaitOptions};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -591,17 +591,38 @@ fn the_task_and_memory_fixtures_report_what_they_held() {
     assert_eq!(exhaust_memory(0), 0);
 }
 
-/// The process IDs whose command line is exactly the orphan's: this binary,
-/// `idle`, and the orphan's bound.
+/// The environment variable that marks the orphans of one test run.
+const MARKER: &str = "PIGLOR_ORPHAN_TEST";
+
+/// A marker value no other test run shares: this process and the time.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn idle_orphans() -> TestResult<Vec<u32>> {
+fn unique_marker() -> TestResult<String> {
+    let nanoseconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    Ok(format!("{}-{nanoseconds}", std::process::id()))
+}
+
+/// The live process IDs whose command line is exactly the orphan's (this
+/// binary, `idle`, and the orphan's bound) and whose environment carries
+/// `marker`, so that another test run on the same host is never counted.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn idle_orphans(marker: &str) -> TestResult<Vec<u32>> {
     let wanted = format!("{BINARY}\0idle\0600000\0").into_bytes();
+    let tagged = format!("{MARKER}={marker}").into_bytes();
     let mut found = Vec::new();
     for entry in fs::read_dir("/proc")? {
         let name = entry?.file_name();
         let pid = name.to_str().and_then(|name| name.parse::<u32>().ok());
         if let Some(pid) = pid.filter(|pid| process_state(*pid) != Some('Z')) {
-            if fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|bytes| bytes == wanted) {
+            let has_name =
+                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|bytes| bytes == wanted);
+            let has_tag = fs::read(format!("/proc/{pid}/environ")).is_ok_and(|bytes| {
+                bytes
+                    .split(|byte| *byte == 0)
+                    .any(|entry| entry == tagged.as_slice())
+            });
+            if has_name && has_tag {
                 found.push(pid);
             }
         }
@@ -616,7 +637,22 @@ fn process_state(pid: u32) -> Option<char> {
     stat.rsplit_once(')')?.1.trim_start().chars().next()
 }
 
-/// Kill `pid` and wait until it is gone or a zombie.
+/// Reap `pid`, a child of this process, after killing it: it is then gone,
+/// not a zombie.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn kill_and_reap(pid: u32) -> TestResult {
+    let target = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or("pid")?;
+    kill_process(target, Signal::KILL)?;
+    assert!(waitpid(Some(target), WaitOptions::empty())?.is_some());
+    assert_eq!(process_state(pid), None);
+    Ok(())
+}
+
+/// Kill `pid`, which is not a child of this process (its parent exited, so
+/// its new parent reaps it), and wait until it is gone or a zombie.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn kill_and_wait(pid: u32) -> TestResult {
     let target = i32::try_from(pid)
@@ -634,10 +670,12 @@ fn kill_and_wait(pid: u32) -> TestResult {
 
 #[test]
 fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
-    assert!(idle_orphans()?.is_empty());
+    let marker = unique_marker()?;
+    assert!(idle_orphans(&marker)?.is_empty());
 
     // Through the real binary: the adapter exits, its child does not.
     let mut parent = Command::new(BINARY)
+        .env(MARKER, &marker)
         .arg("orphaned-child")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -651,18 +689,22 @@ fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
     let output = parent.wait_with_output()?;
     assert!(output.status.success());
     assert!(read_observation(output.stdout.as_slice(), 1 << 10).is_ok());
-    let orphans = idle_orphans()?;
+    let orphans = idle_orphans(&marker)?;
     assert_eq!(orphans.len(), 1, "{orphans:?}");
     // It is alive and idle: it decoded the attempt it was fed, which an
     // adapter that failed to read it would not have survived.
     assert!(matches!(process_state(orphans[0]), Some('S' | 'R')));
     kill_and_wait(orphans[0])?;
-    assert!(idle_orphans()?.is_empty());
+    assert!(idle_orphans(&marker)?.is_empty());
 
     // Directly: the orphan is a child of this process, left running.
     let direct = leave_orphan(Path::new(BINARY), &attempt()?).ok_or("no orphan")?;
-    assert_eq!(idle_orphans()?, [direct]);
-    kill_and_wait(direct)?;
+    assert!(matches!(process_state(direct), Some('S' | 'R')));
+    assert_eq!(
+        fs::read(format!("/proc/{direct}/cmdline"))?,
+        format!("{BINARY}\0idle\0600000\0").into_bytes()
+    );
+    kill_and_reap(direct)?;
     // An executable that cannot start leaves nothing.
     assert_eq!(
         leave_orphan(Path::new("/nonexistent/adapter"), &attempt()?),
