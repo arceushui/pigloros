@@ -25,14 +25,14 @@
 //!
 //! The lookup names `idx_events_entity_type` with `INDEXED BY`, so a store
 //! without that index refuses with `ReadUnavailableBeforeDelivery` instead of
-//! scanning. A writable open creates the index idempotently and refuses an
-//! index of that name with other text (`prepare_subject_field_read_schema`);
-//! the qualified constructor never initializes a schema (ADR-123 §4). Only
-//! the exact Timeline's B6 row is consulted: no Fork ancestor or descendant
-//! is, so a frozen ancestor segment stays readable. A failed B6 read, a
-//! malformed row or a present row refuses as fenced. A connection without a
-//! write transaction, which `guarded` never gives, is an infrastructure
-//! failure and refuses as unavailable.
+//! scanning. This module neither creates nor validates the index: the
+//! revocation journal slice (#1553) owns it in the production schema, and the
+//! qualified constructor never initializes a schema (ADR-123 §4). Only the
+//! exact Timeline's B6 row is consulted: no Fork ancestor or descendant is, so
+//! a frozen ancestor segment stays readable. A failed B6 read, a malformed row
+//! or a present row refuses as fenced. A connection without a write
+//! transaction, which `guarded` never gives, is an infrastructure failure and
+//! refuses as unavailable.
 //!
 //! Everything here stays test-support gated until owner activation (#1438).
 
@@ -55,19 +55,11 @@ use pos_crypto::subject_field_read::{
 use rusqlite::{params, OptionalExtension};
 
 use super::erasure_fence_rows::{require_no_erasure_fence_rows, ErasureFenceRefusalV1};
-use super::{normalize_schema_sql, sqlite_load_key_registry, SqliteStore};
+use super::{sqlite_load_key_registry, SqliteStore};
 use crate::owner_store_binding::{OwnerStoreBindingErrorV1, QualifiedSqliteStoreV1};
 use crate::subject_data_consumer::{
     deliver_latest, SubjectKeyringV1, PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
 };
-
-/// The ADR-137 A3 lookup index, identical to the one the revocation journal
-/// slice creates, so either writable open yields the same object.
-const EVENTS_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_events_entity_type
-    ON events(timeline_id, entity_id, event_type, seq)";
-
-/// The stored name of [`EVENTS_INDEX_SQL`]'s index.
-const EVENTS_INDEX_NAME: &str = "idx_events_entity_type";
 
 /// The newest `subject.data.v1` Event of one subject within one Fork segment.
 ///
@@ -270,35 +262,6 @@ impl KeyRegistryHistoricalDecryptionPortV1 for HeldRegistryV1 {
     {
         self.0
             .with_decryption_authorization(identity, private_material_digest, operation)
-    }
-}
-
-impl SqliteStore {
-    /// Create the lookup index on a writable open, then validate its exact text.
-    pub(super) fn prepare_subject_field_read_schema(&self) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(EVENTS_INDEX_SQL)
-            .and_then(|()| {
-                self.conn.query_row(
-                    "SELECT sql FROM main.sqlite_schema
-                     WHERE type = 'index' AND tbl_name = 'events' AND name = ?1 COLLATE NOCASE",
-                    params![EVENTS_INDEX_NAME],
-                    |row| row.get::<_, String>(0),
-                )
-            })
-            .map_err(Self::into_storage_error)
-            .and_then(|sql| {
-                // `SQLite` stores the statement without `IF NOT EXISTS`.
-                if normalize_schema_sql(&sql)
-                    == normalize_schema_sql(EVENTS_INDEX_SQL).replacen("ifnotexists", "", 1)
-                {
-                    Ok(())
-                } else {
-                    Err(CoreError::Storage(format!(
-                        "SQLite index {EVENTS_INDEX_NAME} has an incompatible schema"
-                    )))
-                }
-            })
     }
 }
 

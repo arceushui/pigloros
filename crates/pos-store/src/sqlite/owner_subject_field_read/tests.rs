@@ -35,6 +35,11 @@ use crate::subject_data_consumer::{
     VolatileSubjectNonceLedgerV1,
 };
 
+/// The ADR-137 A3 lookup index, copied from the revocation journal slice
+/// (#1553), which owns it in the production schema.
+const EVENTS_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_events_entity_type
+    ON events(timeline_id, entity_id, event_type, seq)";
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Outcome = (
     Result<(), SubjectFieldOwnerReadErrorV1>,
@@ -233,7 +238,7 @@ impl Seed {
         Ok(self.store.fork(parent, Seq::from_u64(at), name)?.id())
     }
 
-    /// Close the ordinary store, which created the lookup index, and install the namespace.
+    /// Close the ordinary store, create the lookup index on a raw connection and install the namespace.
     fn install(self) -> TestResult<World> {
         let Self {
             store,
@@ -246,6 +251,7 @@ impl Seed {
         } = self;
         drop(store);
         let path = directory.path().join(MAIN);
+        Connection::open(&path)?.execute_batch(EVENTS_INDEX_SQL)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         install_owner_store_namespace_v1(directory.path(), MAIN)?;
         let metadata = std::fs::metadata(&path)?;
@@ -734,49 +740,5 @@ fn a_connection_without_a_write_transaction_is_unavailable_not_fenced() -> TestR
     );
     assert!(matches!(end, Ok(ReadEndV1::Unavailable)));
     assert_eq!(calls, 0);
-    Ok(())
-}
-
-#[test]
-fn a_fresh_store_gets_the_exact_index_and_reads_end_to_end() -> TestResult {
-    let mut seed = seed()?;
-    let timeline = seed.timeline;
-    seed.append(timeline, "first")?;
-    let raw = Connection::open(seed.directory.path().join(MAIN))?;
-    let mut info =
-        raw.prepare("SELECT name FROM pragma_index_info('idx_events_entity_type') ORDER BY seqno")?;
-    let columns = info
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(info);
-    drop(raw);
-    assert_eq!(columns, ["timeline_id", "entity_id", "event_type", "seq"]);
-    let path = seed.directory.path().join(MAIN);
-    let path = path.to_str().ok_or("path")?;
-    // A second writable open finds its own index and accepts it.
-    drop(SqliteStore::open(path)?);
-    let world = seed.install()?;
-    let mut store = world.open()?;
-    assert_eq!(world.read(&mut store, world.timeline), present("first"));
-    closed(store)
-}
-
-#[test]
-fn a_writable_open_refuses_an_index_of_that_name_with_other_columns() -> TestResult {
-    let seed = seed()?;
-    let path = seed.directory.path().join(MAIN);
-    let Seed {
-        store, directory, ..
-    } = seed;
-    drop(store);
-    Connection::open(&path)?.execute_batch(
-        "DROP INDEX idx_events_entity_type;
-         CREATE INDEX idx_events_entity_type ON events(timeline_id, seq);",
-    )?;
-    let error = SqliteStore::open(path.to_str().ok_or("path")?)
-        .err()
-        .map(|error| format!("{error:?}"));
-    assert!(error.is_some_and(|text| text.contains("idx_events_entity_type")));
-    drop(directory);
     Ok(())
 }
