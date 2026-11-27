@@ -519,13 +519,9 @@ impl StagedInstallation {
         let peer = ExecutePeer::authenticate(provider).map_err(|_| "the peer is not root")?;
         let source = ExecuteSource::read(peer, ledger, &installation)
             .map_err(|refusal| format!("{refusal:?}"))?;
-        PreparedProviderExecution::admit(
-            source,
-            ledger,
-            &installation,
-            |_| true,
-            |_| Ok::<(), std::convert::Infallible>(()),
-        )
+        PreparedProviderExecution::admit(source, ledger, &installation, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        })
         .map_err(|refusal| format!("{refusal:?}"))
     }
 
