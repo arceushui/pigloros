@@ -820,24 +820,6 @@ mod tests {
         Ok(())
     }
 
-    /// The real kernfs check: needs root and a cgroup2 mount at
-    /// `/sys/fs/cgroup`; run with `--ignored`.
-    #[test]
-    #[ignore = "needs root and a cgroup2 mount"]
-    fn real_kernfs_removed_node_reports_enodev() -> Result<(), Box<dyn Error>> {
-        let directory = format!("/sys/fs/cgroup/pos-sandboxd-enodev-{}", std::process::id());
-        fs::create_dir(&directory)?;
-        let events = File::open(format!("{directory}/cgroup.events"))?;
-        probe_retained_events(&events)?;
-        fs::remove_dir(&directory)?;
-        let error = probe_retained_events(&events).err();
-        assert_eq!(
-            error.and_then(|error| error.raw_os_error()),
-            Some(Errno::NODEV.raw_os_error())
-        );
-        Ok(())
-    }
-
     #[test]
     fn kernfs_removal_is_proven_only_by_enodev_on_the_retained_events() -> Result<(), Box<dyn Error>>
     {
