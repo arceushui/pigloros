@@ -713,14 +713,25 @@ fn with_release<S, C>(
             evidence: ResourceEvidence::new(Some(execution.evidence), release),
             adapter: execution.adapter,
         }),
-        Err(failure) => Err(ExecuteFailure {
-            network_removal: failure.network_removal,
-            error: failure.error,
-            unit: failure.unit,
-            cgroup: failure.cgroup,
-            evidence: Some(ResourceEvidence::new(failure.evidence, release)),
-            started: failure.started,
-        }),
+        Err(failure) => {
+            // DIAGNOSTIC: why the execution failed, for the guest journal.
+            std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "pos-sandboxd diag: execute failed: {:?} {:?}\n",
+                    failure.error, failure.unit
+                ),
+            )
+            .ok();
+            Err(ExecuteFailure {
+                network_removal: failure.network_removal,
+                error: failure.error,
+                unit: failure.unit,
+                cgroup: failure.cgroup,
+                evidence: Some(ResourceEvidence::new(failure.evidence, release)),
+                started: failure.started,
+            })
+        }
     }
 }
 
