@@ -51,7 +51,13 @@ const INCLUDES: [(&str, &[&str]); 5] = [
     ),
     (
         "pos-reference/src/selector/installation/fixture.rs",
-        &["tests/vectors/", "guest-syscalls-"],
+        &[
+            "tests/vectors/",
+            "guest-syscalls-x86_64.txt",
+            "guest-syscalls-aarch64.txt",
+            "guest-syscalls-systemd-default.txt",
+            "pos-conformance/vectors/systemd-provider-v260.2/",
+        ],
     ),
     (
         "pos-sandboxd/src/test_fixtures.rs",
@@ -76,7 +82,7 @@ const SUPPORT_EXEMPT_LINES: [&str; 2] = ["process::Command,", "let output = Comm
 /// allow-list lets systemd's executor and the launcher start the adapter, so these names are
 /// expected; a new `fork`, `clone`, `exec` or `spawn` family name in a data file is a reviewed
 /// change to this table.
-const GUEST_SYSCALL_FILES: [(&str, &[&str]); 2] = [
+const GUEST_SYSCALL_FILES: [(&str, &[&str]); 3] = [
     (
         "../../crates/pos-reference/src/selector/installation/guest-syscalls-x86_64.txt",
         &["clone", "clone3", "execve", "execveat"],
@@ -84,6 +90,10 @@ const GUEST_SYSCALL_FILES: [(&str, &[&str]); 2] = [
     (
         "../../crates/pos-reference/src/selector/installation/guest-syscalls-aarch64.txt",
         &["clone", "clone3", "execve", "execveat"],
+    ),
+    (
+        "../../crates/pos-reference/src/selector/installation/guest-syscalls-systemd-default.txt",
+        &["execve"],
     ),
 ];
 
@@ -387,6 +397,19 @@ fn guest_syscall_lists_hold_only_the_expected_process_names() -> TestResult {
             .collect();
         process_names.sort_unstable();
         assert_eq!(process_names, expected, "{file}");
+    }
+    // Every data file of the directory is in the table, so a new one cannot go unscanned.
+    let directory = manifest_root().join("../../crates/pos-reference/src/selector/installation");
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with("guest-syscalls-") {
+            assert!(
+                GUEST_SYSCALL_FILES
+                    .iter()
+                    .any(|(file, _)| file.ends_with(&name)),
+                "{name} is not in GUEST_SYSCALL_FILES"
+            );
+        }
     }
     Ok(())
 }

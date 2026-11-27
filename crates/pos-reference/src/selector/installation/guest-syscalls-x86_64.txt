@@ -3,15 +3,11 @@ access
 arch_prctl
 bind
 brk
-cacheflush
 capget
 chdir
 clock_getres
-clock_getres_time64
 clock_gettime
-clock_gettime64
 clock_nanosleep
-clock_nanosleep_time64
 clone
 clone3
 close
@@ -39,7 +35,6 @@ flock
 fstat
 ftruncate
 futex
-futex_time64
 futex_waitv
 get_robust_list
 get_thread_area
@@ -47,13 +42,9 @@ getcwd
 getdents
 getdents64
 getegid
-getegid32
 geteuid
-geteuid32
 getgid
-getgid32
 getgroups
-getgroups32
 getpeername
 getpgid
 getpgrp
@@ -61,9 +52,7 @@ getpid
 getppid
 getrandom
 getresgid
-getresgid32
 getresuid
-getresuid32
 getrlimit
 getsid
 getsockname
@@ -71,7 +60,6 @@ getsockopt
 gettid
 gettimeofday
 getuid
-getuid32
 ioctl
 kill
 landlock_add_rule
@@ -86,7 +74,6 @@ madvise
 membarrier
 mkdirat
 mmap
-mmap2
 mprotect
 mremap
 mseal
@@ -114,8 +101,6 @@ readv
 recvfrom
 recvmsg
 restart_syscall
-riscv_flush_icache
-riscv_hwprobe
 rseq
 rt_sigaction
 rt_sigprocmask
@@ -129,11 +114,9 @@ sendto
 set_robust_list
 set_thread_area
 set_tid_address
-set_tls
 setsockopt
 shutdown
 sigaltstack
-sigreturn
 socket
 socketpair
 stat
@@ -141,7 +124,6 @@ statx
 sysinfo
 tgkill
 time
-ugetrlimit
 umask
 uname
 unlink
