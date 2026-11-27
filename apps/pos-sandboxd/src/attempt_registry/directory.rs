@@ -206,7 +206,7 @@ impl PreparedAttemptDirectory {
     }
 
     /// Durably record the boot and time of a `MountImage` request that is
-    /// about to be sent, before it is sent (owner decision D2). Restart
+    /// about to be sent, before it is sent. Restart
     /// reconciliation uses it to wait out a request that may still be served.
     ///
     /// The marker only makes restart more conservative, so an owner closed

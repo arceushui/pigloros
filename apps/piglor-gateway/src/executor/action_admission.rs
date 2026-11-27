@@ -276,11 +276,9 @@ fn fresh_caller_key() -> Hash {
     keyed(b"fresh-caller-key", &[&EntityId::new().inner().to_bytes()])
 }
 
-/// The ADR-134 §6 execution-profile security revision: the bound GMP1
-/// digest, the EPF1 field (explicit-absent until #461), the sorted operator
-/// grant tags, the pinned authority registry digest and the revocation
-/// freshness. An unbound composition has no execution mode, so its contract
-/// is incomplete and it admits nothing.
+/// Hash the bound mode's GMP1 digest, EPF1 marker, sorted operator grant
+/// tags, pinned authority-registry digest and revocation freshness. An
+/// unbound composition has no execution mode and admits nothing.
 fn execution_mode_revision(
     registry: Hash,
     revocation_current: bool,

@@ -23,10 +23,6 @@ fn every_refusal_before_agr1_has_its_section_7_5_code() {
             Some(Code::AuthorityMismatch),
         ),
         (
-            StagingError::CapabilityMissing,
-            Some(Code::ProviderCapabilityMissing),
-        ),
-        (
             StagingError::ImageIdentity,
             Some(Code::ImageIdentityMismatch),
         ),

@@ -6,7 +6,7 @@
 //! checks the actual Plugin and approver against the entry's reviewed
 //! specification, seals the product with its CFG1, EPF1, EOP1 and candidate
 //! pin links, and commits it to the [`PluginRegistry`] atomically. A staged
-//! Reducer entry is also built once per protected candidate (ADR-113 §1).
+//! Reducer entry is also built once per protected candidate.
 //!
 //! Closure over factory types is enforced at runtime: an entry can be
 //! selected for any factory type, and registration rejects a product whose
@@ -320,8 +320,9 @@ pub(super) fn first_broken_link<const N: usize>(
 ///
 /// The selected entry's reviewed specification checks the actual Plugin and
 /// approver types whatever the evidence; only the EPF1/source provenance of
-/// the binding varies. Installed evidence resolves the host-verified EPF1,
-/// which is absent in Wave 8, so production sealing fails closed there.
+/// the binding varies. Installed evidence resolves the host-verified EPF1.
+/// If the selected profile has no installed EPF1, production sealing fails
+/// closed.
 pub(super) fn seal_catalogue_bundle<F: InstalledPluginFactoryV1>(
     profile_id: &str,
     entry: &HostCatalogueEntryV1<F>,
@@ -385,16 +386,14 @@ impl PluginRegistry {
     ///
     /// This is the sole production Plugin registration operation. The
     /// trusted composition root selects `entry`, passes a frozen
-    /// configuration, and passes the ADR-058 profile its bound Gateway
-    /// execution mode selects for registration (ADR-134 §7, execution-mode profile field 9).
+    /// configuration, and passes the profile selected by its bound Gateway
+    /// execution mode.
     /// The selection never authorizes: runtime invokes the entry's factory
     /// once, checks the actual Plugin and approver against the reviewed
     /// specification, freezes CFG1, resolves the host-verified EPF1 of the
     /// selected profile, checks every retained link, and commits atomically.
-    /// Every execution mode selects a profile (ADR-134 field 9: Local
-    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135); a profile
-    /// with no installed EPF1 fails closed before any registry mutation, and
-    /// positive installed registration arrives with #461.
+    /// Every execution mode selects a profile. A profile with no installed
+    /// EPF1 fails closed before any registry mutation.
     ///
     /// # Errors
     /// Rejects a foreign Plugin or approver,

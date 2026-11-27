@@ -1,10 +1,5 @@
-//! ADR-087 Part C.3 (#440, owner decision Q7.8): the kernel command line
-//! must veto systemd's userspace Verity fallback before mountfsd is called.
-//!
-//! systemd v260.2 reads `systemd.allow_userspace_verity=` with
-//! `PROC_CMDLINE_TRUE_WHEN_MISSING`, so a missing option allows userspace
-//! validation. To match systemd's parsing without ambiguity, the accepted
-//! rule is closed:
+//! Accepts only a kernel command line that explicitly disables userspace
+//! Verity fallback before mountfsd is called. The accepted form is closed:
 //! - the command line is ASCII, with no control character other than space,
 //!   tab, newline or carriage return, and no quote or backslash, because
 //!   systemd unquotes words;
