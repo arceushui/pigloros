@@ -313,11 +313,13 @@ fn a_failed_write_removes_the_created_files_and_a_stuck_one_is_reported() -> Tes
         matches!(&refused, Err(ConformanceError::Io(error)) if error.to_string() == "disk full")
     );
 
-    // A created file that cannot be removed (a directory took its place) is reported.
+    // A created file that cannot be removed (a directory took its place) is reported with the write
+    // error, and the files created after it are removed all the same.
     let directory = tempfile::tempdir()?;
     let path = directory.path().to_owned();
+    let three: &[(&str, &[u8])] = &[("one", b"first"), ("two", b"second"), ("three", b"third")];
     let stuck = |file: &mut std::fs::File, bytes: &[u8]| {
-        if bytes == b"second" {
+        if bytes == b"third" {
             std::fs::remove_file(path.join("one"))?;
             std::fs::create_dir(path.join("one"))?;
             Err(io::Error::other("disk full"))
@@ -325,10 +327,14 @@ fn a_failed_write_removes_the_created_files_and_a_stuck_one_is_reported() -> Tes
             file.write_all(bytes)
         }
     };
-    let refused = export_files(directory.path(), files, stuck);
+    let refused = export_files(directory.path(), three, stuck);
     assert!(
-        matches!(&refused, Err(ConformanceError::Stage(reason)) if reason.contains("not removed")),
+        matches!(&refused, Err(ConformanceError::Stage(reason))
+            if reason.contains("not removed") && reason.contains("disk full")),
         "{refused:?}"
     );
+    assert!(!directory.path().join("two").exists());
+    assert!(!directory.path().join("three").exists());
+    assert!(directory.path().join("one").is_dir());
     Ok(())
 }

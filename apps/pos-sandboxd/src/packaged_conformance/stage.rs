@@ -155,15 +155,22 @@ fn export_files(
     let Err(error) = written else {
         return Ok(());
     };
-    let leftover = created
-        .iter()
-        .filter_map(|path| fs::remove_file(path).err())
-        .find(|cleanup| cleanup.kind() != io::ErrorKind::NotFound);
-    Err(leftover.map_or(ConformanceError::Io(error), |cleanup| {
-        ConformanceError::Stage(format!(
-            "the export failed and a created file was not removed: {cleanup}"
-        ))
-    }))
+    // Every created file is removed, whatever happens to an earlier one; the first removal failure
+    // other than a file that is already gone is reported with the write error.
+    let mut leftover = None;
+    for path in &created {
+        if let Err(cleanup) = fs::remove_file(path) {
+            if cleanup.kind() != io::ErrorKind::NotFound && leftover.is_none() {
+                leftover = Some(cleanup);
+            }
+        }
+    }
+    match leftover {
+        None => Err(ConformanceError::Io(error)),
+        Some(cleanup) => Err(ConformanceError::Stage(format!(
+            "the export failed ({error}) and a created file was not removed: {cleanup}"
+        ))),
+    }
 }
 
 /// One command-line argument as text.
