@@ -2,7 +2,7 @@
 
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 
 use rustix::fs::{fstatfs, openat2, Mode, OFlags, ResolveFlags, CWD};
 use rustix::io::Errno;
@@ -289,6 +289,11 @@ pub struct BoundAttemptCgroup {
     invocation: Option<[u8; 16]>,
 }
 
+/// Read one byte of the retained events file at offset zero.
+fn probe_retained_events(events: &File) -> std::io::Result<()> {
+    events.read_at(&mut [0_u8; 1], 0).map(|_| ())
+}
+
 impl BoundAttemptCgroup {
     pub(crate) fn open(
         root: CgroupRoot,
@@ -403,12 +408,17 @@ impl BoundAttemptCgroup {
     /// # Errors
     /// Rejects a populated, malformed, unreadable, or identity-replaced cgroup.
     pub fn observe_empty(&mut self) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        self.observe_empty_with_metadata(File::metadata)
+        self.observe_empty_with(File::metadata, probe_retained_events)
     }
 
-    fn observe_empty_with_metadata(
+    /// `probe_events` reads the retained `cgroup.events` descriptor once the
+    /// path is missing. kernfs keeps a removed directory's link count, so
+    /// only `ENODEV` from that descriptor proves removal there; a renamed
+    /// live cgroup still reads, and every other outcome stays unproven.
+    fn observe_empty_with(
         &mut self,
         read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+        probe_events: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
         let basis_and_raw = match self.inspect_path_with_metadata(read_metadata)? {
             BoundCgroupPath::Missing {
@@ -416,7 +426,12 @@ impl BoundAttemptCgroup {
             } => (AttemptCgroupEmptyBasis::Deleted, None),
             BoundCgroupPath::Missing {
                 retained_unlinked: false,
-            } => return Err(AttemptCgroupError::DeletionUnproven),
+            } => match probe_events(&self.events) {
+                Err(error) if error.raw_os_error() == Some(Errno::NODEV.raw_os_error()) => {
+                    (AttemptCgroupEmptyBasis::Deleted, None)
+                }
+                _ => return Err(AttemptCgroupError::DeletionUnproven),
+            },
             BoundCgroupPath::Present => {
                 let raw = self.read_events()?;
                 if parse_populated(&raw)? {
@@ -784,6 +799,56 @@ mod tests {
     }
 
     #[test]
+    fn kernfs_removal_is_proven_only_by_enodev_on_the_retained_events() -> Result<(), Box<dyn Error>>
+    {
+        let temporary = tempfile::tempdir()?;
+        let parent = temporary.path().join("system.slice");
+        let directory = parent.join("test.service");
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
+        let mut bound = BoundAttemptCgroup::open(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([9; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+        )?;
+        // A renamed live cgroup keeps a link count and a readable events file.
+        fs::rename(&directory, parent.join("moved.service"))?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::DeletionUnproven)
+        ));
+        // The same live node stays unproven even if it reports populated.
+        fs::write(parent.join("moved.service/cgroup.events"), b"populated 1\n")?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::DeletionUnproven)
+        ));
+        // kernfs answers ENODEV for a removed node whose link count is kept.
+        let removed = bound.observe_empty_with(File::metadata, |_| {
+            Err(std::io::Error::from_raw_os_error(
+                Errno::NODEV.raw_os_error(),
+            ))
+        })?;
+        assert_eq!(removed.basis(), AttemptCgroupEmptyBasis::Deleted);
+        assert_eq!(removed.raw_events(), None);
+        // Any other errno, or a non-OS error, fails closed.
+        for errno in [Errno::IO, Errno::ACCESS, Errno::NOENT, Errno::BADF] {
+            assert!(matches!(
+                bound.observe_empty_with(File::metadata, |_| {
+                    Err(std::io::Error::from_raw_os_error(errno.raw_os_error()))
+                }),
+                Err(AttemptCgroupError::DeletionUnproven)
+            ));
+        }
+        assert!(matches!(
+            bound.observe_empty_with(File::metadata, |_| Err(std::io::Error::other("no errno"))),
+            Err(AttemptCgroupError::DeletionUnproven)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn identity_metadata_failures_do_not_prove_emptiness() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
         let directory = temporary.path().join("system.slice/test.service");
@@ -796,9 +861,10 @@ mod tests {
             "/system.slice/test.service".to_owned(),
         )?;
         let retained_error = bound
-            .observe_empty_with_metadata(|_| {
-                Err(std::io::Error::other("injected retained metadata failure"))
-            })
+            .observe_empty_with(
+                |_| Err(std::io::Error::other("injected retained metadata failure")),
+                probe_retained_events,
+            )
             .err();
         assert!(matches!(
             retained_error,
@@ -806,14 +872,17 @@ mod tests {
         ));
         let mut reads = 0;
         let reopened_error = bound
-            .observe_empty_with_metadata(|file| {
-                reads += 1;
-                if reads == 2 {
-                    Err(std::io::Error::other("injected reopened metadata failure"))
-                } else {
-                    file.metadata()
-                }
-            })
+            .observe_empty_with(
+                |file| {
+                    reads += 1;
+                    if reads == 2 {
+                        Err(std::io::Error::other("injected reopened metadata failure"))
+                    } else {
+                        file.metadata()
+                    }
+                },
+                probe_retained_events,
+            )
             .err();
         assert!(matches!(
             reopened_error,
