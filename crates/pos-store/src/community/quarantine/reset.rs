@@ -41,8 +41,8 @@ use pos_core::{AuthorityTrustRootSealV1, Hash, ImplementationKeyV1, TimelineId};
 
 use super::{
     CommittedQuarantineControlV1, CommunityPreExecutionTrustV1, CommunityQuarantineContextV1,
-    CommunityQuarantineReceiptV1, ControlBoundV1, MemberRefV1, MemberV1, QuarantineLedgerV1,
-    ResetBoundV1,
+    CommunityQuarantineReceiptV1, MemberRefV1, MemberV1, QuarantineLedgerV1, ResetBoundV1,
+    RetainedControlV1,
 };
 use crate::community::lifecycle_authority::CommunityLifecycleAuthorityV1;
 use crate::community::memory_domain::MemoryCommunityDomainV1;
@@ -94,7 +94,6 @@ struct ResetRecordsV1 {
 /// retains.
 struct ResetPremisesV1 {
     records: ResetRecordsV1,
-    generation: [u8; 16],
     /// The reasons whose `F_q` share a pre-execution `SetReason` spent.
     spent: u64,
 }
@@ -145,7 +144,7 @@ impl MemoryCommunityDomainV1 {
                     .get(&(call.timeline, call.control_operation_id))
                 {
                     Some(original)
-                        if matches!(&original.bound, ControlBoundV1::Reset(held) if *held == bound) =>
+                        if matches!(&original.kind, RetainedControlV1::Reset(held) if *held == bound) =>
                     {
                         Ok(original.receipt.clone())
                     }
@@ -188,7 +187,6 @@ impl MemoryCommunityDomainV1 {
         }
         reset_records(context, call, (cqk1, &member), current).map(|records| ResetPremisesV1 {
             records,
-            generation: member.generation,
             spent: current
                 .states
                 .values()
@@ -219,19 +217,16 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// Retain the reset: the successor ledger, the retry index entry, the
-    /// re-armed `F_q` shares and the advanced inventory generation. The records are CQC1, CQR1 and CQO1 only (the
-    /// reset's registrations and metadata records are R15-6's).
+    /// re-armed `F_q` shares and the advanced inventory generation. The
+    /// records are CQC1, CQR1 and CQO1 only (the reset's registrations and
+    /// metadata records are R15-6's).
     fn retain_reset(
         &mut self,
         call: &CommunityQuarantineResetCallV1<'_>,
         (key, bound): (Hash, ResetBoundV1),
         premises: ResetPremisesV1,
     ) -> CommunityQuarantineReceiptV1 {
-        let ResetPremisesV1 {
-            records,
-            generation,
-            spent,
-        } = premises;
+        let ResetPremisesV1 { records, spent } = premises;
         let receipt = CommunityQuarantineReceiptV1 {
             timeline: call.timeline,
             control_operation_id: call.control_operation_id,
@@ -246,10 +241,7 @@ impl MemoryCommunityDomainV1 {
         self.quarantine_controls.insert(
             (call.timeline, call.control_operation_id),
             CommittedQuarantineControlV1 {
-                bound: ControlBoundV1::Reset(bound),
-                generation,
-                sealed: None,
-                admission: None,
+                kind: RetainedControlV1::Reset(bound),
                 receipt: receipt.clone(),
             },
         );

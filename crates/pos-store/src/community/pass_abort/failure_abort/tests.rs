@@ -32,8 +32,9 @@ use crate::community::pass_abort::failure::{
 use crate::community::pass_record::{CommunityPassMemberDigestsV1, CommunityPassStatusV1};
 use crate::community::private_hash::scope_set_digest;
 use crate::community::quarantine::{
-    CommittedQuarantineControlV1, CommunityQuarantineReceiptV1, ControlBoundV1, QuarantineLedgerV1,
-    QuarantineReasonStateV1, SetReasonBoundV1,
+    CommittedQuarantineControlV1, CommunityQuarantineReceiptV1, QuarantineLedgerV1,
+    QuarantineReasonStateV1, RetainedControlV1, RetainedSetReasonV1, SealedControlV1,
+    SetReasonBoundV1,
 };
 use crate::community::vault::VaultKeyV1;
 use crate::community::{
@@ -826,18 +827,23 @@ fn a_used_control_identity_conflicts() -> TestResult {
     scene.case.domain_mut().quarantine_controls.insert(
         (target(), [0x71; 16]),
         CommittedQuarantineControlV1 {
-            bound: ControlBoundV1::SetReason(SetReasonBoundV1 {
-                key: hash(1),
-                expected_ledger: None,
-                reason: 0,
-                host_failure: TRAP,
-                trust_policy_snapshot_digest: hash(2),
-                expected_generation: GENERATION,
-                expected_head: hash(3),
+            kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                bound: SetReasonBoundV1 {
+                    key: hash(1),
+                    expected_ledger: None,
+                    reason: 0,
+                    host_failure: TRAP,
+                    trust_policy_snapshot_digest: hash(2),
+                    expected_generation: GENERATION,
+                    expected_head: hash(3),
+                },
+                generation: GENERATION,
+                sealed: SealedControlV1 {
+                    metadata_key: PASS_KEY_ID,
+                    records: Vec::new(),
+                },
+                admission: None,
             }),
-            generation: GENERATION,
-            sealed: None,
-            admission: None,
             receipt: CommunityQuarantineReceiptV1 {
                 timeline: target(),
                 control_operation_id: [0x71; 16],

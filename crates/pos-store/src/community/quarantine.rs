@@ -237,16 +237,6 @@ pub(super) struct SetReasonBoundV1 {
     pub(super) expected_head: Hash,
 }
 
-/// The bound content of one control operation, by operation kind: the key
-/// `(T, control_operation_id)` fixes the rest.
-#[derive(Clone, Eq, PartialEq)]
-pub(super) enum ControlBoundV1 {
-    /// A `SetReason`, in or out of a failure Abort.
-    SetReason(SetReasonBoundV1),
-    /// An `AuthenticatedReset`.
-    Reset(ResetBoundV1),
-}
-
 /// The bound content of one `AuthenticatedReset` (annex "Reset authority
 /// and compare-and-swap"): the CQK1, every compared premise, the opaque
 /// principal and authorization refs and the authorization deadline.
@@ -305,16 +295,49 @@ pub(super) struct SealedControlV1 {
     pub(super) records: Vec<SealedMetadataV1>,
 }
 
-/// One committed control, retained for its retry (A5.3(5)).
-pub(super) struct CommittedQuarantineControlV1 {
-    pub(super) bound: ControlBoundV1,
+/// One committed `SetReason`, retained for its retry (A5.3(5)).
+pub(super) struct RetainedSetReasonV1 {
+    pub(super) bound: SetReasonBoundV1,
     /// The generation whose catalogue owner owns the CFO1's ARD1.
     pub(super) generation: [u8; 16],
-    /// The sealed records of a `SetReason`; a reset retains none.
-    pub(super) sealed: Option<SealedControlV1>,
+    pub(super) sealed: SealedControlV1,
     /// The CFO1's COA1, absent when the reason was already active.
     pub(super) admission: Option<CommunityArtifactAdmissionV1>,
+}
+
+/// What a committed control retains for its retry, by operation kind: the
+/// key `(T, control_operation_id)` fixes the rest. A reset keeps its bound
+/// content only, since its records are R15-6's.
+pub(super) enum RetainedControlV1 {
+    /// A `SetReason`, in or out of a failure Abort.
+    SetReason(RetainedSetReasonV1),
+    /// An `AuthenticatedReset`.
+    Reset(ResetBoundV1),
+}
+
+/// One committed control, retained for its retry (A5.3(5)).
+pub(super) struct CommittedQuarantineControlV1 {
+    pub(super) kind: RetainedControlV1,
     pub(super) receipt: CommunityQuarantineReceiptV1,
+}
+
+#[cfg(test)]
+impl CommittedQuarantineControlV1 {
+    /// The retained `SetReason`, if this is one.
+    pub(super) const fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
+        match &self.kind {
+            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::Reset(_) => None,
+        }
+    }
+
+    /// The retained `SetReason`, mutably, if this is one.
+    pub(super) const fn set_reason_mut(&mut self) -> Option<&mut RetainedSetReasonV1> {
+        match &mut self.kind {
+            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::Reset(_) => None,
+        }
+    }
 }
 
 /// The validated CMA1 anchor `(T, G)`, the current CSI1 plaintext and its
@@ -490,11 +513,11 @@ impl MemoryCommunityDomainV1 {
             .quarantine_controls
             .get(&(failure.timeline, call.control_operation_id))
         {
-            return if original.bound == ControlBoundV1::SetReason(bound) {
-                self.resolve_original(original)
-                    .map(SetReasonPreparedV1::Original)
-            } else {
-                Err(Error::Conflict)
+            return match &original.kind {
+                RetainedControlV1::SetReason(held) if held.bound == bound => self
+                    .resolve_original(held, &original.receipt)
+                    .map(SetReasonPreparedV1::Original),
+                _ => Err(Error::Conflict),
             };
         }
         let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
@@ -569,9 +592,9 @@ impl MemoryCommunityDomainV1 {
     /// published, must still resolve.
     fn resolve_original(
         &self,
-        original: &CommittedQuarantineControlV1,
+        original: &RetainedSetReasonV1,
+        receipt: &CommunityQuarantineReceiptV1,
     ) -> Result<CommunityQuarantineReceiptV1, Error> {
-        let receipt = &original.receipt;
         let published = original.admission.as_ref().is_none_or(|admission| {
             community_catalogue_owner_v1(receipt.timeline, original.generation).is_ok_and(|owner| {
                 matches!(
@@ -584,14 +607,9 @@ impl MemoryCommunityDomainV1 {
                 )
             })
         });
-        original
-            .sealed
-            .as_ref()
-            .and_then(|retained| {
-                self.keys
-                    .get(&retained.metadata_key)
-                    .zip(retained.records.last())
-            })
+        self.keys
+            .get(&original.sealed.metadata_key)
+            .zip(original.sealed.records.last())
             .and_then(|(key, sealed)| key.open(sealed).ok())
             .filter(|outcome| published && outcome.as_slice() == receipt.outcome())
             .map(|_| receipt.clone())
