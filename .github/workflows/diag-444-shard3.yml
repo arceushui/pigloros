@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo mutants --workspace --all-features --in-diff "${RUNNER_TEMP}/changes.diff" \
-            --no-shuffle --shard 3/16 --list --cap-lints true --cargo-arg=--locked
+            --no-shuffle --re until_open --list --cap-lints true --cargo-arg=--locked
       - name: Watch memory, disk and the current mutant
         run: |
           nohup bash -c '
@@ -60,7 +60,7 @@ jobs:
           timeout --foreground 62m cargo mutants \
             --workspace --all-features \
             --in-diff "${RUNNER_TEMP}/changes.diff" \
-            --no-shuffle --shard 3/16 --baseline run --jobs 1 \
+            --no-shuffle --re until_open --baseline run --jobs 1 \
             --timeout 240 --build-timeout 600 --cap-lints true \
             --caught --unviable --cargo-arg=--locked \
             -- -- -Zunstable-options --fail-fast --include-ignored --test-threads=4
