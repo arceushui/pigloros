@@ -344,7 +344,7 @@ fn is_absent_at_start(row: &SubjectKeyDeletionRowV1) -> bool {
 }
 
 /// Require that every row is `Confirmed`, that each kind has a row and that
-/// no kind holds both an absent-at-start row and a real artifact.
+/// an absent-at-start row is the only row of its kind (ADR-137 D1/D3).
 fn require_complete(rows: &[SubjectKeyDeletionRowV1]) -> Result<(), CoreError> {
     if !rows
         .iter()
@@ -364,7 +364,7 @@ fn require_complete(rows: &[SubjectKeyDeletionRowV1]) -> Result<(), CoreError> {
     }
     let mixed = SubjectKeyDeletionArtifactV1::ALL.iter().any(|kind| {
         let of_kind = || rows.iter().filter(|row| row.artifact == *kind);
-        of_kind().any(is_absent_at_start) && of_kind().any(|row| !is_absent_at_start(row))
+        of_kind().any(is_absent_at_start) && of_kind().count() > 1
     });
     if mixed {
         return Err(refusal(

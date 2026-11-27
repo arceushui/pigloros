@@ -876,6 +876,18 @@ fn finalization_refuses_a_kind_mixing_absent_and_present_artifacts() -> TestResu
     Ok(())
 }
 
+#[test]
+fn finalization_accepts_a_kind_holding_several_real_artifacts() -> TestResult {
+    let (mut store, request) = pending()?;
+    destroy_all_kinds(&store, &request)?;
+    destroyed(&store, &request, Artifact::Wrap, &[10])?;
+    destroyed(&store, &request, Artifact::Wrap, &[11])?;
+    let (outcome, _) = store.complete_subject_key_destruction_with_receipts(request)?;
+    assert!(matches!(outcome, KeyDestructionOutcomeV1::Destroyed(_)));
+    assert_eq!(rows(&store, &request)?.len(), 5);
+    Ok(())
+}
+
 fn foreign_row(
     store: &SqliteStore,
     request: &KeyDestructionRequestV1,
