@@ -83,8 +83,11 @@ const MIN_TERMINATION_CALL: Duration = Duration::from_secs(1);
 /// watchdog. An abort is two such calls at worst.
 const MAX_TERMINATION_CALL: Duration = Duration::from_secs(10);
 
-/// How often the attempt cgroup is polled for emptiness.
-const EMPTY_POLL: Duration = Duration::from_millis(10);
+/// How often the attempt cgroup is polled for emptiness. systemd removes the cgroup of an exited
+/// unit within milliseconds, and the counters of the terminal snapshot are read at the first poll
+/// that finds it empty (`BoundAttemptCgroup::observe_empty`), so a longer interval loses the
+/// snapshot to the removal on a slow guest.
+const EMPTY_POLL: Duration = Duration::from_millis(1);
 
 /// How long after the watchdog deadline `D` the broker escalates (ADR-069 R9
 /// §4.6.5, `G`): systemd's `RuntimeMaxUSec` stops the unit at `D`, so a kill
