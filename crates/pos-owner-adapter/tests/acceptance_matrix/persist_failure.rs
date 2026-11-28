@@ -25,8 +25,8 @@ fn a_failed_staging_record_stages_nothing_and_nothing_unlocks() -> TestResult {
     assert_eq!(outcome, Err(WRITE_REFUSED));
     assert!(fixture.names()?.is_empty());
     assert!(fixture.ledger_rows()?.is_empty());
-    assert!(fixture.staged().is_empty());
-    assert!(fixture.store.registrations().is_empty());
+    assert!(fixture.staged()?.is_empty());
+    assert!(fixture.store.registrations()?.is_empty());
     unlock_is_unavailable(&mut fixture)
 }
 
@@ -38,8 +38,8 @@ fn a_failed_wrap_write_deletes_the_attempt_and_nothing_unlocks() -> TestResult {
     // P5 removed the blocker, the staged files, the row and the record.
     assert!(fixture.names()?.is_empty());
     assert!(fixture.ledger_rows()?.is_empty());
-    assert!(fixture.staged().is_empty());
-    assert!(fixture.store.registrations().is_empty());
+    assert!(fixture.staged()?.is_empty());
+    assert!(fixture.store.registrations()?.is_empty());
     unlock_is_unavailable(&mut fixture)?;
     // A later enrollment is not blocked by the failed attempt.
     fixture.enroll(SUBJECT, page(SUBJECT))??;
@@ -61,8 +61,8 @@ fn a_failed_registration_leaves_the_attempt_staged_and_nothing_unlocks() -> Test
             .collect::<Vec<_>>(),
         [(owner(SUBJECT).as_str(), 1)]
     );
-    assert_eq!(fixture.staged(), [(owner(SUBJECT), 1)]);
-    assert!(fixture.store.registrations().is_empty());
+    assert_eq!(fixture.staged()?, [(owner(SUBJECT), 1)]);
+    assert!(fixture.store.registrations()?.is_empty());
     // Staged files without a registry identity open no key.
     unlock_is_unavailable(&mut fixture)
 }

@@ -21,8 +21,8 @@ fn another_subject_cannot_enroll_a_bound_credential() -> TestResult {
     assert_eq!(outcome, Err(ALREADY_BOUND));
     assert_eq!(fixture.names()?, artifact_names(&[SUBJECT]));
     assert_eq!(fixture.ledger_rows()?.len(), 1);
-    assert_eq!(fixture.store.registrations().len(), 1);
-    assert!(fixture.staged().is_empty());
+    assert_eq!(fixture.store.registrations()?.len(), 1);
+    assert!(fixture.staged()?.is_empty());
     // The refused enrollment disturbed nothing of the bound subject, and the
     // other subject enrolls under a credential of its own.
     let entry = fixture.unlock(SUBJECT, 1, page(SUBJECT))??;
@@ -38,9 +38,9 @@ fn the_same_subject_cannot_enroll_its_credential_again() -> TestResult {
     let outcome = fixture.enroll(SUBJECT, same_credential())?;
     assert_eq!(outcome, Err(ALREADY_BOUND));
     assert_eq!(fixture.names()?, artifact_names(&[SUBJECT]));
-    assert_eq!(fixture.store.registrations().len(), 1);
+    assert_eq!(fixture.store.registrations()?.len(), 1);
     assert_eq!(fixture.ledger_rows()?.len(), 1);
-    assert!(fixture.staged().is_empty());
+    assert!(fixture.staged()?.is_empty());
     Ok(())
 }
 
@@ -53,7 +53,7 @@ fn a_wrap_alone_still_holds_its_credential() -> TestResult {
     let outcome = fixture.enroll(OTHER, same_credential())?;
     assert_eq!(outcome, Err(ALREADY_BOUND));
     assert_eq!(fixture.names()?, remaining);
-    assert_eq!(fixture.store.registrations().len(), 1);
-    assert!(fixture.staged().is_empty());
+    assert_eq!(fixture.store.registrations()?.len(), 1);
+    assert!(fixture.staged()?.is_empty());
     Ok(())
 }

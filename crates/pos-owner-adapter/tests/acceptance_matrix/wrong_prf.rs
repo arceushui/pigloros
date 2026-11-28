@@ -19,8 +19,8 @@ fn a_confirmation_under_another_prf_abandons_the_enrollment() -> TestResult {
     assert_eq!(outcome, Err(WRAP_REFUSED));
     assert!(fixture.names()?.is_empty());
     assert!(fixture.ledger_rows()?.is_empty());
-    assert!(fixture.staged().is_empty());
-    assert!(fixture.store.registrations().is_empty());
+    assert!(fixture.staged()?.is_empty());
+    assert!(fixture.store.registrations()?.is_empty());
     // Nothing was left behind: the honest enrollment takes epoch 1.
     fixture.enroll(SUBJECT, page(SUBJECT))??;
     assert_eq!(fixture.names()?, artifact_names(&[SUBJECT]));
