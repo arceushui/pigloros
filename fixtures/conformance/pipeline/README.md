@@ -10,9 +10,9 @@ job executes.
 
 Each version directory is immutable. The runner pins the SHA-256 of every file
 it reads, so a changed byte fails the suite. A changed expected result needs a
-new version directory, not an edit; rollback selects an older directory. An
-changes that do not alter expected values, such as removing an exclusion or
-running a case on another store, update the manifest pin in place.
+new version directory, not an edit; rollback selects an older directory. A
+change that does not alter expected values, such as removing an exclusion or
+running a case on another store, updates the manifest pin in place.
 
 ## `v1/manifest.json` (`PPC1`, version 1)
 
