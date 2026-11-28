@@ -72,28 +72,49 @@ fn revoked(member: u8) -> Claim<'static> {
     }
 }
 
+/// The roster's members.
+const MEMBERS: u8 = 2;
+
+/// One committed `Revoked` `SetReason` of the roster's `member`th entry.
+fn mint(case: &mut QuarantineCase, member: u8) -> TestResult {
+    set_reason(case, revoked(member))??;
+    Ok(())
+}
+
+/// What one member's committed `SetReason` changes (R13.1(5)): its CFO1 binds
+/// one row and two targets, and its pair's `F_q` share gives the same back.
+fn assert_member_deltas(was: &Parts, now: &Parts, member: u8) {
+    assert_eq!(
+        now.targets,
+        was.targets + 2,
+        "member {member}: CFO1 targets"
+    );
+    assert_eq!(now.reserve, was.reserve - 2, "member {member}: F_q targets");
+    assert_eq!(now.rows, was.rows + 1, "member {member}: CFO1 row");
+    assert_eq!(
+        now.quarantine_rows,
+        was.quarantine_rows - 1,
+        "member {member}: F_q row"
+    );
+}
+
+/// One member's `SetReason` commits with those deltas and leaves `held` at
+/// `before`.
+fn member_commits(case: &mut QuarantineCase, member: u8, before: (u64, u64)) -> TestResult {
+    let was = parts(case)?;
+    mint(case, member)?;
+    assert_member_deltas(&was, &parts(case)?, member);
+    assert_eq!(held(case)?, before);
+    Ok(())
+}
+
 /// A `SetReason` for every roster member, each committing and leaving
-/// `held` as it was: its CFO1 binds one row and two targets, and its pair's
-/// `F_q` share gives exactly the same back (R13.1(5)).
+/// `held` as it was.
 fn every_member_commits(case: &mut QuarantineCase) -> TestResult {
+    assert_eq!(ENTRIES.len(), usize::from(MEMBERS));
     let before = held(case)?;
-    for member in 0..u8::try_from(ENTRIES.len())? {
-        let was = parts(case)?;
-        set_reason(case, revoked(member))??;
-        let now = parts(case)?;
-        assert_eq!(
-            now.targets,
-            was.targets + 2,
-            "member {member}: CFO1 targets"
-        );
-        assert_eq!(now.reserve, was.reserve - 2, "member {member}: F_q targets");
-        assert_eq!(now.rows, was.rows + 1, "member {member}: CFO1 row");
-        assert_eq!(
-            now.quarantine_rows,
-            was.quarantine_rows - 1,
-            "member {member}: F_q row"
-        );
-        assert_eq!(held(case)?, before);
+    for member in 0..MEMBERS {
+        member_commits(case, member, before)?;
     }
     Ok(())
 }
