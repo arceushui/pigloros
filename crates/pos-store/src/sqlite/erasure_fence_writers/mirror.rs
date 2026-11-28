@@ -35,7 +35,7 @@
 //!
 //! Like the table in [`crate::sqlite::erasure_fence_rows`], this module stays
 //! test-support gated until owner activation (#1438). Ungating must remove
-//! the `cfg` gates of both modules and the twin in `erasure_fence_writers.rs` together.
+//! the `cfg` gates of both modules and the statements in `erasure_fence_writers.rs` together.
 
 use pos_core::{
     ErasureErrorV1, ErasureLifecycleV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
