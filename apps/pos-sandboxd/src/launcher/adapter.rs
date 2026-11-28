@@ -4,7 +4,7 @@ use std::{
     fs::File,
     io,
     os::{
-        fd::{AsFd, OwnedFd},
+        fd::{AsFd, BorrowedFd, OwnedFd},
         unix::fs::FileExt,
     },
 };
@@ -56,26 +56,41 @@ pub(super) struct HeldExecutable {
 /// `root`. `openat2` would do this in one call, but the attempt unit's `RestrictSUIDSGID=yes`
 /// makes systemd's seccomp filter answer `openat2` with `ENOSYS`, so the launcher cannot use it.
 pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
-    // Leading and doubled separators collapse, as in the kernel; a trailing one names a directory
-    // and is refused (`openat2` answers it with `ENOTDIR`).
+    plain_names(path).and_then(|names| walk(root.as_fd(), &names))
+}
+
+/// The names of `path`, if it is a plain relative walk: leading and doubled separators collapse,
+/// as in the kernel; a trailing one names a directory and is refused (`openat2` answers it with
+/// `ENOTDIR`), and so are `.` and `..`; an empty path has no file to open (see `walk`).
+fn plain_names(path: &str) -> io::Result<Vec<&str>> {
     let path = path.trim_start_matches('/');
     let names: Vec<&str> = path.split('/').filter(|name| !name.is_empty()).collect();
-    let Some((last, parents)) = names.split_last() else {
-        return Err(io::ErrorKind::InvalidInput.into());
-    };
     if path.ends_with('/') || names.iter().any(|name| matches!(*name, "." | "..")) {
-        return Err(io::ErrorKind::InvalidInput.into());
+        Err(io::ErrorKind::InvalidInput.into())
+    } else {
+        Ok(names)
     }
-    let mut directory: Option<OwnedFd> = None;
-    for name in parents {
-        let at = directory.as_ref().map_or_else(|| root.as_fd(), AsFd::as_fd);
-        let next = openat(at, *name, DIRECTORY_FLAGS, Mode::empty()).map_err(io::Error::from)?;
-        directory = Some(next);
-    }
-    let at = directory.as_ref().map_or_else(|| root.as_fd(), AsFd::as_fd);
-    openat(at, *last, FILE_FLAGS, Mode::empty())
-        .map(File::from)
-        .map_err(io::Error::from)
+}
+
+/// Open each parent directory relative to the one before, then the file in the last of them.
+fn walk(root: BorrowedFd<'_>, names: &[&str]) -> io::Result<File> {
+    let (last, parents) = names.split_last().ok_or(io::ErrorKind::InvalidInput)?;
+    let held = parents
+        .iter()
+        .try_fold(None, |held: Option<OwnedFd>, name| {
+            open_in(held.as_ref(), root, name, DIRECTORY_FLAGS).map(Some)
+        })?;
+    open_in(held.as_ref(), root, last, FILE_FLAGS).map(File::from)
+}
+
+/// Open `name` in the directory `held`, or in `root` before any directory is held.
+fn open_in(
+    held: Option<&OwnedFd>,
+    root: BorrowedFd<'_>,
+    name: &str,
+    flags: OFlags,
+) -> io::Result<OwnedFd> {
+    openat(held.map_or(root, AsFd::as_fd), name, flags, Mode::empty()).map_err(io::Error::from)
 }
 
 /// Hold the adapter: a regular native ELF for this architecture.
