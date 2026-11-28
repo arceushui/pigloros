@@ -268,13 +268,16 @@ fn reserve(
     operation: [u8; 16],
     rows: u64,
 ) -> Result<Option<Error>, Box<dyn std::error::Error>> {
-    match domain.stage_reserve(call_for(timeline, operation, rows)?) {
-        Ok(staged) => {
-            domain.apply_reserve(&SEAL, staged)?;
-            Ok(None)
-        }
-        Err(error) => Ok(Some(error)),
-    }
+    let call = call_for(timeline, operation, rows)?;
+    domain.stage_reserve(call).map_or_else(
+        |refusal| Ok(Some(refusal)),
+        |staged| {
+            domain
+                .apply_reserve(&SEAL, staged)
+                .map(|()| None)
+                .map_err(Into::into)
+        },
+    )
 }
 
 /// Reserve and check the refusal against the model, which then records an
