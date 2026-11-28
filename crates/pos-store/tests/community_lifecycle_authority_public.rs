@@ -1685,3 +1685,105 @@ fn a_run_pass_call_must_fit_its_decision_deadline_by_its_bound() -> TestResult {
         .is_ok());
     Ok(())
 }
+
+/// The Event-history scope of a `run_pass` grant: `read` on each owner's
+/// `community-events:<U32>` under `purpose`.
+fn event_scope(owners: &[TimelineId], purpose: &str) -> Scope {
+    Scope {
+        resources: owners
+            .iter()
+            .map(|owner| format!("community-events:{}", hex(&owner.inner().to_bytes())))
+            .collect(),
+        actions: vec!["read".to_owned()],
+        purposes: vec![purpose.to_owned()],
+        audience: RECIPIENT.to_owned(),
+        constraints: vec![],
+        consent_references: vec![],
+    }
+}
+
+/// R9.5: an Event-history request names `community-events:<U32>` for one
+/// owning Timeline, the execution purpose and the installed recipient, with
+/// the call's `r` constraint; it belongs to `run_pass` calls alone, and a
+/// grant of another owner, purpose or recipient never matches.
+#[test]
+fn event_history_requests_name_the_owning_timeline_and_the_execution_purpose() -> TestResult {
+    let events = grant(1, 1, 0, &event_scope(&[target()], "community-execution"))?;
+    let other = grant(
+        2,
+        2,
+        0,
+        &event_scope(&[other_timeline()], "community-execution"),
+    )?;
+    let in_operation = grant(
+        3,
+        3,
+        0,
+        &event_scope(&[target()], "lifecycle-administration"),
+    )?;
+    let caller_audience = grant(
+        4,
+        4,
+        0,
+        &Scope {
+            audience: AUDIENCE.to_owned(),
+            ..event_scope(&[target()], "community-execution")
+        },
+    )?;
+    let mut world = World::new(&[
+        events.clone(),
+        other.clone(),
+        in_operation.clone(),
+        caller_audience.clone(),
+    ])?;
+    let credential = world.execution_credential(target(), RESERVATION)?;
+    let call = world.execution_call(&credential, target(), RESERVATION)?;
+    let authority = &world.authority;
+    let domain = &world.domain;
+
+    let admission =
+        authority.authorize_event_history(&call, target(), domain, events.grant_id())?;
+    let built = admission.request();
+    assert_eq!(
+        built.resource(),
+        format!("community-events:{}", hex(&target().inner().to_bytes()))
+    );
+    assert_eq!(built.resource().len(), 49);
+    assert_eq!(built.data_category(), "community.event-history");
+    assert_eq!(built.action(), "read");
+    assert_eq!(built.purpose(), "community-execution");
+    assert_eq!(built.audience(), RECIPIENT);
+    assert_eq!(
+        built.environment_constraints().to_vec(),
+        vec![constraint('r', RESERVATION)]
+    );
+    assert!(built.subject_id().is_none());
+    assert_eq!(built.authenticated().principal(), &caller()?);
+    // A second owning Timeline needs its own grant.
+    assert!(authority
+        .authorize_event_history(&call, other_timeline(), domain, other.grant_id())
+        .is_ok());
+    for (owner, leaf) in [
+        (other_timeline(), events.grant_id()),
+        (target(), other.grant_id()),
+        (target(), in_operation.grant_id()),
+        (target(), caller_audience.grant_id()),
+    ] {
+        assert_eq!(
+            authority
+                .authorize_event_history(&call, owner, domain, leaf)
+                .err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    // An administrative call has no Event-history request.
+    let abort = world.call(&pass_abort())?;
+    assert_eq!(
+        world
+            .authority
+            .authorize_event_history(&abort, target(), &world.domain, events.grant_id())
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
