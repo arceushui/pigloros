@@ -95,6 +95,9 @@ impl CommunityOriginalReserveV1 {
 pub(super) struct CommittedReserveV1 {
     /// The protection ID of the pass metadata key that sealed `records`.
     metadata_key: [u8; 16],
+    /// The pass's `H_r`, the CPR1's evidence horizon: the original evidence
+    /// is expired at or after it (R13.2(4)).
+    evidence_not_after_micros: u64,
     /// The sealed CRI1, the CPR1, the metadata key's CCI1 and the failure
     /// cohort key's CCI1, in that order.
     records: Vec<SealedMetadataV1>,
@@ -196,7 +199,7 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityOriginalReserveV1, Error> {
         let key = (timeline, reservation_operation_id);
         let (committed, vault) = self.reserve_vault(key)?;
-        self.check_discoverable(key, sample_micros)?;
+        check_discoverable(committed, sample_micros)?;
         let open = |index: usize| {
             committed
                 .records
@@ -208,26 +211,6 @@ impl MemoryCommunityDomainV1 {
             request: open(0)?,
             reservation: open(1)?,
         })
-    }
-
-    /// The pass's original evidence is not expired at `sample_micros`: its
-    /// `H_r` is after the sample (`EvidenceExpired` otherwise).
-    fn check_discoverable(
-        &self,
-        key: (TimelineId, [u8; 16]),
-        sample_micros: u64,
-    ) -> Result<(), Error> {
-        let horizon = self
-            .pass_record(key.0, key.1)
-            .ok_or(Error::EvidenceUnavailable)?
-            .reserved
-            .reservation
-            .evidence_not_after_micros;
-        if sample_micros >= horizon {
-            Err(Error::EvidenceExpired)
-        } else {
-            Ok(())
-        }
     }
 
     /// The sealed records of a committed Reserve and the pass metadata key
@@ -367,10 +350,28 @@ impl MemoryCommunityDomainV1 {
             staged.key,
             CommittedReserveV1 {
                 metadata_key: metadata_id,
+                evidence_not_after_micros: staged
+                    .record
+                    .reserved
+                    .reservation
+                    .evidence_not_after_micros,
                 records: prepared.records,
             },
         );
         self.publish_reserve(staged);
+    }
+}
+
+/// The Reserve's original evidence is not expired at `sample_micros`: its
+/// `H_r` is after the sample (`EvidenceExpired` otherwise).
+const fn check_discoverable(
+    committed: &CommittedReserveV1,
+    sample_micros: u64,
+) -> Result<(), Error> {
+    if sample_micros >= committed.evidence_not_after_micros {
+        Err(Error::EvidenceExpired)
+    } else {
+        Ok(())
     }
 }
 
