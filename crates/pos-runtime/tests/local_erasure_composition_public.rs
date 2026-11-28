@@ -9027,6 +9027,7 @@ fn signer_rotation(
 
 /// A routine role-2 key change waits until no request pins a bundle. A
 /// compromise rotation requires installed TPS1 to revoke the old signer.
+/// Re-requesting the current registered key is a no-op.
 #[test]
 fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResult {
     let new_key = rotated_signer().verifying_key().to_bytes();

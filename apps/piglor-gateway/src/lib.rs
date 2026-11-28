@@ -1235,7 +1235,7 @@ pub struct Gateway {
     /// Whether protected operations need [`Self::authorization`] (always set
     /// with it), so a composition without its authorizer fails closed.
     authorization_required: bool,
-    /// The Local erasure driver's admission hook, set once its task runs.
+    /// The Local erasure driver's admission hook, bound when its task is spawned.
     local_erasure_wake: Arc<std::sync::OnceLock<local_erasure_composition::LocalErasureTriggerV1>>,
     /// The Decision Preview installed-profile port, quota and in-flight
     /// slots (ADR-140).
