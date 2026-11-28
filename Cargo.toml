@@ -127,7 +127,7 @@ rusqlite = { version = "0.43", features = ["bundled", "hooks", "functions"] }
 # pin with default features off. `runtime` is the feature that lets the
 # Component Model instantiate and call a Component; `scripts/
 # check_wasmtime_feature_pin.py` fails if any further feature is resolved.
-wasmtime = { version = "=50.0.3", default-features = false, features = [
+wasmtime = { version = "=51.0.0", default-features = false, features = [
   "component-model",
   "cranelift",
   "runtime",
