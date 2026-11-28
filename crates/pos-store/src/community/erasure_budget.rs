@@ -197,13 +197,20 @@ impl MemoryCommunityDomainV1 {
     /// R13.1(3) for a reset: re-arming the `F_q` shares of `spent` pairs
     /// holds `2 * spent` targets and `spent` rows more of T's reserve. They
     /// must fit for every actor of the scope like any reserve, or the reset
-    /// gives 14 and the quarantine stays.
+    /// gives 14 and the quarantine stays. A reset that re-arms none (`spent`
+    /// 0) is never refused for the budget.
     ///
     /// # Errors
     /// Returns `CapacityExhausted` when the re-armed reserve does not fit,
     /// and the budget read's error.
     pub(super) fn check_rearm_budget(&self, timeline: TimelineId, spent: u64) -> Result<(), Error> {
-        self.check_budget_fit(timeline, 0, 2 * spent)
+        if spent == 0 {
+            // A reset that re-arms no share holds nothing more: the budget
+            // cannot refuse it (R13.1(3): only the re-armed share must fit).
+            Ok(())
+        } else {
+            self.check_budget_fit(timeline, 0, 2 * spent)
+        }
     }
 
     /// Whether `rows` more rows and `reserve` more reserve targets on

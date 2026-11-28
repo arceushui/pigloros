@@ -13,8 +13,11 @@
 //!    member's current release (a revoked release stays denied);
 //! 4. the generation (5) and head (6), the member of that generation (12),
 //!    no unresolved pass of T (7), the quarantine index row (12 when there
-//!    is none), its ledger digest and complete reason set (4) and, last,
-//!    the erasure budget for the re-armed `F_q` shares (14).
+//!    is none), its ledger digest and complete reason set (4) and then the
+//!    erasure budget for the re-armed `F_q` shares (14, never for a reset
+//!    that re-arms none). The text gives no order between the budget and the
+//!    records' codec refusals, which are unreachable for a valid call; the
+//!    budget comes first, before any record is built.
 //!
 //! The reset never reads the evidence of a reason it clears (R15.2(1)): the
 //! expected ledger digest and reason set are compared with the domain-private
