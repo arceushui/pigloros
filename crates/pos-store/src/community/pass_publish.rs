@@ -175,8 +175,11 @@ impl MemoryCommunityDomainV1 {
     /// `sample_micros` is the discovering call's one trusted sample. At or
     /// after the pass's `H_r`, the CPR1's evidence horizon, the original
     /// evidence is expired and discovery gives 13 (R13.2(4), R10.7 step 4a).
-    /// A pass nobody reserved gives 12 first, a resolved one is judged the
-    /// same way (R10.7 4a: "disposed or expired original evidence 12 or 13").
+    /// Evidence that is gone (a pass nobody reserved, or a key or record
+    /// that no longer opens) gives 12 first, then expired evidence 13: a
+    /// disposed original cannot also be called expired (R10.7 4a:
+    /// "disposed or expired original evidence 12 or 13"). A resolved pass is
+    /// judged the same way.
     /// It has no production caller yet: the discovery pipeline must take the
     /// sample from the domain's own clock reservation, as every lifecycle
     /// call does.
@@ -192,8 +195,8 @@ impl MemoryCommunityDomainV1 {
         sample_micros: u64,
     ) -> Result<CommunityOriginalReserveV1, Error> {
         let key = (timeline, reservation_operation_id);
-        self.check_discoverable(key, sample_micros)?;
         let (committed, vault) = self.reserve_vault(key)?;
+        self.check_discoverable(key, sample_micros)?;
         let open = |index: usize| {
             committed
                 .records

@@ -905,5 +905,36 @@ fn a_resolved_pass_is_discovered_by_the_same_horizon() -> TestResult {
         domain.original_reserve(target(), OPERATION, horizon).err(),
         Some(Error::EvidenceExpired)
     );
+    // Only a pass nobody reserved is 12, at any sample.
+    for sample in [SAMPLE, horizon, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), SECOND, sample).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    Ok(())
+}
+
+/// R10.7 4a ("disposed or expired original evidence 12 or 13"): evidence
+/// that is gone is 12 whatever the sample, and only evidence that is there
+/// and past `H_r` is 13: a pass whose metadata key is missing is 12 before
+/// and after `H_r`.
+#[test]
+fn disposed_evidence_is_12_before_it_is_13() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    domain.keys.remove(&METADATA);
+    for sample in [SAMPLE, horizon, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), OPERATION, sample).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
     Ok(())
 }
