@@ -383,6 +383,14 @@ impl Responder<'_> {
         // mismatched), a provider bug that stores nothing. No response
         // exists to write: nothing is emitted (R9 §5).
         response
+            .inspect_err(|error| {
+                // DIAGNOSTIC: why no response exists after AGR1.
+                std::io::Write::write_fmt(
+                    &mut io::stderr(),
+                    format_args!("pos-sandboxd diag: no response after AGR1: {error:?}\n"),
+                )
+                .ok();
+            })
             .inspect(|response| self.deliver(port, &stream, identity, response, true))
             .ok();
     }

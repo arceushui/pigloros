@@ -400,6 +400,18 @@ impl TerminationEvidenceFields {
             terminal_code,
             adapter_input,
         };
+        {
+            let (shaped, ordered) = (decoded.shaped(), decoded.ordered());
+            if !(shaped && ordered) {
+                std::io::Write::write_fmt(
+                    &mut std::io::stderr(),
+                    format_args!(
+                        "pos-sandboxd diag: TME1 shaped={shaped} ordered={ordered}: {decoded:?}\n"
+                    ),
+                )
+                .ok();
+            }
+        }
         consistent(decoded.shaped() && decoded.ordered())
             .map(|()| (decoded, (baseline_snapshot, terminal_snapshot)))
     }

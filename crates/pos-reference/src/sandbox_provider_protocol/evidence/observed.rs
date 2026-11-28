@@ -235,6 +235,20 @@ impl ObservedKernelState {
             work: optional(&fields[11], work_mount)?,
             network_readback: None,
         };
+        if !(state.root_mount.device == state.root_mapper.device && state.isolated()) {
+            std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "pos-sandboxd diag: KOE1 mount={:?} mapper={:?} isolated={} ns={:?} provider_ns={:?}\n",
+                    state.root_mount.device,
+                    state.root_mapper.device,
+                    state.isolated(),
+                    state.namespaces,
+                    state.provider_namespaces
+                ),
+            )
+            .ok();
+        }
         consistent(state.root_mount.device == state.root_mapper.device && state.isolated())
             .and_then(|()| state.with_network_readback(&fields[12]))
     }
