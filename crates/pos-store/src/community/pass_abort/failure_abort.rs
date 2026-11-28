@@ -806,7 +806,7 @@ impl MemoryCommunityDomainV1 {
             self.quarantine_controls.insert(
                 (staged.key.0, apply.control_operation_id),
                 CommittedQuarantineControlV1 {
-                    kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                    kind: RetainedControlV1::SetReason(Box::new(RetainedSetReasonV1 {
                         bound: apply.bound,
                         generation: staged.committed.generation,
                         sealed: SealedControlV1 {
@@ -818,7 +818,7 @@ impl MemoryCommunityDomainV1 {
                             }],
                         },
                         admission: None,
-                    }),
+                    })),
                     receipt: apply.receipt,
                 },
             );

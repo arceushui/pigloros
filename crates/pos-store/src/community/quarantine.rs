@@ -329,13 +329,9 @@ pub(super) struct RetainedSetReasonV1 {
 /// What a committed control retains for its retry, by operation kind: the
 /// key `(T, control_operation_id)` fixes the rest. A reset keeps its bound
 /// content only, since its records are R15-6's.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "boxing SetReason touches quarantine/evidence.rs, which #1599 owns; box it once #1599 lands"
-)]
 pub(super) enum RetainedControlV1 {
     /// A `SetReason`, in or out of a failure Abort.
-    SetReason(RetainedSetReasonV1),
+    SetReason(Box<RetainedSetReasonV1>),
     /// An `AuthenticatedReset`.
     Reset(RetainedResetV1),
 }
@@ -374,17 +370,17 @@ impl CommittedQuarantineControlV1 {
     }
 
     /// The retained `SetReason`, if this is one.
-    pub(super) const fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
+    pub(super) fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
         match &self.kind {
-            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::SetReason(retained) => Some(&**retained),
             RetainedControlV1::Reset(_) => None,
         }
     }
 
     /// The retained `SetReason`, mutably, if this is one.
-    pub(super) const fn set_reason_mut(&mut self) -> Option<&mut RetainedSetReasonV1> {
+    pub(super) fn set_reason_mut(&mut self) -> Option<&mut RetainedSetReasonV1> {
         match &mut self.kind {
-            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::SetReason(retained) => Some(&mut **retained),
             RetainedControlV1::Reset(_) => None,
         }
     }

@@ -3,6 +3,7 @@
 //! evidence of the reasons it clears already expired.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1, CommunityPassKeyV1,
@@ -33,7 +34,7 @@ use crate::community::{
 };
 use crate::community_initialization_fixture::{
     hash, profile_until, target, Fallible, QuarantineCase, Revocation, DATA_LEAF, ENTRIES, EXPIRES,
-    GENERATION, HORIZON, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE,
+    GENERATION, HORIZON, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
 };
 use crate::erasure_budget_rows::{community_rows, erasure_row};
 use crate::plugin_trust_registry::PluginTrustPolicyRegistryV1;
@@ -661,6 +662,30 @@ fn a_moved_inventory_generation_or_selection_refuses_the_writer() -> TestResult 
     assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
     assert_eq!(untouched(&case)?.0, before.0);
     assert!(case.domain.world.domain.quarantine_controls.is_empty());
+    Ok(())
+}
+
+/// The writer refuses (12) at the deadline `B`, which is the FAE1 expiry here,
+/// and the quarantine stays; a retry commits.
+#[test]
+fn the_writer_refuses_at_the_deadline() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let zero = Duration::ZERO;
+    case.domain.script_mono(&[
+        zero,
+        zero,
+        zero,
+        zero,
+        Duration::from_micros(EXPIRES - NOW),
+        zero,
+    ]);
+    assert_eq!(
+        reset(&mut case, &Claim::of_seeded())?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(ledger(&case)?.head, HEAD);
+    assert!(case.domain.world.domain.quarantine_controls.is_empty());
+    reset(&mut case, &Claim::of_seeded())??;
     Ok(())
 }
 
