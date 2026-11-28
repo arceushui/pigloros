@@ -663,8 +663,8 @@ fn assert_regenerated(directory: &Path) -> TestResult {
 
 fn blake3_mac(key: [u8; 32], field_tag: &str, plaintext: &[u8]) -> [u8; 32] {
     let mut input = b"pigloros/subject-data-append-mac/v1\0".to_vec();
+    input.push(field_tag.len().to_le_bytes()[0]);
     input.extend(field_tag.as_bytes());
-    input.push(0);
     input.extend(plaintext);
     *blake3::keyed_hash(&key, &input).as_bytes()
 }
@@ -801,16 +801,43 @@ fn the_request_mac_is_keyed_and_binds_the_field_tag_and_plaintext() -> TestResul
 }
 
 #[test]
-fn a_field_tag_containing_nul_is_refused_so_the_split_is_unambiguous() -> TestResult {
+fn a_nul_in_the_field_tag_no_longer_makes_requests_ambiguous() -> TestResult {
     let directory = tempfile::tempdir()?;
     let key = load_with(directory.path(), euid(), fixed_entropy)?;
-    let refused = Err(SubjectAppendReceiptRefusalV1::InvalidRequest);
-    assert_eq!(key.request_mac("a\0b", b"c"), refused);
-    assert_eq!(key.request_mac("\0", b""), refused);
+    let first = key.request_mac("a\0b", b"c")?;
+    let second = key.request_mac("a", b"b\0c")?;
+    assert_ne!(first, second);
+    assert_eq!(first, blake3_mac([7; 32], "a\0b", b"c"));
+    assert_eq!(second, blake3_mac([7; 32], "a", b"b\0c"));
+    Ok(())
+}
+
+#[test]
+fn the_length_byte_is_part_of_the_request_mac_preimage() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let key = load_with(directory.path(), euid(), fixed_entropy)?;
+    let mut preimage = b"pigloros/subject-data-append-mac/v1\0".to_vec();
+    preimage.extend([3]);
+    preimage.extend(b"tagpayload");
+    let expected = *blake3::keyed_hash(&[7; 32], &preimage).as_bytes();
+    assert_eq!(key.request_mac("tag", b"payload")?, expected);
+    Ok(())
+}
+
+#[test]
+fn field_tags_of_one_and_128_bytes_are_admitted_and_others_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let key = load_with(directory.path(), euid(), fixed_entropy)?;
+    let longest = "t".repeat(128);
+    assert_eq!(key.request_mac("t", b"p")?, blake3_mac([7; 32], "t", b"p"));
     assert_eq!(
-        key.request_mac("a", b"b\0c")?,
-        blake3_mac([7; 32], "a", b"b\0c")
+        key.request_mac(&longest, b"p")?,
+        blake3_mac([7; 32], &longest, b"p")
     );
+    let refused = Err(SubjectAppendReceiptRefusalV1::InvalidRequest);
+    assert_eq!(key.request_mac("", b"p"), refused);
+    assert_eq!(key.request_mac(&"t".repeat(129), b"p"), refused);
+    assert_eq!(key.request_mac(&"t".repeat(300), b"p"), refused);
     Ok(())
 }
 

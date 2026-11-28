@@ -50,6 +50,9 @@ pub const APPEND_MAC_KEY_FILE_NAME: &str = "subject-append-mac.v1.key";
 /// Domain prefix of the keyed request MAC.
 const REQUEST_MAC_DOMAIN: &[u8] = b"pigloros/subject-data-append-mac/v1\0";
 
+/// The longest admitted `field_tag`, so its length fits the one-byte prefix.
+const MAX_FIELD_TAG_LEN: u8 = 128;
+
 /// Domain prefix of the request digest stored in a receipt.
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"pigloros/subject-data-append-request/v1\0";
 
@@ -426,29 +429,30 @@ impl SubjectAppendMacKeyV1 {
         }
     }
 
-    /// The A2 request MAC: keyed BLAKE3 over `domain || field_tag || 0x00 || plaintext`.
+    /// The A2 request MAC: keyed BLAKE3 over
+    /// `domain || len(field_tag) || field_tag || plaintext`.
     ///
-    /// The `0x00` after the variable-length `field_tag` is an addition to the
-    /// ADR-137 A2 text (`domain || field_tag || plaintext`), which is
-    /// ambiguous between tag and plaintext. It needs an ADR erratum: the
-    /// preimage is `domain || field_tag || 0x00 || plaintext` with a
-    /// NUL-free `field_tag`, which makes the split unambiguous.
+    /// The preimage is the amended A2 form defined by ADR-137 Amendment 1
+    /// (proposed): `len(field_tag)` is ONE byte, so the split between the
+    /// variable-length tag and the plaintext is unambiguous and a NUL inside
+    /// `field_tag` is just a byte.
     ///
     /// # Errors
     /// Returns [`SubjectAppendReceiptRefusalV1::InvalidRequest`] for a
-    /// `field_tag` containing a NUL byte.
+    /// `field_tag` that is not 1 to 128 bytes long.
     pub fn request_mac(
         &self,
         field_tag: &str,
         plaintext: &[u8],
     ) -> Result<[u8; 32], SubjectAppendReceiptRefusalV1> {
-        if field_tag.as_bytes().contains(&0) {
-            return Err(SubjectAppendReceiptRefusalV1::InvalidRequest);
-        }
+        let length = u8::try_from(field_tag.len())
+            .ok()
+            .filter(|length| (1..=MAX_FIELD_TAG_LEN).contains(length))
+            .ok_or(SubjectAppendReceiptRefusalV1::InvalidRequest)?;
         let mut hasher = blake3::Hasher::new_keyed(&self.0);
         hasher.update(REQUEST_MAC_DOMAIN);
+        hasher.update(&[length]);
         hasher.update(field_tag.as_bytes());
-        hasher.update(&[0]);
         hasher.update(plaintext);
         Ok(*hasher.finalize().as_bytes())
     }
