@@ -35,9 +35,13 @@ blake3 = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { version = "0.3", default-features = false }
-# Safe `execveat` for the launcher's final release step (Q9.12). Only the
-# `process` feature, which gates `fcntl::AtFlags`, is enabled.
-nix = { version = "=0.32.0", default-features = false, features = ["process"] }
+# Safe `execveat` for the launcher's final release step (Q9.12) and the safe
+# `SO_PEERPIDFD` read of its peer check (LPV1 `provider-pidfd-identity`). The
+# `process` feature gates `fcntl::AtFlags`, `socket` the socket options.
+nix = { version = "=0.32.0", default-features = false, features = [
+  "process",
+  "socket",
+] }
 pos-reference = { path = "../../crates/pos-reference" }
 # `event` is for the pidfd liveness `poll` of the kernel observation
 # (ADR-069 R9 §4.4); it creates no process. `pipe` is for the adapter's

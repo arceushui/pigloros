@@ -5,18 +5,23 @@
 //! test host against real sockets and files. [`ProcessHost`] is the only
 //! production implementation and has no tunable state.
 
-use std::{ffi::CString, fs::File, io};
+use std::{ffi::CString, fs::File, io, os::fd::OwnedFd};
 
+use pos_reference::sandbox_provider_protocol::FdIdentity;
 use rustix::fs::{open, Mode, OFlags};
 
+use super::process_identity::{own_process_identity, peer_process_identity};
 use super::{adapter::open_beneath, descriptors::scan_proc_self_fd, exec::replace_process_image};
 
 const ROOT_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 
 /// What the launch barrier needs from its surroundings.
 pub(super) trait LaunchHost {
-    /// The uid `SO_PEERCRED` must report for the release channel peer.
-    fn provider_uid(&self) -> u32;
+    /// The process identity of the launcher itself (from a pidfd it opens on itself).
+    fn own_identity(&self) -> Option<FdIdentity>;
+    /// The process identity (pidfs mount ID and inode) of the `SO_PEERPIDFD` of the release
+    /// channel `release`, or `None` when the kernel gives no pidfd.
+    fn peer_identity(&self, release: &OwnedFd) -> Option<FdIdentity>;
     /// Open descriptors at or above 3, without the one used to list them.
     fn open_descriptors(&self) -> io::Result<Vec<u32>>;
     /// The launcher's own executable image.
@@ -29,23 +34,17 @@ pub(super) trait LaunchHost {
     fn replace_process(&self, adapter: &File, argv: &[CString]) -> io::Error;
 }
 
-/// The real process: a provider peer of the given uid, `/proc/self`, `/` and
-/// the real clock.
+/// The real process: the peer's pidfd, `/proc/self`, `/` and the real clock.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ProcessHost {
-    pub(super) provider_uid: u32,
-}
-
-impl ProcessHost {
-    /// The production host: the provider is root.
-    pub(super) const fn root() -> Self {
-        Self { provider_uid: 0 }
-    }
-}
+pub(super) struct ProcessHost;
 
 impl LaunchHost for ProcessHost {
-    fn provider_uid(&self) -> u32 {
-        self.provider_uid
+    fn own_identity(&self) -> Option<FdIdentity> {
+        own_process_identity()
+    }
+
+    fn peer_identity(&self, release: &OwnedFd) -> Option<FdIdentity> {
+        peer_process_identity(release)
     }
 
     fn open_descriptors(&self) -> io::Result<Vec<u32>> {

@@ -277,6 +277,10 @@ pub fn invocation() -> TestResult<crate::LauncherInvocation> {
         "/usr/bin/adapter".to_owned(),
         vec!["--check".to_owned()],
         [8; 32],
+        pos_reference::sandbox_provider_protocol::FdIdentity {
+            mount_id: 1,
+            inode: 2,
+        },
     )?;
     Ok(crate::LauncherInvocation::from_parameters(&parameters)?)
 }

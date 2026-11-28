@@ -13,7 +13,7 @@ use std::{
 };
 
 use pos_reference::sandbox_provider_protocol::{
-    fdl1_digest, FdLayoutEntry, FdRole, LaunchParameters, SandboxExecutionMode,
+    fdl1_digest, FdIdentity, FdLayoutEntry, FdRole, LaunchParameters, SandboxExecutionMode,
 };
 use rustix::net::{socketpair, AddressFamily, SocketFlags, SocketType};
 
@@ -33,6 +33,10 @@ fn lpv1_hex() -> Result<String, Box<dyn Error>> {
         "/adapter".to_owned(),
         vec!["--serve".to_owned()],
         fdl1_digest(SandboxExecutionMode::AirGapped, &layout)?,
+        FdIdentity {
+            mount_id: 1,
+            inode: 2,
+        },
     )?;
     Ok(hex(&parameters.to_canonical_cbor()?))
 }
@@ -124,9 +128,9 @@ fn a_launch_for_another_pid_is_refused() -> TestResult {
 /// Start the launcher through `bash` so `LISTEN_PID` can name the launcher's own
 /// pid (`bash` execs the binary and keeps its pid) and the release socket is
 /// descriptor 3. The provider end is closed first, so the launch can never
-/// block, and it is not root, so the peer check or an earlier check refuses.
+/// block, and the peer is not the provider named in LPV1, so the peer check refuses.
 #[test]
-fn an_adopted_release_channel_from_a_non_root_peer_is_refused() -> TestResult {
+fn an_adopted_release_channel_from_another_process_is_refused() -> TestResult {
     let (provider, launcher) = socketpair(
         AddressFamily::UNIX,
         SocketType::SEQPACKET,
@@ -151,22 +155,12 @@ INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
         .arg(lpv1_hex()?)
         .stdin(Stdio::from(launcher))
         .output()?;
-    // Exit status 67 is the peer refusal and 102 the missing adapter, 100 plus ENOENT (the launcher
-    // exit table in the README).
-    let status = if rustix::process::getuid().is_root() {
-        102
-    } else {
-        67
-    };
-    assert_eq!(output.status.code(), Some(status), "{}", stderr(&output));
-    // The release channel is a valid adopted descriptor, so the refusal is the
-    // peer check for a non-root user; as root the launch proceeds to the
-    // adapter, which does not exist in the unit's root here.
-    let expected = if rustix::process::getuid().is_root() {
-        "pos-sandboxd: adapter is not a regular native ELF beneath the root: Open(2)\n"
-    } else {
-        "pos-sandboxd: release channel peer is not the root provider\n"
-    };
-    assert_eq!(stderr(&output), expected);
+    // The peer of the channel is this test, whose pidfd identity is not the one LPV1 names for the
+    // provider, so the refusal is the peer check (status 67), as root or not.
+    assert_eq!(output.status.code(), Some(67), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "pos-sandboxd: release channel peer is not the provider\n"
+    );
     Ok(())
 }

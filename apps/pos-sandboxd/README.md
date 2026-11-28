@@ -306,8 +306,13 @@ argv. One mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
 Launcher, started by the provider as the transient unit's main process. It
 adopts the descriptors systemd passes (`sd-listen-fds`), validates their names,
 types, count, order and the absence of any other open descriptor, accepts the
-release channel only from a root `SO_PEERCRED` peer, opens and hashes the
-adapter beneath the activated root, sends one `ReadyV1` with
+release channel only from the peer whose `SO_PEERPIDFD` has the provider's
+pidfs identity recorded in LPV1 (the provider's uid and pid are not visible in
+the unit's namespaces; the check needs pidfs inodes, Linux 6.9 or later, and
+refuses a kernel where the launcher's own pidfd has the same identity; a provider
+that runs as pid 1, for example in a container, always refuses by design,
+because its identity cannot differ from pid 1's),
+opens and hashes the adapter beneath the activated root, sends one `ReadyV1` with
 `SCM_CREDENTIALS`, waits for one `ReleaseV1` (attempt, nonce, `ReadyV1` digest
 and monotonic deadline), closes the release channel and replaces its process
 image with the held adapter descriptor through `nix`'s safe `execveat`

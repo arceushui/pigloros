@@ -89,6 +89,20 @@ fn elf_header(machine: u16) -> Vec<u8> {
     header
 }
 
+/// The identity LPV1 gives the provider, and that the test host reports for the release peer.
+const PROVIDER_IDENTITY: pos_reference::sandbox_provider_protocol::FdIdentity =
+    pos_reference::sandbox_provider_protocol::FdIdentity {
+        mount_id: 21,
+        inode: 4_242,
+    };
+
+/// The launcher's own identity in the test host: another process than the provider.
+const LAUNCHER_IDENTITY: pos_reference::sandbox_provider_protocol::FdIdentity =
+    pos_reference::sandbox_provider_protocol::FdIdentity {
+        mount_id: 21,
+        inode: 4_243,
+    };
+
 fn parameters(arguments: Vec<String>) -> Result<LaunchParameters, Box<dyn Error>> {
     Ok(LaunchParameters::new(
         ATTEMPT,
@@ -97,6 +111,7 @@ fn parameters(arguments: Vec<String>) -> Result<LaunchParameters, Box<dyn Error>
         "/adapter".to_owned(),
         arguments,
         fdl1_digest(SandboxExecutionMode::AirGapped, &release_layout())?,
+        PROVIDER_IDENTITY,
     )?)
 }
 
@@ -111,7 +126,8 @@ struct TestHost {
     root: File,
     launcher: File,
     launcher_missing: bool,
-    provider_uid: u32,
+    peer: Option<pos_reference::sandbox_provider_protocol::FdIdentity>,
+    own: Option<pos_reference::sandbox_provider_protocol::FdIdentity>,
     open: io::Result<Vec<u32>>,
     now: io::Result<u64>,
     executions: Mutex<Vec<Vec<CString>>>,
@@ -132,7 +148,8 @@ impl TestHost {
             root: File::open(directory.path())?,
             launcher: File::open(directory.path().join("launcher"))?,
             launcher_missing: false,
-            provider_uid: getuid().as_raw(),
+            peer: Some(PROVIDER_IDENTITY),
+            own: Some(LAUNCHER_IDENTITY),
             open: Ok(vec![u32::try_from(release.as_raw_fd())?]),
             now: Ok(1_000),
             executions: Mutex::new(Vec::new()),
@@ -143,8 +160,15 @@ impl TestHost {
 }
 
 impl LaunchHost for TestHost {
-    fn provider_uid(&self) -> u32 {
-        self.provider_uid
+    fn own_identity(&self) -> Option<pos_reference::sandbox_provider_protocol::FdIdentity> {
+        self.own
+    }
+
+    fn peer_identity(
+        &self,
+        _: &OwnedFd,
+    ) -> Option<pos_reference::sandbox_provider_protocol::FdIdentity> {
+        self.peer
     }
 
     fn open_descriptors(&self) -> io::Result<Vec<u32>> {
@@ -751,14 +775,31 @@ fn a_release_carrying_a_descriptor_is_rejected() -> TestResult {
 
 #[test]
 fn a_launch_that_cannot_prove_itself_never_sends_ready() -> TestResult {
-    let not_root = launch(
-        |host| host.provider_uid = host.provider_uid.wrapping_add(1),
-        &elf(),
-        Vec::new(),
-        |_, _| Ok(()),
-    )?;
-    assert!(matches!(not_root.error, LauncherError::Peer));
-    assert!(not_root.ready.is_none());
+    // A peer whose pidfd has another identity (the inode or the mount differs), or none at all,
+    // is not the provider.
+    for peer in [
+        Some(pos_reference::sandbox_provider_protocol::FdIdentity {
+            mount_id: PROVIDER_IDENTITY.mount_id,
+            inode: PROVIDER_IDENTITY.inode + 1,
+        }),
+        Some(pos_reference::sandbox_provider_protocol::FdIdentity {
+            mount_id: PROVIDER_IDENTITY.mount_id + 1,
+            inode: PROVIDER_IDENTITY.inode,
+        }),
+        None,
+    ] {
+        let other = launch(|host| host.peer = peer, &elf(), Vec::new(), |_, _| Ok(()))?;
+        assert!(matches!(other.error, LauncherError::Peer), "{peer:?}");
+        assert!(other.ready.is_none());
+    }
+
+    // On a kernel without pidfs inodes the launcher's own pidfd has the provider's identity (or
+    // none can be read): the peer check names no process and refuses.
+    for own in [Some(PROVIDER_IDENTITY), None] {
+        let blind = launch(|host| host.own = own, &elf(), Vec::new(), |_, _| Ok(()))?;
+        assert!(matches!(blind.error, LauncherError::Peer), "{own:?}");
+        assert!(blind.ready.is_none());
+    }
 
     let script = launch(|_| {}, b"#!/bin/sh\n", Vec::new(), |_, _| Ok(()))?;
     assert!(matches!(
@@ -1098,9 +1139,23 @@ fn a_fifo_opens_without_blocking_and_is_not_an_adapter() -> TestResult {
 
 #[test]
 fn the_process_host_reads_the_real_process() -> TestResult {
-    let host = ProcessHost::root();
-    assert_eq!(host.provider_uid(), 0);
-    assert_eq!(ProcessHost { provider_uid: 4242 }.provider_uid(), 4242);
+    let host = ProcessHost;
+    // The peer of a release channel made by this process is this process.
+    let (release, _other) = socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    assert!(host.peer_identity(&release).is_some());
+    assert_eq!(
+        host.own_identity(),
+        super::process_identity::own_process_identity()
+    );
+    assert_eq!(
+        host.peer_identity(&release),
+        super::process_identity::own_process_identity()
+    );
     let probe = File::open("/")?;
     let listed = host.open_descriptors()?;
     assert!(listed.contains(&u32::try_from(probe.as_raw_fd())?));
