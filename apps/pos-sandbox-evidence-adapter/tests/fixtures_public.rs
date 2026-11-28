@@ -786,6 +786,21 @@ fn kill_and_wait(pid: u32) -> TestResult {
     Ok(())
 }
 
+/// The command line of `pid`, read once the kernel has published it. `spawn`
+/// returns when the child's exec-error pipe closes, which happens before the
+/// new image's argument area is set, so a read right after it can be empty.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn cmdline_after_exec(pid: u32) -> TestResult<Vec<u8>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
+        if !cmdline.is_empty() || Instant::now() >= deadline {
+            return Ok(cmdline);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
     let marker = unique_marker()?;
@@ -821,7 +836,7 @@ fn the_orphan_outlives_the_adapter_that_left_it() -> TestResult {
     let mut guard = Orphan::of(direct)?;
     assert!(matches!(process_state(direct), Some('S' | 'R')));
     assert_eq!(
-        fs::read(format!("/proc/{direct}/cmdline"))?,
+        cmdline_after_exec(direct)?,
         format!("{BINARY}\0idle\0600000\0").into_bytes()
     );
     guard.kill_and_reap()?;
