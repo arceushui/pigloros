@@ -72,7 +72,7 @@ pub struct ProviderImageSnapshot {
 /// The selected SIC1 provider executable, also the ADR-069 release launcher.
 ///
 /// Only snapshot admission constructs this view. SIC1 has already opened the
-/// root-owned mode-0500 content-addressed file without symlink traversal,
+/// root-owned mode-0555 content-addressed file without symlink traversal,
 /// verified its bytes, and bound that digest to SPM1/APT1. The retained
 /// descriptor supplies its device and inode; callers cannot supply these facts.
 #[derive(Clone, Debug, Eq, PartialEq)]

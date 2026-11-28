@@ -1229,6 +1229,17 @@ async fn read_hardening(
             .await
             .map(SystemdHardeningReadbackValue::StringArray),
         SystemdHardeningProperty::UMask => service.u_mask().await.map(u32_readback),
+        SystemdHardeningProperty::RemainAfterExit => {
+            service.remain_after_exit().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::SuccessExitStatus => {
+            service
+                .success_exit_status()
+                .await
+                .map(|(statuses, signals)| {
+                    SystemdHardeningReadbackValue::ExitStatuses(statuses, signals)
+                })
+        }
         SystemdHardeningProperty::KillMode
         | SystemdHardeningProperty::SendSigKill
         | SystemdHardeningProperty::StandardInput
@@ -1350,6 +1361,7 @@ fn static_dbus_value(value: SystemdHardeningValue) -> Variant<'static> {
         SystemdHardeningValue::StringArray(value) => {
             Variant::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
         }
+        SystemdHardeningValue::EveryExit => Variant::from(SystemdHardeningValue::every_exit()),
     }
 }
 

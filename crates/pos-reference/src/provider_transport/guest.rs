@@ -32,7 +32,7 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::SelectorBoundaryError;
 
-/// How long a guest execute waits, after one `Starting` or `ReconcileFailed` refusal, before it
+/// How long a guest execute waits, after one `SandboxUnavailable` refusal (SPE1 `11`), before it
 /// asks again.
 const OPEN_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -157,8 +157,8 @@ impl GuestProviderClient {
         })
     }
 
-    /// Run one SPX1 exchange, asking again while the provider answers `Starting` or
-    /// `ReconcileFailed` (SPE1 `11`), until `window` has elapsed on `clock`.
+    /// Run one SPX1 exchange, asking again while the provider answers
+    /// `SandboxUnavailable` (SPE1 `11`), until `window` has elapsed on `clock`.
     ///
     /// # Errors
     /// [`GuestWaitError`]: a transport failure, or the last refusal once the window is over or
@@ -375,8 +375,8 @@ pub enum GuestWaitError {
     /// The exchange failed.
     #[error("provider execute failed: {0}")]
     Execute(GuestExecuteError),
-    /// The provider refused, with this closed code if its SPE1 decodes. `Starting` and
-    /// `ReconcileFailed` (`11`) are the last answer when the window ended.
+    /// The provider refused, with this closed code if its SPE1 decodes. `SandboxUnavailable` (`11`)
+    /// is the last answer when the window ended.
     #[error("provider refused the execute: {0:?}")]
     Refused(Option<SandboxProviderErrorCode>),
 }

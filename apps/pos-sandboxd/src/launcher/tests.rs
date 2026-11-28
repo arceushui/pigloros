@@ -2,12 +2,13 @@ use std::{
     error::Error,
     ffi::CString,
     fs::{self, File},
-    io::{self, IoSlice, IoSliceMut},
+    io::{self, IoSlice, IoSliceMut, Read},
     mem::MaybeUninit,
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::fs::symlink,
     },
+    path::Path,
     sync::Mutex,
     thread,
     time::Duration,
@@ -18,6 +19,7 @@ use pos_reference::sandbox_provider_protocol::{
     LaunchParameters, LauncherReady, SandboxExecutionMode,
 };
 use rustix::{
+    fs::{mknodat, FileType, Mode, CWD},
     net::{
         recvmsg, send, sendmsg, socketpair, AddressFamily, RecvAncillaryBuffer,
         RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
@@ -35,7 +37,7 @@ use super::{
         RELEASE_NAME,
     },
     environment::LaunchEnvironment,
-    error::{LauncherError, ReleaseDefect},
+    error::{AdapterFault, LauncherError, ReleaseDefect},
     host::{LaunchHost, ProcessHost},
 };
 
@@ -408,20 +410,6 @@ fn directory_with(name: &str, bytes: &[u8]) -> Result<(tempfile::TempDir, File),
 }
 
 #[test]
-fn open_beneath_refuses_symlinks_and_escapes() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    fs::write(directory.path().join("real"), b"x")?;
-    symlink("real", directory.path().join("link"))?;
-    let root = File::open(directory.path())?;
-    let opened = open_beneath(&root, "/real")?;
-    assert!(rustix::io::fcntl_getfd(&opened)?.contains(rustix::io::FdFlags::CLOEXEC));
-    assert!(open_beneath(&root, "link").is_err());
-    assert!(open_beneath(&root, "../escape").is_err());
-    assert!(open_beneath(&root, "missing").is_err());
-    Ok(())
-}
-
-#[test]
 fn hold_adapter_accepts_a_native_elf_and_binds_its_digest_and_identity() -> TestResult {
     let bytes = elf_header(NATIVE_MACHINE);
     let (_directory, file) = directory_with("adapter", &bytes)?;
@@ -455,8 +443,13 @@ fn hold_adapter_rejects_everything_but_a_regular_native_64_bit_le_elf() -> TestR
     cases.push(mutate(17, 1));
     for bytes in cases {
         let (_directory, file) = directory_with("adapter", &bytes)?;
+        let expected = if bytes.len() < ELF_HEADER_BYTES {
+            AdapterFault::Unreadable
+        } else {
+            AdapterFault::NotNative
+        };
         assert!(
-            matches!(hold_adapter(file), Err(LauncherError::Adapter)),
+            matches!(hold_adapter(file), Err(LauncherError::Adapter(fault)) if fault == expected),
             "{bytes:?}"
         );
     }
@@ -470,7 +463,7 @@ fn hold_adapter_rejects_everything_but_a_regular_native_64_bit_le_elf() -> TestR
     let directory = File::open("/")?;
     assert!(matches!(
         hold_adapter(directory),
-        Err(LauncherError::Adapter)
+        Err(LauncherError::Adapter(AdapterFault::NotRegular))
     ));
     Ok(())
 }
@@ -768,7 +761,10 @@ fn a_launch_that_cannot_prove_itself_never_sends_ready() -> TestResult {
     assert!(not_root.ready.is_none());
 
     let script = launch(|_| {}, b"#!/bin/sh\n", Vec::new(), |_, _| Ok(()))?;
-    assert!(matches!(script.error, LauncherError::Adapter));
+    assert!(matches!(
+        script.error,
+        LauncherError::Adapter(AdapterFault::Unreadable)
+    ));
     assert!(script.ready.is_none());
 
     let no_listing = launch(
@@ -802,7 +798,10 @@ fn a_launch_that_cannot_prove_itself_never_sends_ready() -> TestResult {
         Vec::new(),
         |_, _| Ok(()),
     )?;
-    assert!(matches!(no_adapter.error, LauncherError::Adapter));
+    assert!(matches!(
+        no_adapter.error,
+        LauncherError::Adapter(AdapterFault::Open(_))
+    ));
     Ok(())
 }
 
@@ -973,6 +972,130 @@ fn the_local_layout_keeps_the_proxy_open_for_the_adapter() -> TestResult {
     Ok(())
 }
 
+/// The files of the `open_beneath` tests: plain files and directories.
+fn beneath_files(top: &Path) -> TestResult {
+    fs::create_dir_all(top.join("a/b"))?;
+    fs::write(top.join("a/b/file"), b"x")?;
+    fs::write(top.join("top"), b"y")?;
+    Ok(())
+}
+
+/// Symlinks and a FIFO of the `open_beneath` tests.
+fn beneath_links(top: &Path) -> TestResult {
+    symlink("a", top.join("link"))?;
+    symlink("top", top.join("a/final"))?;
+    mknodat(
+        CWD,
+        top.join("fifo"),
+        FileType::Fifo,
+        Mode::RUSR | Mode::WUSR,
+        0,
+    )?;
+    Ok(())
+}
+
+fn beneath_tree() -> Result<(tempfile::TempDir, File), Box<dyn Error>> {
+    let tree = tempfile::tempdir()?;
+    beneath_files(tree.path())?;
+    beneath_links(tree.path())?;
+    let root = File::open(tree.path())?;
+    Ok((tree, root))
+}
+
+#[test]
+fn open_beneath_walks_plain_names() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let mut text = String::new();
+    let mut opened = open_beneath(&root, "/a/b/file")?;
+    assert!(rustix::io::fcntl_getfd(&opened)?.contains(rustix::io::FdFlags::CLOEXEC));
+    opened.read_to_string(&mut text)?;
+    assert_eq!(text, "x");
+    // Leading and doubled separators collapse.
+    assert!(open_beneath(&root, "a//b/file").is_ok());
+    assert!(open_beneath(&root, "///top").is_ok());
+    Ok(())
+}
+
+#[test]
+fn open_beneath_refuses_every_other_path() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let long = "x".repeat(256);
+    for refused in [
+        "",
+        "/",
+        ".",
+        "a/./b/file",
+        "..",
+        "../escape",
+        "a/../top",
+        "a/b/..",
+        "link/b/file",
+        "a/final",
+        "missing",
+        "a/missing/file",
+        "top/file",
+        "top/",
+        "a/b/file/",
+        "a/\0b",
+        long.as_str(),
+    ] {
+        assert!(
+            open_beneath(&root, refused).is_err(),
+            "{refused:?} must be refused"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn open_beneath_refuses_a_magic_link() -> TestResult {
+    // `/proc/<pid>/exe` is a magic link: it names a file without being a symlink to a path.
+    let host_root = File::open("/")?;
+    let pid = std::process::id();
+    // The control: an ordinary file of the same directory opens.
+    assert!(open_beneath(&host_root, &format!("proc/{pid}/status")).is_ok());
+    for path in [format!("proc/{pid}/exe"), format!("proc/{pid}/cwd")] {
+        assert!(open_beneath(&host_root, &path).is_err(), "{path}");
+    }
+    Ok(())
+}
+
+#[test]
+fn open_beneath_refuses_a_magic_link_as_a_parent() -> TestResult {
+    // `/proc/<pid>/fd/<n>` is a magic link to a directory the process holds: a walk through it as
+    // a parent component would leave the root, so it is refused although the path resolves.
+    let (tree, _root) = beneath_tree()?;
+    let held = File::open(tree.path())?;
+    let through = format!("{}/fd/{}/top", std::process::id(), held.as_raw_fd());
+    let host_root = File::open("/proc")?;
+    // The control: the same path opens when the magic link may be followed.
+    assert!(File::open(format!("/proc/{through}")).is_ok());
+    assert!(open_beneath(&host_root, &through).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_directory_opens_and_is_not_an_adapter() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let directory = open_beneath(&root, "a/b")?;
+    assert!(matches!(
+        hold_adapter(directory),
+        Err(LauncherError::Adapter(AdapterFault::NotRegular))
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_fifo_opens_without_blocking_and_is_not_an_adapter() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let fifo = open_beneath(&root, "fifo")?;
+    assert!(matches!(
+        hold_adapter(fifo),
+        Err(LauncherError::Adapter(AdapterFault::NotRegular))
+    ));
+    Ok(())
+}
+
 #[test]
 fn the_process_host_reads_the_real_process() -> TestResult {
     let host = ProcessHost::root();
@@ -1087,4 +1210,28 @@ fn the_real_entry_point_refuses_bad_parameters_and_a_missing_environment() -> Te
         LauncherError::Environment
     ));
     Ok(())
+}
+
+#[test]
+fn every_launcher_failure_has_its_own_exit_status() {
+    let failures = [
+        (LauncherError::Parameters, 64),
+        (LauncherError::Environment, 65),
+        (LauncherError::Layout, 66),
+        (LauncherError::Peer, 67),
+        (LauncherError::Adapter(AdapterFault::NotRegular), 68),
+        (LauncherError::Adapter(AdapterFault::Unreadable), 74),
+        (LauncherError::Adapter(AdapterFault::NotNative), 75),
+        (LauncherError::Adapter(AdapterFault::Open(2)), 102),
+        (LauncherError::Adapter(AdapterFault::Open(0)), 100),
+        (LauncherError::Adapter(AdapterFault::Open(27)), 127),
+        (LauncherError::Identity, 69),
+        (LauncherError::Ready, 70),
+        (LauncherError::ReleaseUnavailable, 71),
+        (LauncherError::Release(ReleaseDefect::Nonce), 72),
+        (LauncherError::Exec(io::Error::other("exec")), 73),
+    ];
+    for (error, status) in failures {
+        assert_eq!(super::failure_status(&error), status);
+    }
 }

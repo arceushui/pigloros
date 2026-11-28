@@ -3684,7 +3684,7 @@ STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
                    '"${binary}" launch-barrier zz 2> launcher.err\n'
                    'status=$?\n'
                    'set -e\n'
-                   'test "${status}" = 1\n'
+                   'test "${status}" = 64\n'
                    "grep -q 'launch parameters are not a valid LPV1' launcher.err\n"}]}
 
 STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',

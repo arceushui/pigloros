@@ -1,5 +1,5 @@
 //! RQE1, the requested-configuration evidence of ADR-069 R9 §4.3, with the
-//! R10 §4.3 and §4.4 stdio properties and value code 10.
+//! R10 §4.3 and §4.4 stdio properties and value codes 10 and 11 (R17-E6).
 
 use std::collections::BTreeSet;
 
@@ -27,6 +27,10 @@ const MAX_PAIRS: usize = 64;
 const MAX_COMMANDS: usize = 8;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_DESCRIPTORS: usize = 8;
+/// The most exit statuses and the most signals a code-11 value lists: a list holds at most the
+/// statuses `1..=255` and the signals `1..=64`, as ascending bytes.
+const MAX_EXIT_STATUSES: usize = 255;
+const MAX_EXIT_SIGNALS: usize = 64;
 const MAX_DESCRIPTOR_NAME_BYTES: usize = 255;
 /// The manager-only property every verified readback adds (R9 §4.3).
 const ROOT_IMAGE_POLICY: &str = "RootImagePolicy";
@@ -70,6 +74,9 @@ pub enum DbusValue {
     DescriptorNames(Vec<String>),
     /// 10, `h`: one descriptor, which is never recorded (R10 §4.4).
     Descriptor,
+    /// 11, `(aiai)`: the exit statuses and the signals of `SuccessExitStatus` (R17-E6), each list
+    /// in ascending order.
+    ExitStatusSet(Vec<u8>, Vec<u8>),
 }
 
 impl DbusValue {
@@ -87,6 +94,7 @@ impl DbusValue {
             Self::StringPairs(_) => 7,
             Self::Commands(_) => 8,
             Self::DescriptorNames(_) | Self::Descriptor => self.descriptor_code(),
+            Self::ExitStatusSet(..) => 11,
         }
     }
 
@@ -113,6 +121,9 @@ impl DbusValue {
             Self::U32(value) => uint_value(u64::from(*value)),
             Self::StringArray(values) | Self::DescriptorNames(values) => texts_value(values),
             Self::Descriptor => Value::Null,
+            Self::ExitStatusSet(statuses, signals) => {
+                Value::Array(vec![integers_value(statuses), integers_value(signals)])
+            }
             Self::FlaggedStrings(flag, values) => {
                 Value::Array(vec![Value::Bool(*flag), texts_value(values)])
             }
@@ -194,6 +205,13 @@ impl DbusValue {
                 .map(Self::DescriptorNames),
             10 if payload == &Value::Null => Ok(Self::Descriptor),
             10 => Err(SandboxProviderProtocolError::InvalidEncoding),
+            11 => {
+                let [statuses, signals] = array::<2>(payload)?;
+                Ok(Self::ExitStatusSet(
+                    integers(statuses, MAX_EXIT_STATUSES)?,
+                    integers(signals, MAX_EXIT_SIGNALS)?,
+                ))
+            }
             _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
         }
     }
@@ -454,6 +472,28 @@ fn verified_stdio_value(name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn integers_value(values: &[u8]) -> Value {
+    Value::Array(
+        values
+            .iter()
+            .map(|value| uint_value(u64::from(*value)))
+            .collect(),
+    )
+}
+
+/// At most `maximum` strictly increasing integers in `0..=255`.
+fn integers(value: &Value, maximum: usize) -> Result<Vec<u8>> {
+    let values = list(value, 0, maximum)?
+        .iter()
+        .map(|value| {
+            uint(value).and_then(|number| {
+                u8::try_from(number).map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    consistent(values.windows(2).all(|pair| pair[0] < pair[1])).map(|()| values)
 }
 
 fn properties_value(properties: &[DbusProperty]) -> Value {

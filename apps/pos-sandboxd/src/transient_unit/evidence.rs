@@ -43,6 +43,9 @@ pub fn verified_requested_configuration(
     readback: &[SystemdTransientUnitReadback],
     manager: &SystemdManagerReadback,
 ) -> Result<RequestedConfigurationEvidence, SandboxProviderProtocolError> {
+    if !representable(readback) {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
     let requested = requested_properties(requested);
     let readback = sorted(
         readback
@@ -78,6 +81,10 @@ pub fn unverified_requested_configuration(
     requested: &[RequestedConfigurationProperty],
     readback: Option<&[SystemdTransientUnitReadback]>,
 ) -> Result<RequestedConfigurationEvidence, SandboxProviderProtocolError> {
+    // A read-back with a status or signal outside `0..=255` cannot be written into RQE1 (value
+    // code 11 holds bytes) and is not recorded as a read-back that looks like the request: it is
+    // reported as unobtainable, status 3.
+    let readback = readback.filter(|readback| representable(readback));
     let status = readback.map_or(RequestedConfigurationStatus::ReadbackUnavailable, |_| {
         RequestedConfigurationStatus::Mismatch
     });
@@ -97,6 +104,20 @@ pub fn unverified_requested_configuration(
                     .collect(),
             )
         }),
+    })
+}
+
+/// Whether every exit status and signal of the read-back fits RQE1 value code 11.
+fn representable(readback: &[SystemdTransientUnitReadback]) -> bool {
+    readback.iter().all(|property| match property.value() {
+        SystemdTransientUnitReadbackValue::Static(SystemdHardeningReadbackValue::ExitStatuses(
+            statuses,
+            signals,
+        )) => statuses
+            .iter()
+            .chain(signals)
+            .all(|value| u8::try_from(*value).is_ok()),
+        _ => true,
     })
 }
 
@@ -163,6 +184,14 @@ fn readback_value(value: &SystemdTransientUnitReadbackValue) -> DbusValue {
     }
 }
 
+/// The values as bytes; `representable` has refused any other value before this runs.
+fn bytes(values: &[i32]) -> Vec<u8> {
+    values
+        .iter()
+        .map(|value| u8::try_from(*value).unwrap_or_default())
+        .collect()
+}
+
 fn hardening_value(value: &SystemdHardeningReadbackValue) -> DbusValue {
     match value {
         SystemdHardeningReadbackValue::Bool(value) => DbusValue::Bool(*value),
@@ -172,5 +201,13 @@ fn hardening_value(value: &SystemdHardeningReadbackValue) -> DbusValue {
         SystemdHardeningReadbackValue::StringArray(values) => {
             DbusValue::StringArray(values.clone())
         }
+        // Every value is in `0..=255`: `representable` refused the read-back otherwise.
+        SystemdHardeningReadbackValue::ExitStatuses(statuses, signals) => {
+            DbusValue::ExitStatusSet(bytes(statuses), bytes(signals))
+        }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

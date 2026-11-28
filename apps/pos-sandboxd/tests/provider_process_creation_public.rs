@@ -28,6 +28,78 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// Its final step replaces its own image without creating a process.
 const LAUNCHER_EXEC: &str = "launcher/exec.rs";
 
+/// Tokens that include another file's bytes, text or source. Provider code could hide a forbidden
+/// call in an unscanned file this way, so every use is checked against [`INCLUDES`].
+const INCLUDE_TOKENS: [&str; 3] = ["include!(", "include_bytes!(", "include_str!("];
+
+/// The files that include another file, with the exact paths each may include. The included Rust
+/// support files are scanned for the forbidden tokens too (see `SUPPORT_ROOTS`), so an include of
+/// a new support file, or of a path not listed here, fails this test and needs a review. Data
+/// (test vectors and the guest syscall names) cannot create a process.
+const INCLUDES: [(&str, &[&str]); 5] = [
+    (
+        "pos-reference/src/lib.rs",
+        &[
+            "/tests/support/mod.rs",
+            "/tests/support/sandbox_admission_fixture.rs",
+        ],
+    ),
+    ("pos-reference/src/root_selector.rs", &["tests/vectors/"]),
+    (
+        "pos-reference/src/selector/installation.rs",
+        &["tests/vectors/"],
+    ),
+    (
+        "pos-reference/src/selector/installation/fixture.rs",
+        &[
+            "tests/vectors/",
+            "guest-syscalls-x86_64.txt",
+            "guest-syscalls-aarch64.txt",
+            "guest-syscalls-systemd-default.txt",
+            "pos-conformance/vectors/systemd-provider-v260.2/",
+        ],
+    ),
+    (
+        "pos-sandboxd/src/test_fixtures.rs",
+        &[
+            "/tests/support/staged_execution.rs",
+            "/tests/support/attempt_directory.rs",
+            "pos-conformance/vectors/",
+        ],
+    ),
+];
+
+/// The directories of the Rust support files that the sources include. They are scanned whole.
+const SUPPORT_ROOTS: [&str; 2] = ["../../crates/pos-reference/tests/support", "tests/support"];
+
+/// The one place a support file starts a process: the privileged test fixture re-runs its own test
+/// binary through `scripts/run-isolated-test.sh` (test-only, `attempt_directory.rs`).
+const SUPPORT_EXEMPT_FILE: &str = "attempt_directory.rs";
+/// The exempt lines, whole (after trimming), each of which must occur exactly once in the file.
+const SUPPORT_EXEMPT_LINES: [&str; 2] = ["process::Command,", "let output = Command::new(runner)"];
+
+/// The guest syscall allow-list data files and the process-creating names each may hold. The
+/// allow-list lets systemd's executor and the launcher start the adapter, so these names are
+/// expected; a new `fork`, `clone`, `exec` or `spawn` family name in a data file is a reviewed
+/// change to this table.
+const GUEST_SYSCALL_FILES: [(&str, &[&str]); 3] = [
+    (
+        "../../crates/pos-reference/src/selector/installation/guest-syscalls-x86_64.txt",
+        &["clone", "clone3", "execve", "execveat"],
+    ),
+    (
+        "../../crates/pos-reference/src/selector/installation/guest-syscalls-aarch64.txt",
+        &["clone", "clone3", "execve", "execveat"],
+    ),
+    (
+        "../../crates/pos-reference/src/selector/installation/guest-syscalls-systemd-default.txt",
+        &["execve"],
+    ),
+];
+
+/// Name fragments of every syscall that creates a process or replaces a process image.
+const PROCESS_SYSCALL_FRAGMENTS: [&str; 4] = ["fork", "clone", "exec", "spawn"];
+
 /// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
 /// unchecked system-bus address (`unixexec` and `ibus` start processes), and
 /// zlink's non-atomic Unix stream.
@@ -190,6 +262,153 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
                     number + 1
                 );
             }
+        }
+        let lines = production_lines(path)?;
+        let allowed: &[&str] = INCLUDES
+            .iter()
+            .find(|(file, _)| path.ends_with(file))
+            .map_or(&[], |(_, allowed)| *allowed);
+        assert_includes_are_listed(path, &lines, |window| {
+            allowed.iter().any(|fragment| window.contains(fragment))
+        });
+    }
+    Ok(())
+}
+
+/// Every include token in `lines` has, in its own macro call (up to the closing parenthesis that
+/// matches the one after the token), a path that `listed` accepts.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_includes_are_listed(path: &Path, lines: &[String], listed: impl Fn(&str) -> bool) {
+    for (number, line) in lines.iter().enumerate() {
+        for token in INCLUDE_TOKENS {
+            for (column, _) in line.match_indices(token) {
+                let rest = format!("{}\n{}", &line[column..], lines[number + 1..].join("\n"));
+                let open = token.len() - 1;
+                let mut depth = 0_usize;
+                let closed = rest[open..].char_indices().find_map(|(offset, character)| {
+                    match character {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(open + offset + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    None
+                });
+                assert!(
+                    closed.is_some(),
+                    "{}:{}: `{token}` has no closing parenthesis",
+                    path.display(),
+                    number + 1
+                );
+                let end = closed.unwrap_or(rest.len());
+                assert!(
+                    listed(&rest[..end]),
+                    "{}:{}: `{token}` of an unlisted path in provider code",
+                    path.display(),
+                    number + 1
+                );
+            }
+        }
+    }
+}
+
+/// The Rust support files that the sources include hold no process creation either, apart from
+/// the one exempt site, and include only test vectors or each other.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn included_support_files_never_create_a_local_process() -> TestResult {
+    let mut sources = Vec::new();
+    let mut siblings = Vec::new();
+    for root in SUPPORT_ROOTS {
+        rust_sources(&manifest_root().join(root), &mut sources)?;
+    }
+    for path in &sources {
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            siblings.push(name.to_owned());
+        }
+    }
+    for needed in [
+        "mod.rs",
+        "sandbox_admission_fixture.rs",
+        SUPPORT_EXEMPT_FILE,
+    ] {
+        assert!(
+            siblings.iter().any(|name| name == needed),
+            "the support scan must include {needed}"
+        );
+    }
+    for path in &sources {
+        let text = fs::read_to_string(path)?;
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        for (number, line) in lines.iter().enumerate() {
+            let exempt = path.ends_with(SUPPORT_EXEMPT_FILE)
+                && SUPPORT_EXEMPT_LINES
+                    .iter()
+                    .any(|allowed| line.trim() == *allowed);
+            for token in FORBIDDEN {
+                assert!(
+                    exempt || !line.contains(token),
+                    "{}:{}: `{token}` in an included support file",
+                    path.display(),
+                    number + 1
+                );
+            }
+        }
+        if path.ends_with(SUPPORT_EXEMPT_FILE) {
+            for allowed in SUPPORT_EXEMPT_LINES {
+                assert_eq!(
+                    lines.iter().filter(|line| line.trim() == allowed).count(),
+                    1,
+                    "`{allowed}` must occur exactly once in {}",
+                    path.display()
+                );
+            }
+        }
+        assert_includes_are_listed(path, &lines, |window| {
+            window.contains("\"../vectors/")
+                || window.contains("\"../../../../fixtures/conformance/")
+                || siblings
+                    .iter()
+                    .any(|name| window.contains(&format!("\"{name}\"")))
+        });
+    }
+    Ok(())
+}
+
+/// The guest allow-list data files are data, not Rust, so the token scan never reads them. The
+/// process-related names in them are pinned here instead.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn guest_syscall_lists_hold_only_the_expected_process_names() -> TestResult {
+    for (file, expected) in GUEST_SYSCALL_FILES {
+        let text = fs::read_to_string(manifest_root().join(file))?;
+        let mut process_names: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|name| {
+                PROCESS_SYSCALL_FRAGMENTS
+                    .iter()
+                    .any(|fragment| name.contains(fragment))
+            })
+            .collect();
+        process_names.sort_unstable();
+        assert_eq!(process_names, expected, "{file}");
+    }
+    // Every data file of the directory is in the table, so a new one cannot go unscanned.
+    let directory = manifest_root().join("../../crates/pos-reference/src/selector/installation");
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with("guest-syscalls-") {
+            assert!(
+                GUEST_SYSCALL_FILES
+                    .iter()
+                    .any(|(file, _)| file.ends_with(&name)),
+                "{name} is not in GUEST_SYSCALL_FILES"
+            );
         }
     }
     Ok(())

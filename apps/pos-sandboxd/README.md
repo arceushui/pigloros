@@ -235,6 +235,7 @@ execution or establish resource absence; intent remains available for recovery.
 `ExecStart=` is requested as `a(sasb)`: the bind-mounted launcher at
 `/.pigloros/release-launcher`, `launch-barrier` and one lowercase-hexadecimal
 LPV1 argument, and read back as path, argument vector and ignore-failure flag.
+The provider root image must carry the mount points the unit mounts onto (`/dev`, `/proc`, `/sys`, `/run`, `/tmp`, `/var/tmp`, `/work`, `/home`, `/root`) as empty directories, and `/.pigloros/release-launcher` as an empty file: systemd cannot create a bind-mount point in a read-only erofs root, and the unit then fails mount namespacing.
 `ProviderReleaseBarrier` is the production `LaunchBarrier`. Its `prepare`
 operation checks the complete admitted attempt before handing over a descriptor,
 and release checks the active attempt against that same record again.
@@ -312,6 +313,17 @@ and monotonic deadline), closes the release channel and replaces its process
 image with the held adapter descriptor through `nix`'s safe `execveat`
 wrapper (`src/launcher/exec.rs`, the only file allowed to name it). Any other
 outcome, including EOF, ends the process without running adapter bytes.
+The launcher's standard error is `/dev/null` in the unit, so its exit status is
+the trace of why it did not run the adapter. Each closed failure has its own
+status (`launcher::failure_status`): 64 launch parameters not a valid LPV1, 65
+launch environment invalid, 66 inherited descriptor layout invalid, 67 release
+channel peer not the provider, 68 adapter not a regular file, 69 launcher or
+adapter identity unreadable, 70 `ReadyV1` not sent, 71 `ReleaseV1` not received,
+72 `ReleaseV1` rejected, 73 adapter exec failed, 74 adapter ELF header
+unreadable, 75 adapter not a 64-bit little-endian ELF executable for this
+architecture, and 100 plus the OS error number when the adapter could not be
+opened beneath the root (102 is a missing adapter). Any other mode failure
+exits 1 and a usage error 2.
 
 The launcher code path never calls admission or the verifier (a hosted source
 test enforces it). CI builds the binary for `x86_64` and `aarch64`

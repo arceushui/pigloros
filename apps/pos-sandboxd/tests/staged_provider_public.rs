@@ -145,7 +145,7 @@ fn the_staged_provider_files_are_read_back_by_the_production_readers() -> TestRe
     assert!(executable.starts_with("/var/lib/pigloros/sandbox/providers"));
     assert_eq!(fs::read(executable)?, binary);
     let metadata = fs::metadata(executable)?;
-    assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (0, 0o500));
+    assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (0, 0o555));
     let held = admitted
         .bootstrap()
         .installed()

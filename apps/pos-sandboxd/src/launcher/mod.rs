@@ -42,7 +42,7 @@ mod host;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
-pub use error::{LauncherError, ReleaseDefect};
+pub use error::{AdapterFault, LauncherError, ReleaseDefect};
 
 use std::convert::Infallible;
 
@@ -52,6 +52,55 @@ use self::{environment::LaunchEnvironment, host::ProcessHost};
 
 /// The one launcher-mode argument.
 pub const LAUNCH_BARRIER_MODE: &str = "launch-barrier";
+
+/// The exit status of a launcher that did not run the adapter: one status from 64 per closed
+/// failure.
+///
+/// The launcher's standard error is `/dev/null` (ADR-069 R10 section 4.2), so a failure leaves no
+/// diagnostic in the unit. The status is the only trace of the reason, and the unit's
+/// `ExecMainStatus` shows it. The set is closed and carries no path, descriptor or record byte:
+///
+/// | Status | Failure |
+/// |---|---|
+/// | 64 | the launch parameters are not a valid LPV1 |
+/// | 65 | the launch environment is invalid |
+/// | 66 | the inherited descriptor layout is invalid |
+/// | 67 | the release channel peer is not the provider |
+/// | 68 | the adapter is not a regular file |
+/// | 69 | the launcher or adapter identity could not be read |
+/// | 70 | `ReadyV1` could not be sent |
+/// | 71 | `ReleaseV1` was not received |
+/// | 72 | `ReleaseV1` was rejected |
+/// | 73 | the adapter exec failed |
+/// | 74 | the adapter's ELF header could not be read |
+/// | 75 | the adapter is not a 64-bit little-endian ELF executable for this architecture |
+/// | 100 + n | the adapter could not be opened beneath the root, with OS error number n (at most 27) |
+#[must_use]
+pub fn failure_status(error: &LauncherError) -> u8 {
+    match error {
+        LauncherError::Parameters => 64,
+        LauncherError::Environment => 65,
+        LauncherError::Layout => 66,
+        LauncherError::Peer => 67,
+        LauncherError::Adapter(fault) => adapter_status(*fault),
+        LauncherError::Identity => 69,
+        LauncherError::Ready => 70,
+        LauncherError::ReleaseUnavailable => 71,
+        LauncherError::Release(_) => 72,
+        LauncherError::Exec(_) => 73,
+    }
+}
+
+/// The exit status of an adapter that could not be held (see [`failure_status`]).
+fn adapter_status(fault: AdapterFault) -> u8 {
+    match fault {
+        AdapterFault::NotRegular => 68,
+        AdapterFault::Unreadable => 74,
+        AdapterFault::NotNative => 75,
+        // The mask keeps the sum below 256 for any error number (Linux's are at most 133).
+        AdapterFault::Open(number) => 100 + u8::try_from(number & 0x7f).unwrap_or_default(),
+    }
+}
 
 /// Run the launcher against the real process. It never returns on success:
 /// the process image is replaced by the released adapter. The returned error

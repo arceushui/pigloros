@@ -132,9 +132,14 @@ impl InstallationObjectKind {
         }
     }
 
+    /// The one mode this kind's file must have, always root-owned and immutable.
+    ///
+    /// The provider executable (kind 11) is also the launcher that the attempt unit bind-mounts
+    /// read-only and runs as its dynamic user, so it is `0o555`: `0o500` would make that exec fail
+    /// with EACCES (status 203/EXEC). Every other object stays `0o400`.
     const fn required_mode(self) -> u32 {
         if self.0 == 11 {
-            0o500
+            0o555
         } else {
             0o400
         }
@@ -1981,6 +1986,39 @@ pub mod tests {
             cursor.seek(SeekFrom::Start(offset))?;
             assert_eq!(artifact.read_control(24)?, b"immutable control record");
             assert_eq!(cursor.stream_position()?, offset);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_provider_executable_is_world_executable() -> TestResult {
+        for kind in 0_u8..16 {
+            let expected = if kind == 11 { 0o555 } else { 0o400 };
+            assert_eq!(
+                InstallationObjectKind::from_code(kind)?.required_mode(),
+                expected
+            );
+        }
+        // A mode other than the exact one is refused, in both directions.
+        let temporary = tempfile::tempdir()?;
+        let name = "artifact";
+        fs::write(temporary.path().join(name), b"abc")?;
+        let directory = File::open(temporary.path())?;
+        let owner = directory.metadata()?.uid();
+        for (mode, accepted) in [
+            (0o555, true),
+            (0o500, false),
+            (0o755, false),
+            (0o400, false),
+        ] {
+            fs::set_permissions(
+                temporary.path().join(name),
+                fs::Permissions::from_mode(mode),
+            )?;
+            assert_eq!(
+                open_immutable_file(&directory, name, 0o555, 16, owner).is_ok(),
+                accepted
+            );
         }
         Ok(())
     }

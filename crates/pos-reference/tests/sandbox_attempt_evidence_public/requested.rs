@@ -380,7 +380,7 @@ fn rqe1_value_codes_and_payloads_are_bounded() -> TestResult {
         |arguments: usize| Value::Array(vec![text("/l"), texts(arguments), Value::Bool(false)]);
     let repeated = |value: &Value, count: usize| Value::Array(vec![value.clone(); count]);
     for (value, accepted) in [
-        (dbus(11, integer(0)), false),
+        (dbus(12, integer(0)), false),
         (dbus(1, text(&longest)), true),
         (dbus(1, text(&format!("{longest}y"))), false),
         (dbus(3, integer(u64::from(u32::MAX))), true),
@@ -410,6 +410,43 @@ fn rqe1_value_codes_and_payloads_are_bounded() -> TestResult {
             Err(ProtocolError::FieldOutOfBounds)
         };
         assert_eq!(decode(&one_property(value)?), expected);
+    }
+    Ok(())
+}
+
+/// Code 11 is `SuccessExitStatus`'s `(aiai)` (R17-E6): at most 255 exit statuses and 64 signals,
+/// each in `0..=255` and strictly increasing.
+#[test]
+fn rqe1_code_11_lists_exit_statuses_and_signals() -> TestResult {
+    let numbers = |first: u64, last: u64| Value::Array((first..=last).map(integer).collect());
+    let pair = |statuses: Value, signals: Value| dbus(11, Value::Array(vec![statuses, signals]));
+    let empty = || Value::Array(Vec::new());
+    for (value, accepted) in [
+        (pair(numbers(1, 255), numbers(1, 64)), true),
+        (pair(empty(), empty()), true),
+        (pair(numbers(0, 0), numbers(1, 1)), true),
+        (pair(numbers(0, 255), numbers(1, 64)), false),
+        (pair(numbers(1, 255), numbers(1, 65)), false),
+        (pair(numbers(1, 256), numbers(1, 64)), false),
+        (
+            pair(Value::Array(vec![integer(2), integer(1)]), empty()),
+            false,
+        ),
+        (
+            pair(Value::Array(vec![integer(1), integer(1)]), empty()),
+            false,
+        ),
+        (pair(empty(), Value::Array(vec![integer(300)])), false),
+        (pair(Value::Array(vec![integer(256)]), empty()), false),
+        (pair(Value::Array(vec![integer(255)]), empty()), true),
+        (dbus(11, Value::Array(vec![empty()])), false),
+        (dbus(11, integer(0)), false),
+    ] {
+        assert_eq!(
+            decode(&one_property(value.clone())?).is_ok(),
+            accepted,
+            "{value:?}"
+        );
     }
     Ok(())
 }

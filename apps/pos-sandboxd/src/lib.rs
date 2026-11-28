@@ -669,7 +669,8 @@ impl SystemCallFilter {
 /// listener invariant fails, so neither returns success. The recovery peer
 /// exits with status 0 after it acknowledged its one exchange (ADR-069 R12
 /// §5). Any other argument vector exits with status 2; a failure of any mode
-/// ends with status 1 and one fixed diagnostic on standard error.
+/// ends with one fixed diagnostic on standard error and status 1, except for the launcher, whose
+/// status says which closed failure it was (`launcher::failure_status`).
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
@@ -688,15 +689,21 @@ enum ModeOutcome {
     Usage,
     /// The recovery peer acknowledged its one exchange: exit status 0.
     Succeeded,
-    /// A mode failed with this diagnostic: exit status 1.
-    Failed(String),
+    /// A mode failed with this diagnostic and exit status (1, except for the launcher, see
+    /// `launcher::failure_status`).
+    Failed(String, u8),
 }
 
 #[cfg(target_os = "linux")]
 impl ModeOutcome {
     /// A failure of a mode, with its one fixed diagnostic.
     fn failed(error: impl std::fmt::Display) -> Self {
-        Self::Failed(format!("pos-sandboxd: {error}"))
+        Self::failed_with(error, 1)
+    }
+
+    /// A failure of a mode with its one fixed diagnostic and its own exit status.
+    fn failed_with(error: impl std::fmt::Display, status: u8) -> Self {
+        Self::Failed(format!("pos-sandboxd: {error}"), status)
     }
 
     /// Report the outcome on standard error and give the exit status.
@@ -710,9 +717,9 @@ impl ModeOutcome {
                 std::process::ExitCode::from(2)
             }
             Self::Succeeded => std::process::ExitCode::SUCCESS,
-            Self::Failed(diagnostic) => {
+            Self::Failed(diagnostic, status) => {
                 report(&diagnostic);
-                std::process::ExitCode::FAILURE
+                std::process::ExitCode::from(status)
             }
         }
     }
@@ -761,10 +768,12 @@ fn recovery_peer_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
 fn launch_barrier_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
     match arguments {
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
-            Some(ModeOutcome::failed(lpv1.to_str().map_or(
+            let error = lpv1.to_str().map_or(
                 launcher::LauncherError::Parameters,
                 launcher::run_launch_barrier,
-            )))
+            );
+            let status = launcher::failure_status(&error);
+            Some(ModeOutcome::failed_with(error, status))
         }
         _ => None,
     }

@@ -101,6 +101,9 @@ let
     version = "0";
     src = source;
     cargoLock.lockFile = repository + "/Cargo.lock";
+    # The production binary, built without the test-support feature: the launcher gives every
+    # closed failure its own exit status (its standard error is /dev/null), which the collector
+    # records as ExecMainStatus. (The conformance binary above is the test-support build.)
     cargoBuildFlags = [
       "--package"
       "pos-sandboxd"

@@ -23,7 +23,8 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
     admitted_state, admitted_state_with_arguments, admitted_state_with_limits, ddi_fixture,
-    materialize_state, provider_executable_path, ImageSigning, DEFAULT_LIMITS, RUNTIME_KEY_SEED,
+    materialize_state, provider_executable_path, ImageSigning, ProviderFixture, SyscallPolicy,
+    DEFAULT_LIMITS, RUNTIME_KEY_SEED,
 };
 use crate::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
@@ -579,8 +580,11 @@ fn provider_state(
         &signing,
         salt,
         provider.image.arguments,
-        &binary,
-        limits,
+        ProviderFixture {
+            binary: &binary,
+            limits,
+            syscalls: SyscallPolicy::Guest,
+        },
     )
 }
 

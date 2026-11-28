@@ -197,7 +197,10 @@ DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-sta
 # `start-state` and `start-journal` are diagnostics: required to exist, and read only to explain
 # a failed start.
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
-                        "runtime-log", "provider-sha256", "start-state", "start-journal"}
+                        "runtime-log", "provider-sha256", "start-state", "start-journal",
+                        "execute-report", "execute-stderr", "execute-status", "attempt-journal",
+                        "exchange-journal", "leftover-mounts", "leftover-umount-failures",
+                        "executable-diagnostics"}
 # R11 5.2 gives the unit no environment, no descriptor and no credential. These environment and
 # descriptor lists must be empty or omitted (systemctl show omits some empty lists); the
 # credential lists cannot be read that way and are checked through `runtime-credentials`
@@ -216,6 +219,21 @@ RUNTIME_STOPPED = re.compile(
     r"^\[[^\]]+\] \S+ systemd\[1\]: Stopping [^\n]*\n(?:[^\n]*\n)*?"
     r"\[[^\]]+\] \S+ systemd\[1\]: piglor-sandbox-runtime\.service: Deactivated successfully\.$",
     re.M)
+# The selector client's report of one execute exchange (`pos-sandboxd-conformance execute`): one
+# tab-separated line per observation, each key matched exactly (`agr1` is the execution's
+# authenticated digest, `raw agr1` the BLAKE3 of the raw signed bytes: different lines). These
+# are the selector's own observations. The pidfd-anchored /proc procedure that observed the
+# attempt unit is proven only by ReleaseV1 having been sent, a barrier that needed it; nothing
+# more is claimed. TME1/KOE1 are not delivered to the selector, only their SPR1 digests.
+EXECUTE_DIGESTS = ("rqe1", "koe1", "tme1", "agr1")
+EXECUTE_RAW = ("agr1", "spr1", "spy1")
+HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
+# PID 1's lines for a unit other than the runtime. "Deactivated successfully" is what systemd
+# v260.5 says for Result=success: the only source of the unit result that R9's table, "to be
+# confirmed against v260.2", needs.
+ATTEMPT_DEACTIVATED = re.compile(
+    r"^\[[^\]]+\] \S+ systemd\[1\]: (?!piglor-sandbox-runtime\.service)\S+\.service: "
+    r"Deactivated successfully\.$", re.M)
 PROVIDER_BINARY_PATH = re.compile(r"/var/lib/pigloros/sandbox/providers/[0-9a-f]{64}")
 RUNTIME_UNIT_PROPERTIES = {
     "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
@@ -1402,6 +1420,43 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
             "routes6": require_loopback_routes(evidence, f"{base}/routes6", ROUTES6_ALLOWED)}
 
 
+def execute_observations(report: list[str]) -> dict[tuple[str, ...], list[str]]:
+    """The report's lines by exact key: `raw` lines are keyed by their record too, `sau1` by index."""
+    seen: dict[tuple[str, ...], list[str]] = {}
+    for line in report:
+        fields = line.split("\t")
+        width = 3 if fields[0] == "raw" and fields[1:2] == ["sau1"] else 2 if fields[0] == "raw" else 1
+        key = tuple(fields[:width])
+        if len(fields) <= width or key in seen:
+            raise EvidenceError(f"the execute report has a malformed or repeated line: {line!r}")
+        seen[key] = fields[width:]
+    return seen
+
+
+def check_execute(evidence: Evidence, base: str, name: str) -> dict:
+    """The selector client saw a Completed attempt, ReadyV1 and ReleaseV1, and nonzero digests."""
+    report = evidence.text(f"{base}/execute-report").splitlines()
+    if evidence.line(f"{base}/execute-status") != "0" or report[:1] != ["execute\texecuted"]:
+        raise EvidenceError(f"the {name} execute exchange did not execute: {report[:1]}; stderr: "
+                            f"{evidence.text(f'{base}/execute-stderr').strip()[:400]!r}")
+    seen = execute_observations(report)
+    if seen.get(("outcome",)) != ["Completed"]:
+        raise EvidenceError(f"the {name} attempt outcome is {seen.get(('outcome',))}, not Completed")
+    for ordinal in ("ready1", "release1"):
+        if seen.get((ordinal,)) != ["present"]:
+            raise EvidenceError(f"the {name} receipt has no {ordinal}: {seen.get((ordinal,))}")
+    for key in EXECUTE_DIGESTS + tuple(("raw", raw) for raw in EXECUTE_RAW):
+        key = (key,) if isinstance(key, str) else key
+        value = seen.get(key, [""])
+        if len(value) != 1 or not HEX_DIGEST.fullmatch(value[0]) or value[0] == "0" * 64:
+            raise EvidenceError(f"the {name} execute report has no nonzero digest for {' '.join(key)}")
+    if not any(key[:2] == ("raw", "sau1") for key in seen) or ("events",) not in seen:
+        raise EvidenceError(f"the {name} execute report names no SAU1 record or no events")
+    if not ATTEMPT_DEACTIVATED.search(evidence.text(f"{base}/attempt-journal")):
+        raise EvidenceError(f"the {name} attempt unit has no Deactivated successfully line from systemd[1]")
+    return {"outcome": "Completed", "events": seen[("events",)][0]}
+
+
 def check_daemon_case(evidence: Evidence, name: str) -> dict:
     """The composed runtime started as exactly the staged provider binary and was stopped."""
     base = f"guest/daemon/{name}"
@@ -1454,6 +1509,13 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
         raise EvidenceError(f"the {name} runtime unit did not stop with Result=success: "
                             f"{failures or 'no Stopping and Deactivated successfully lines from systemd[1]'}; "
                             f"log: {log.strip()[-600:]!r}")
+    execution = check_execute(evidence, base, name)
+    # A mount that outlives the runtime is a leak; the collector writes both files empty when
+    # nothing leaked and every detach succeeded.
+    for leftover in ("leftover-mounts", "leftover-umount-failures"):
+        if evidence.text(f"{base}/{leftover}") != "":
+            raise EvidenceError(f"the {name} runtime left mounts behind ({leftover}): "
+                                f"{evidence.text(f'{base}/{leftover}').strip()[:400]!r}")
     tree = {}
     for line in evidence.text(f"{base}/runtime-tree").splitlines():
         path, kind, mode = tab_fields(line, 3, "runtime-tree")
@@ -1467,7 +1529,8 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     loose = sorted(path for path, (kind, mode) in tree.items() if kind == "d" and mode != DIRECTORY_MODE)
     if loose:
         raise EvidenceError(f"the {name} runtime directories {loose} are not mode {DIRECTORY_MODE}")
-    return {"binary": binary, "properties": unit, "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
+    return {"binary": binary, "properties": unit, "execution": execution,
+            "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
 
 
 def check_credentials(evidence: Evidence, path: str, name: str) -> None:

@@ -225,8 +225,45 @@ start_runtime() { # BINARY
 # Result with it, as soon as it stops. The stager holds the staged
 # installation until its control FIFO closes. Part (c) and the execute
 # evidence run between start and stop.
+# The selector's side of one SPX1 exchange with the started runtime, run as the same binary that
+# staged the installation. Its report is the client's own observation (the signed outcome, the
+# SPR1 ordinals, digests); the attempt unit's lines come from PID 1's journal, the only source
+# of the unit's Result as systemd reports it ("Deactivated successfully" is Result=success).
+# Their absence is judged by the checker, never here.
+execute_case() { # DIR EXPORT_DIRECTORY
+  local main_pid status=0
+  main_pid="$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")"
+  timeout 240 pos-sandboxd-conformance execute "$2" "${main_pid}" \
+    >"$1/execute-report" 2>"$1/execute-stderr" || status=$?
+  printf '%s\n' "${status}" >"$1/execute-status"
+  journalctl --sync
+  # Diagnostics for an attempt that did not complete: everything the guest logged lately.
+  journalctl --boot --no-pager --output=short-monotonic --lines=800 >"$1/exchange-journal"
+  # Diagnostics for an attempt unit that ended before it ran the launcher (status 203/EXEC): the
+  # installed provider executables as the guest sees them (numeric owner, group and mode), and
+  # whatever the manager still holds of the attempt units (a failed unit stays loaded).
+  {
+    ls -ln /var/lib/pigloros/sandbox/providers || true
+    systemctl show 'pigloros-attempt-*.service' --all \
+      --property=Id,User,DynamicUser,ExecMainStatus,ExecMainCode,Result,ActiveState || true
+  } >"$1/executable-diagnostics" 2>&1
+  journalctl --boot --no-pager --output=short-monotonic _PID=1 \
+    | { grep -F 'Deactivated successfully' || true; } \
+    | { grep -vF "${RUNTIME_UNIT}.service" || true; } >"$1/attempt-journal"
+}
+
+# The directory of the stager export, removed on every way out of the script (a failing command
+# stops it with errexit before the removal at the end of the case).
+exports=""
+remove_exports() {
+  if [[ -n ${exports} ]]; then
+    rm -rf -- "${exports}"
+  fi
+}
+trap remove_exports EXIT
+
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
-  local dir="daemon/$1" fifo="${STAGE_FIFO}" exports control line binary pid status=0 start=0 stop=0
+  local dir="daemon/$1" fifo="${STAGE_FIFO}" control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
   # The fallback-tunnel sysctl the runtime starts under: it refuses step 7 below 1.
   cat "${FB_TUNNELS_SYSCTL}" >"${dir}/fb-tunnels-sysctl"
@@ -272,6 +309,7 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
     runtime_credentials >"${dir}/runtime-credentials"
     readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
     find "${RUNTIME_ROOT}" -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"
+    execute_case "${dir}" "${exports}"
     systemctl stop "${RUNTIME_UNIT}.service" || stop=$?
     # PID 1's stop lines may not have reached the journal yet.
     journalctl --sync
@@ -283,7 +321,18 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   wait "${pid}" || status=$?
   rm -- "${fifo}"
   rm -rf -- "${exports}"
+  exports=""
   printf '%s\n' "${status}" >"${dir}/stage-status"
+  # A mount that outlives the runtime (an attempt root that was not detached) is evidence of its
+  # own; it is recorded, then detached so that the removal below, and the later cases, can run.
+  # The checker requires both files to be empty: a leak is a failure, and a detach that fails
+  # is recorded, not swallowed.
+  findmnt --raw --noheadings --output TARGET,FSTYPE \
+    | awk -v root="${RUNTIME_ROOT}" '$1 == root || index($1, root "/") == 1' >"${dir}/leftover-mounts"
+  : >"${dir}/leftover-umount-failures"
+  LC_ALL=C sort -r "${dir}/leftover-mounts" | while read -r target _; do
+    umount --lazy "${target}" || printf '%s\n' "${target}" >>"${dir}/leftover-umount-failures"
+  done
   rm -rf "${RUNTIME_ROOT}"
 }
 

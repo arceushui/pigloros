@@ -26,7 +26,7 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
 }
 
 const fn expected_static_hardening_properties(
-) -> [(&'static str, &'static str, SystemdHardeningValue); 32] {
+) -> [(&'static str, &'static str, SystemdHardeningValue); 34] {
     [
         ("Type", "s", SystemdHardeningValue::String("exec")),
         ("DynamicUser", "b", SystemdHardeningValue::Bool(true)),
@@ -93,6 +93,15 @@ const fn expected_static_hardening_properties(
         ("StandardInput", "s", SystemdHardeningValue::String("null")),
         ("StandardOutput", "s", SystemdHardeningValue::String("null")),
         ("StandardError", "s", SystemdHardeningValue::String("null")),
+        // ADR-069 R17-E6: the cgroup outlives a successful main exit until the unit is stopped.
+        ("RemainAfterExit", "b", SystemdHardeningValue::Bool(true)),
+        // A payload exit (statuses 1..=199 and every signal) leaves the unit active (exited), so
+        // the cgroup stays for the broker.
+        (
+            "SuccessExitStatus",
+            "(aiai)",
+            SystemdHardeningValue::EveryExit,
+        ),
     ]
 }
 
@@ -123,6 +132,17 @@ fn assert_dbus_roundtrip(value: SystemdHardeningValue) -> Result<(), Box<dyn Err
             assert_eq!(Variant::from(value).value_signature().to_string(), "u");
             let encoded = to_bytes(Context::new(LE, 0), &value)?;
             let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
+            assert_eq!(decoded, value);
+            assert_eq!(consumed, encoded.len());
+        }
+        SystemdHardeningValue::EveryExit => {
+            let value: (Vec<i32>, Vec<i32>) = ((1..=199).collect(), (1..=64).collect());
+            assert_eq!(
+                Variant::from(value.clone()).value_signature().to_string(),
+                "(aiai)"
+            );
+            let encoded = to_bytes(Context::new(LE, 0), &value)?;
+            let (decoded, consumed): ((Vec<i32>, Vec<i32>), usize) = encoded.deserialize()?;
             assert_eq!(decoded, value);
             assert_eq!(consumed, encoded.len());
         }
@@ -201,6 +221,9 @@ fn substituted_readback_value(value: SystemdHardeningValue) -> SystemdHardeningR
         SystemdHardeningValue::U32(_) => SystemdHardeningReadbackValue::String("0".to_owned()),
         SystemdHardeningValue::StringArray(_) => {
             SystemdHardeningReadbackValue::StringArray(vec!["not-native".to_owned()])
+        }
+        SystemdHardeningValue::EveryExit => {
+            SystemdHardeningReadbackValue::ExitStatuses(vec![1], vec![15])
         }
     }
 }

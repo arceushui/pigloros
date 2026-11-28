@@ -570,6 +570,12 @@ LAUNCHER_HEADERS = ("ELF Header:\n  Type:                              EXEC (Exe
                     "Program Headers:\n  Type           Offset   VirtAddr\n  LOAD           0x000000 0x400000\n"
                     "  GNU_STACK      0x000000 0x000000\n\nThere is no dynamic section in this file.\n")
 LAUNCHER_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+D1, D2, D3 = "1" * 64, "2" * 64, "3" * 64
+EXECUTE_REPORT = ("execute\texecuted\noutcome\tCompleted\nevents\t1,2,3\nready1\tpresent\n"
+                  "release1\tpresent\n" + f"rqe1\t{D1}\nkoe1\t{D2}\ntme1\t{D3}\nagr1\t{D1}\n"
+                  + f"raw\tagr1\t{D2}\nraw\tspr1\t{D3}\nraw\tspy1\t{D1}\nraw\tsau1\t0\t{D2}\n"
+                  + f"raw\tsau1\t1\t{D3}\noutput\t6\t{D1}\n")
+ATTEMPT_JOURNAL = (f"[ 110.0] {HOST} systemd[1]: piglor-attempt-0.service: Deactivated successfully.\n")
 
 
 def daemon_files() -> dict[str, bytes | str]:
@@ -587,6 +593,11 @@ def daemon_files() -> dict[str, bytes | str]:
         f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
         f"{base}/runtime-credentials": RUNTIME_CREDENTIALS,
         f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
+        f"{base}/execute-report": EXECUTE_REPORT, f"{base}/execute-stderr": "",
+        f"{base}/execute-status": "0\n", f"{base}/attempt-journal": ATTEMPT_JOURNAL,
+        f"{base}/exchange-journal": "", f"{base}/executable-diagnostics": "",
+        f"{base}/leftover-mounts": "",
+        f"{base}/leftover-umount-failures": "",
     }
 
 
@@ -1582,6 +1593,81 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(daemon["binary"], PROVIDER_BINARY)
         self.assertEqual(daemon["properties"]["Type"], "notify")
         self.assertEqual(sorted(daemon["endpoints"]), ["provider-control.sock", "provider-execute.sock"])
+
+    def test_the_execute_evidence_is_the_selectors_own_observation(self):
+        execution = self.verdict()["provider_runtime"]["start"]["execution"]
+        self.assertEqual(execution, {"outcome": "Completed", "events": "1,2,3"})
+
+    def test_a_leaked_mount_or_a_failed_detach_fails_closed(self):
+        base = "guest/daemon/start"
+        for name in ("leftover-mounts", "leftover-umount-failures"):
+            for content in ("/run/pigloros/sandbox/attempts/x/root erofs\n", "\n", " "):
+                with self.subTest(name=name, content=content):
+                    with self.assertRaisesRegex(checker.EvidenceError, f"left mounts behind \\({name}\\)"):
+                        self.verdict(change=lambda f, n=name, c=content: f.update({f"{base}/{n}": c}))
+
+    def test_the_attempt_unit_line_may_follow_other_lines_of_the_journal(self):
+        noise = f"[ 109.0] {HOST} systemd[1]: Started something.service.\n"
+        journal = noise + ATTEMPT_JOURNAL + noise
+        self.assertEqual(
+            self.verdict(change=lambda f: f.update({"guest/daemon/start/attempt-journal": journal}))
+            ["provider_runtime"]["start"]["execution"]["outcome"], "Completed")
+
+    def test_execute_fabrication_fails_closed(self):
+        base = "guest/daemon/start"
+        report, journal = f"{base}/execute-report", f"{base}/attempt-journal"
+
+        def edit(old: str, new: str):
+            return lambda f: f.update({report: EXECUTE_REPORT.replace(old, new, 1)})
+
+        zero = "0" * 64
+        changes = [
+            (lambda f: f.pop(report), "malformed daemon record start"),
+            (lambda f: f.pop(journal), "malformed daemon record start"),
+            (lambda f: f.update({f"{base}/execute-status": "1\n"}), "did not execute"),
+            (lambda f: f.update({report: "execute\trefused\tSandboxUnavailable\n"}), "did not execute"),
+            (lambda f: f.update({report: ""}), "did not execute"),
+            (edit("outcome\tCompleted", "outcome\tCancelled"), "not Completed"),
+            (edit("outcome\tCompleted\n", ""), "not Completed"),
+            (edit("outcome\tCompleted", "outcome\tCompleted\textra"), "not Completed"),
+            (edit("ready1\tpresent", "ready1\tabsent"), "no ready1"),
+            (edit("release1\tpresent", "release1\tabsent"), "no release1"),
+            (edit("release1\tpresent\n", ""), "no release1"),
+            *[(edit(f"{key}\t{digest}", f"{key}\t{bad}"), f"no nonzero digest for {key}")
+              for key, digest in (("rqe1", D1), ("koe1", D2), ("tme1", D3), ("agr1", D1))
+              for bad in (zero, "x", D1[:-1], "A" * 64)],
+            *[(edit(f"raw\t{key}\t{digest}", f"raw\t{key}\t{zero}"), f"no nonzero digest for raw {key}")
+              for key, digest in (("agr1", D2), ("spr1", D3), ("spy1", D1))],
+            (edit("raw\tspy1\t" + D1 + "\n", ""), "no nonzero digest for raw spy1"),
+            (edit(f"raw\tsau1\t0\t{D2}\nraw\tsau1\t1\t{D3}\n", ""), "no SAU1 record"),
+            (edit("events\t1,2,3\n", ""), "no SAU1 record or no events"),
+            # An `agr1` line is not satisfied by `raw agr1` alone, nor the other way round.
+            (edit(f"agr1\t{D1}\nraw", "raw"), "no nonzero digest for agr1"),
+            (lambda f: f.update({report: EXECUTE_REPORT + "outcome\tCompleted\n"}), "malformed or repeated"),
+            (lambda f: f.update({report: EXECUTE_REPORT + "execute\texecuted\n"}), "malformed or repeated"),
+            # A digest line holds exactly one digest, matched whole.
+            (edit(f"rqe1\t{D1}", f"rqe1\t{D1}\t{D1}"), "no nonzero digest for rqe1"),
+            (edit(f"koe1\t{D2}", f"koe1\tx{D2}"), "no nonzero digest for koe1"),
+            (edit(f"koe1\t{D2}", f"koe1\t{D2}0"), "no nonzero digest for koe1"),
+            (edit(f"koe1\t{D2}", f"koe1\t{D2}\n"), "malformed or repeated"),
+            (lambda f: f.update({report: EXECUTE_REPORT + "stray\n"}), "malformed or repeated"),
+            (lambda f: f.update({journal: ""}), "no Deactivated successfully"),
+            (lambda f: f.update({journal: DEACTIVATED}), "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("successfully", "with result")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("systemd[1]", "other[7]")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("systemd[1]", "systemd[2]")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("successfully.", "successfully.x")}),
+             "no Deactivated successfully"),
+            (lambda f: f.update({journal: ATTEMPT_JOURNAL.replace("successfully.", "successfully")}),
+             "no Deactivated successfully"),
+        ]
+        for change, message in changes:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(checker.EvidenceError, re.escape(message)):
+                    self.verdict(change=change)
 
     def test_provider_runtime_fabrication_fails_closed(self):
         base = "guest/daemon/start"

@@ -1405,5 +1405,69 @@ esac
         self.assertIn("error: unsupported URI", result.stderr)
 
 
+# The mount points that the attempt unit's properties (apps/pos-sandboxd/src/hardening.rs and
+# transient_unit.rs) mount onto in the provider root image. systemd cannot create a mount point in
+# the read-only erofs root, so the evidence image must hold each one.
+ROOT_MOUNT_POINTS = {
+    "dev": "PrivateDevices, PrivateIPC, ProtectKernelLogs (/dev/kmsg)",
+    "proc": "PrivatePIDs, ProtectProc, ProcSubset, ProtectKernelTunables (/proc/sys)",
+    "sys": "ProtectKernelTunables, ProtectControlGroups (/sys/fs/cgroup)",
+    "run": "ProtectSystem, ProtectHome (/run/user)",
+    "tmp": "the unit-private /tmp",
+    "var/tmp": "the unit-private /var/tmp",
+    "work": "TemporaryFileSystem /work (ELM1 WorkBytes)",
+    "home": "ProtectHome",
+    "root": "ProtectHome",
+    ".pigloros/release-launcher": "the bind-mounted launcher (LAUNCHER_DESTINATION)",
+}
+
+
+# Every property of apps/pos-sandboxd/src/hardening.rs, with the mount points of the provider root
+# image it needs, or () for a property that mounts nothing onto the root. A new property fails the
+# test below until someone classifies it here.
+HARDENING_MOUNT_POINTS = {
+    "TypeExec": (), "DynamicUser": (), "NoNewPrivileges": (),
+    "PrivateDevices": ("dev",), "PrivateIpc": ("dev",), "PrivateMounts": (),
+    "PrivateNetwork": (), "PrivatePids": ("proc",), "PrivateUsersEx": (),
+    "CapabilityBoundingSet": (), "AmbientCapabilities": (),
+    "ProtectSystem": ("run", "tmp", "var/tmp"), "ProtectHome": ("home", "root", "run"),
+    "ProtectControlGroupsEx": ("sys",), "ProtectKernelTunables": ("proc", "sys"),
+    "ProtectKernelModules": (), "ProtectKernelLogs": ("dev", "proc"), "ProtectClock": (),
+    "ProtectHostname": (), "ProtectProc": ("proc",), "ProcSubset": ("proc",),
+    "RestrictNamespaces": (), "RestrictSuidSgid": (), "RestrictRealtime": (),
+    "LockPersonality": (), "SystemCallArchitectures": (), "UMask": (), "KillMode": (),
+    "SendSigKill": (), "StandardInput": (), "StandardOutput": (), "StandardError": (),
+    "RemainAfterExit": (), "SuccessExitStatus": (),
+}
+# The mount points that transient_unit.rs names as constants, by constant, as image paths.
+TRANSIENT_UNIT_MOUNT_POINTS = {"LAUNCHER_DESTINATION": ".pigloros/release-launcher", "WORK_MOUNT_PATH": "work"}
+# What the evidence image holds, for the properties above and these constants.
+ROOT_MOUNT_POINTS = {point for points in HARDENING_MOUNT_POINTS.values() for point in points} | set(
+    TRANSIENT_UNIT_MOUNT_POINTS.values())
+
+
+class ImageMountPointTests(unittest.TestCase):
+    def test_the_evidence_image_holds_exactly_the_mount_points_of_the_unit(self):
+        script = (ROOT / "deploy/nixos/qemu-evidence/build-images.sh").read_text()
+        created = set(re.findall(r'"\$\{work\}/tree/([^"]+)"', script))
+        # Exact paths, not substrings: "tmp" is not satisfied by "var/tmp".
+        self.assertEqual(ROOT_MOUNT_POINTS - created, set())
+
+    def test_every_hardening_property_is_classified(self):
+        source = (ROOT / "apps/pos-sandboxd/src/hardening.rs").read_text()
+        body = source.split("pub enum SystemdHardeningProperty {", 1)[1].split("\n}", 1)[0]
+        variants = set(re.findall(r"^\s+([A-Z][A-Za-z0-9]*),", body, re.M))
+        self.assertGreater(len(variants), 20)
+        self.assertEqual(variants, set(HARDENING_MOUNT_POINTS))
+
+    def test_the_unit_constants_name_the_classified_mount_points(self):
+        source = (ROOT / "apps/pos-sandboxd/src/transient_unit.rs").read_text()
+        for constant, point in TRANSIENT_UNIT_MOUNT_POINTS.items():
+            with self.subTest(constant=constant):
+                found = re.search(rf'const {constant}: &str = "/([^"]+)";', source)
+                self.assertIsNotNone(found)
+                self.assertEqual(found.group(1), point)
+
+
 if __name__ == "__main__":
     unittest.main()

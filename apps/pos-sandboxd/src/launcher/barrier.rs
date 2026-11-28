@@ -31,7 +31,7 @@ use super::{
     adapter::{hold, hold_adapter},
     descriptors::{validate, Inherited, InheritedLayout},
     environment::LaunchEnvironment,
-    error::{LauncherError, ReleaseDefect},
+    error::{AdapterFault, LauncherError, ReleaseDefect},
     host::LaunchHost,
 };
 
@@ -66,7 +66,9 @@ pub(super) fn run(
     let observed_fdl1_digest = observed_fdl1(parameters.expected_fdl1_digest, &layout.entries)?;
     let adapter = hold_adapter(
         host.open_adapter(&parameters.adapter_path)
-            .map_err(|_| LauncherError::Adapter)?,
+            .map_err(|error| {
+                LauncherError::Adapter(AdapterFault::Open(error.raw_os_error().unwrap_or(0)))
+            })?,
     )?;
     let launcher = hold(host.open_launcher().map_err(|_| LauncherError::Identity)?)?;
     // Built before ReadyV1, so a bad vector is refused before the provider can release.

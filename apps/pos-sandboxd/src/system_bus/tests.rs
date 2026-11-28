@@ -33,7 +33,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 50] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 52] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -70,6 +70,8 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 50] = [
     ("StandardInput", "s"),
     ("StandardOutput", "s"),
     ("StandardError", "s"),
+    ("RemainAfterExit", "b"),
+    ("SuccessExitStatus", "(aiai)"),
     ("MemoryMax", "t"),
     ("MemorySwapMax", "t"),
     ("TasksMax", "t"),
@@ -725,6 +727,16 @@ impl RecordingService {
         self.fixed(true)
     }
 
+    #[zbus(property, name = "RemainAfterExit")]
+    fn remain_after_exit(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "SuccessExitStatus")]
+    fn success_exit_status(&self) -> (Vec<i32>, Vec<i32>) {
+        self.fixed(((1..=199).collect(), (1..=64).collect()))
+    }
+
     #[zbus(property, name = "StandardInput")]
     fn standard_input(&self) -> &'static str {
         self.fixed(self.standard_streams[0])
@@ -916,17 +928,17 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 50);
+    assert_eq!(verified.requested_readback().len(), 52);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
-        verified.requested_readback()[44].name(),
+        verified.requested_readback()[46].name(),
         "ExtraFileDescriptors"
     );
     // The descriptor names are read back under the descriptors' own names.
     for (index, name) in [
-        (47, "StandardInputFileDescriptor"),
-        (48, "StandardOutputFileDescriptor"),
-        (49, "StandardErrorFileDescriptor"),
+        (49, "StandardInputFileDescriptor"),
+        (50, "StandardOutputFileDescriptor"),
+        (51, "StandardErrorFileDescriptor"),
     ] {
         assert_eq!(verified.requested_readback()[index].name(), name);
         assert_eq!(
