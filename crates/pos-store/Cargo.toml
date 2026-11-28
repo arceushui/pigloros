@@ -28,7 +28,9 @@ ciborium = { workspace = true }
 blake3 = { workspace = true }
 ulid = { workspace = true }
 serde_json = { workspace = true }
-rusqlite = { workspace = true, optional = true }
+# ADR-123 §5: the qualified owner-store binding bounds its native diagnostic
+# with `SQLITE_LIMIT_LENGTH`, so the normal build enables `limits`.
+rusqlite = { workspace = true, optional = true, features = ["limits"] }
 rand = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
