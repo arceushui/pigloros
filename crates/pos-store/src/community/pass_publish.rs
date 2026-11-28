@@ -172,22 +172,23 @@ impl MemoryCommunityDomainV1 {
     /// reservation_operation_id)`, authenticated under its pass metadata
     /// key: what a lost Reserve response discovers (R8.1(7)).
     ///
+    /// `sample_micros` is the discovering call's one trusted sample. At or
+    /// after the pass's `H_r`, the CPR1's evidence horizon, the original
+    /// evidence is expired and discovery gives 13 (R13.2(4), R10.7 step 4a).
+    ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a pass nobody reserved here and
-    /// for a record that no longer opens under its key.
+    /// for a record that no longer opens under its key, and
+    /// `EvidenceExpired` for a sample at or after `H_r`.
     pub fn original_reserve(
         &self,
         timeline: TimelineId,
         reservation_operation_id: [u8; 16],
+        sample_micros: u64,
     ) -> Result<CommunityOriginalReserveV1, Error> {
-        let committed = self
-            .reserve_publications
-            .get(&(timeline, reservation_operation_id))
-            .ok_or(Error::EvidenceUnavailable)?;
-        let vault = self
-            .keys
-            .get(&committed.metadata_key)
-            .ok_or(Error::EvidenceUnavailable)?;
+        let key = (timeline, reservation_operation_id);
+        self.check_discoverable(key, sample_micros)?;
+        let (committed, vault) = self.reserve_vault(key)?;
         let open = |index: usize| {
             committed
                 .records
@@ -199,6 +200,42 @@ impl MemoryCommunityDomainV1 {
             request: open(0)?,
             reservation: open(1)?,
         })
+    }
+
+    /// The pass's original evidence is not expired at `sample_micros`: its
+    /// `H_r` is after the sample (`EvidenceExpired` otherwise).
+    fn check_discoverable(
+        &self,
+        key: (TimelineId, [u8; 16]),
+        sample_micros: u64,
+    ) -> Result<(), Error> {
+        let horizon = self
+            .pass_record(key.0, key.1)
+            .ok_or(Error::EvidenceUnavailable)?
+            .reserved
+            .reservation
+            .evidence_not_after_micros;
+        if sample_micros >= horizon {
+            Err(Error::EvidenceExpired)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The sealed records of a committed Reserve and the pass metadata key
+    /// that seals them.
+    fn reserve_vault(
+        &self,
+        key: (TimelineId, [u8; 16]),
+    ) -> Result<(&CommittedReserveV1, &VaultKeyV1), Error> {
+        let committed = self
+            .reserve_publications
+            .get(&key)
+            .ok_or(Error::EvidenceUnavailable)?;
+        self.keys
+            .get(&committed.metadata_key)
+            .map(|vault| (committed, vault))
+            .ok_or(Error::EvidenceUnavailable)
     }
 
     /// Provision both keys and seal every record, leaving the domain

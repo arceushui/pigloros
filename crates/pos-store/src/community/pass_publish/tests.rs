@@ -492,18 +492,18 @@ fn the_original_reserve_reads_back_its_cri1_and_cpr1() -> TestResult {
     let publication = publication(&case.profile, &case.policy);
     let domain = &mut case.domain.world.domain;
     assert_eq!(
-        domain.original_reserve(target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     domain.publish_reserved_pass(&SEAL, staged, publication)?;
-    let original = domain.original_reserve(target(), OPERATION)?;
+    let original = domain.original_reserve(target(), OPERATION, SAMPLE)?;
     assert_eq!(original.request(), request.as_slice());
     assert_eq!(original.reservation(), reservation.as_slice());
     assert_ne!(original.request(), original.reservation());
 
     // Another identity of T was not reserved here.
     assert_eq!(
-        domain.original_reserve(target(), SECOND).err(),
+        domain.original_reserve(target(), SECOND, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     // A record that no longer opens, a missing record and a missing key
@@ -511,24 +511,24 @@ fn the_original_reserve_reads_back_its_cri1_and_cpr1() -> TestResult {
     for index in [0, 1] {
         flip(domain, index)?;
         assert_eq!(
-            domain.original_reserve(target(), OPERATION).err(),
+            domain.original_reserve(target(), OPERATION, SAMPLE).err(),
             Some(Error::EvidenceUnavailable)
         );
         flip(domain, index)?;
     }
-    assert!(domain.original_reserve(target(), OPERATION).is_ok());
+    assert!(domain.original_reserve(target(), OPERATION, SAMPLE).is_ok());
     let record = domain
         .reserve_publications
         .get_mut(&(target(), OPERATION))
         .ok_or("publication")?;
     record.records.truncate(1);
     assert_eq!(
-        domain.original_reserve(target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     domain.keys.remove(&METADATA);
     assert_eq!(
-        domain.original_reserve(target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     Ok(())
@@ -749,7 +749,7 @@ fn a_reused_key_id_refuses_without_overwriting() -> TestResult {
             .domain
             .world
             .domain
-            .original_reserve(target(), OPERATION)
+            .original_reserve(target(), OPERATION, SAMPLE)
             .is_ok());
     }
     Ok(())
@@ -850,6 +850,35 @@ fn two_keys_of_one_id_refuse() -> TestResult {
     assert_eq!(
         domain.check_fresh_keys(&prepared).err(),
         Some(Error::Conflict)
+    );
+    Ok(())
+}
+
+/// R13.2(4), R10.7 step 4a: discovery of the original Reserve at or after
+/// the pass's `H_r` gives 13, and before it returns the records; a pass
+/// nobody reserved is 12 at any sample.
+#[test]
+fn discovery_of_expired_original_evidence_gives_13() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    assert!(domain
+        .original_reserve(target(), OPERATION, horizon - 1)
+        .is_ok());
+    for sample in [horizon, horizon + 1, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), OPERATION, sample).err(),
+            Some(Error::EvidenceExpired)
+        );
+    }
+    assert_eq!(
+        domain.original_reserve(target(), SECOND, u64::MAX).err(),
+        Some(Error::EvidenceUnavailable)
     );
     Ok(())
 }
