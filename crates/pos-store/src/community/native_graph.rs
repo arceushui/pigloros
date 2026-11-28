@@ -192,6 +192,9 @@ pub struct CommunityInitializationGraphV1 {
     graph_root: Zeroizing<Vec<u8>>,
     #[cfg(target_os = "linux")]
     graph_counts: CommunityGraphCountsV1,
+    /// Each member's CMB1 digest, in slot (roster) order.
+    #[cfg(target_os = "linux")]
+    member_bindings: Vec<Hash>,
     generation_admission: Zeroizing<Vec<u8>>,
 }
 
@@ -282,6 +285,23 @@ impl CommunityInitializationGraphV1 {
     #[must_use]
     pub const fn request_digest(&self) -> Hash {
         self.request_digest
+    }
+
+    /// The index in [`Self::records`] of the CSR1 of the member whose CMB1
+    /// digest is `member_binding`: the CSR1 of its slot.
+    #[cfg(target_os = "linux")]
+    pub(super) fn state_revision_index(&self, member_binding: Hash) -> Option<usize> {
+        self.member_bindings
+            .iter()
+            .position(|digest| *digest == member_binding)
+            .and_then(|slot| {
+                self.records
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, record)| record.record_magic == *b"CSR1")
+                    .nth(slot)
+                    .map(|(index, _)| index)
+            })
     }
 
     /// Every protected record: per slot, CSC1, CIS1, CSR1 and the
@@ -757,6 +777,11 @@ fn finish(
                             graph_root: graph_root.to_canonical_cbor(),
                             #[cfg(target_os = "linux")]
                             graph_counts,
+                            #[cfg(target_os = "linux")]
+                            member_bindings: plans
+                                .iter()
+                                .map(|plan| plan.member_binding_digest)
+                                .collect(),
                             generation_admission: admission.to_canonical_cbor(),
                         })
                     })

@@ -3,8 +3,7 @@
 //! CAV1 sites' tests compare against.
 
 use pos_core::community_lifecycle::{
-    CommunityAuthorityViewRowV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationReferenceV1, CommunityMaterializationV1,
+    CommunityAuthorityViewRowV1, CommunityMaterializationReferenceV1, CommunityMaterializationV1,
 };
 use pos_core::{Hash, TimelineId};
 use ulid::Ulid;
@@ -12,6 +11,26 @@ use ulid::Ulid;
 use super::{with_metadata_row, CommunitySelectedViewV1};
 use crate::community::MemoryCommunityDomainV1;
 use crate::community_initialization_fixture::{hash, Fallible};
+
+/// T's initialization records, opened, in sealed order.
+pub(in crate::community) fn opened_records(
+    domain: &MemoryCommunityDomainV1,
+) -> Fallible<Vec<zeroize::Zeroizing<Vec<u8>>>> {
+    let committed = domain
+        .initializations
+        .values()
+        .next()
+        .ok_or("no initialization")?;
+    let vault = domain
+        .keys
+        .get(&committed.metadata_key)
+        .ok_or("no metadata key")?;
+    Ok(committed
+        .records
+        .iter()
+        .filter_map(|sealed| vault.open(sealed).ok())
+        .collect())
+}
 
 /// The CMI1 reference of every `StateRevision` CSR1 of T's initialization,
 /// in roster order, read back from its sealed records: an independent
@@ -111,20 +130,4 @@ fn a_metadata_row_with_another_key_joins_the_rows_in_order() {
 fn a_metadata_row_stands_alone() {
     let rows = with_metadata_row(vec![], row(2, 5, 1, 0x22));
     assert_eq!(tags(&rows), vec![hash(0x22)]);
-}
-
-/// An undecodable CMI1 is refused, not skipped.
-#[test]
-fn an_initial_view_refuses_an_undecodable_record() {
-    let records = [zeroize::Zeroizing::new(vec![0xff])];
-    assert!(CommunitySelectedViewV1::initial(hash(1), &records).is_err());
-}
-
-/// A graph with no `StateRevision` CMI1 gives no head ref.
-#[test]
-fn an_initial_view_needs_a_state_revision() {
-    assert_eq!(
-        CommunitySelectedViewV1::initial(hash(1), &[]).err(),
-        Some(Error::EvidenceUnavailable)
-    );
 }

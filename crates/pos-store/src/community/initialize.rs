@@ -835,6 +835,8 @@ impl MemoryCommunityDomainV1 {
             .and_then(|(selection, receipt)| {
                 CommunitySelectedViewV1::initial(
                     graph.selected_head_digest(),
+                    records.request(),
+                    &graph,
                     &evidenced.materializations,
                 )
                 .map(|selected_view| (selection, receipt, selected_view))

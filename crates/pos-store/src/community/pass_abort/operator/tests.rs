@@ -8,7 +8,8 @@ use pos_core::community_lifecycle::{
     CommunityAbortReasonV1 as Reason, CommunityAbortV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1,
     CommunityAuthorityViewRowV1, CommunityCurrentViewV1, CommunityDurableProfileV1,
-    CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1,
+    CommunityInitializationRequestV1, CommunityKeyIntentInputV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1, CommunityMemberSlotsV1,
     CommunityMetadataPolicyV1, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
     CommunityMetadataScopeV1, CommunityPassFrontierV1, CommunityPassKeyV1,
     CommunityProfileMemberV1, CommunityRecordKindsV1, CommunityReservationInputV1,
@@ -20,7 +21,9 @@ use zeroize::Zeroizing;
 use super::{
     CommunityPassAbortCallV1, CommunityPassAbortReceiptV1, PreparedAbortV1, StagedPassAbortV1,
 };
-use crate::community::current_view_head::tests::{simulate_commit, state_revisions, views_agree};
+use crate::community::current_view_head::tests::{
+    opened_records, simulate_commit, state_revisions, views_agree,
+};
 use crate::community::current_view_head::CommunitySelectedViewV1;
 use crate::community::erasure_budget::CommunityPendingReservationV1;
 use crate::community::pass_record::{
@@ -578,6 +581,46 @@ fn an_abort_states_the_first_members_state_revision() -> TestResult {
         CommunityPassFrontierV1::Initial
     ));
     assert!(view.as_input().selected_head == Some(refs[0]));
+    Ok(())
+}
+
+/// R16.5(4): the head ref is the CSR1 of the CGI1's first listed member. The
+/// fixture builds the graph in the CGI1's order (`check_input` requires it),
+/// so the check reads the CGI1 from the sealed records and takes that
+/// member's slot, then the CSR1 `at` finds in the CMI1 list: the first
+/// member's, not the second's. A wrong index is refused.
+#[test]
+fn the_head_ref_is_the_cgi1_first_members_state_revision() -> TestResult {
+    let case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    let opened = opened_records(case.domain())?;
+    let request = opened
+        .iter()
+        .find_map(|bytes| CommunityInitializationRequestV1::from_canonical_cbor(bytes).ok())
+        .ok_or("no CGI1")?;
+    assert_eq!(request.as_input().member_binding_digests.len(), 2);
+    let cmis: Vec<Zeroizing<Vec<u8>>> = opened
+        .into_iter()
+        .filter(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes).is_ok())
+        .collect();
+    assert_eq!(cmis.len(), 10);
+    let head = hash(1);
+    let first = CommunitySelectedViewV1::at(head, 2, &cmis)?;
+    let second = CommunitySelectedViewV1::at(head, 7, &cmis)?;
+    assert!(first.head_ref == refs[0] && second.head_ref == refs[1]);
+    let selected = case
+        .domain()
+        .selected_views
+        .get(&target())
+        .ok_or("no selected view")?;
+    assert!(selected.head_ref == first.head_ref && selected.head_ref != second.head_ref);
+    for index in [0, 1, 3, 4, 99] {
+        assert_eq!(
+            CommunitySelectedViewV1::at(head, index, &cmis).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    assert!(CommunitySelectedViewV1::at(head, 0, &[Zeroizing::new(vec![0xff])]).is_err());
     Ok(())
 }
 

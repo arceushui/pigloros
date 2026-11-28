@@ -13,13 +13,15 @@
 //!   present, and is not repeated when another row has its key.
 
 use pos_core::community_lifecycle::{
-    CommunityAuthorityViewRowV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityPassFrontierV1,
+    CommunityAuthorityViewRowV1, CommunityInitializationRequestV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationReferenceV1,
+    CommunityMaterializationV1, CommunityPassFrontierV1,
 };
 use pos_core::{AuthorizationRequestV1, Hash, TimelineId};
 use zeroize::Zeroizing;
 
 use super::memory_domain::MemoryCommunityDomainV1;
+use super::native_graph::CommunityInitializationGraphV1;
 use super::store_domain::CommunityStoreDomainV1;
 
 /// The record magic of a `StateRevision` COW1.
@@ -45,24 +47,52 @@ pub(super) struct CommunitySelectedViewV1 {
 
 impl CommunitySelectedViewV1 {
     /// The initialization head's view: `head_digest`, the `Initial` frontier
-    /// and the CMI1 reference of the first CSR1 among `materializations`.
-    /// They are in graph order, which is roster order (per slot: CSC1, CIS1,
-    /// CSR1, two CPN1s), so the first CSR1 is the first roster member's.
+    /// and the CMI1 reference of the CSR1 of the first member the CGI1
+    /// `cgi1` lists (`ordered_CMB1_digests[0]`), found in `graph` by its
+    /// CMB1 digest; `materializations` hold the graph's CMI1s in record
+    /// order.
     ///
     /// # Errors
-    /// Returns the CMI1 codec refusal of any record, and
-    /// `EvidenceUnavailable` when no CMI1 is a CSR1's.
+    /// Returns the CGI1 and CMI1 codec refusals, and `EvidenceUnavailable`
+    /// for an empty list, a member the graph does not hold and a record that
+    /// is not a CSR1's.
     pub(super) fn initial(
         head_digest: Hash,
+        cgi1: &[u8],
+        graph: &CommunityInitializationGraphV1,
+        materializations: &[Zeroizing<Vec<u8>>],
+    ) -> Result<Self, Error> {
+        CommunityInitializationRequestV1::from_canonical_cbor(cgi1)
+            .and_then(|request| {
+                request
+                    .as_input()
+                    .member_binding_digests
+                    .iter()
+                    .next()
+                    .and_then(|first| graph.state_revision_index(first))
+                    .ok_or(Error::EvidenceUnavailable)
+            })
+            .and_then(|index| Self::at(head_digest, index, materializations))
+    }
+
+    /// The view whose head ref is the CSR1 CMI1 at `index` of
+    /// `materializations`.
+    ///
+    /// # Errors
+    /// Returns the CMI1 codec refusal, and `EvidenceUnavailable` for an
+    /// index out of range and a record that is not a CSR1's.
+    pub(super) fn at(
+        head_digest: Hash,
+        index: usize,
         materializations: &[Zeroizing<Vec<u8>>],
     ) -> Result<Self, Error> {
         materializations
-            .iter()
-            .map(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes))
-            .collect::<Result<Vec<_>, Error>>()
-            .and_then(|all| {
-                all.into_iter()
-                    .find(|materialization| materialization.as_input().record_magic == CSR1)
+            .get(index)
+            .ok_or(Error::EvidenceUnavailable)
+            .and_then(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes))
+            .and_then(|materialization| {
+                Some(materialization)
+                    .filter(|materialization| materialization.as_input().record_magic == CSR1)
                     .map(|materialization| Self {
                         head_digest,
                         frontier: CommunityPassFrontierV1::Initial,
