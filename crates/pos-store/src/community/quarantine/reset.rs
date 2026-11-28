@@ -13,7 +13,11 @@
 //!    member's current release (a revoked release stays denied);
 //! 4. the generation (5) and head (6), the member of that generation (12),
 //!    no unresolved pass of T (7), the quarantine index row (12 when there
-//!    is none) and its ledger digest and complete reason set (4).
+//!    is none), its ledger digest and complete reason set (4) and then the
+//!    erasure budget for the re-armed `F_q` shares (14, never for a reset
+//!    that re-arms none). The text gives no order between the budget and the
+//!    records' codec refusals, which are unreachable for a valid call; the
+//!    budget comes first, before any record is built.
 //!
 //! The reset never reads the evidence of a reason it clears (R15.2(1)): the
 //! expected ledger digest and reason set are compared with the domain-private
@@ -128,7 +132,9 @@ impl MemoryCommunityDomainV1 {
     /// admit (a revoked one stays denied), a CQK1 with no CMB1 in the
     /// generation and no index row; `StaleGeneration` and `StaleFrontier`
     /// for a moved generation or head; `PassUnresolved` while T has an
-    /// unresolved pass; and the codec refusals.
+    /// unresolved pass; `CapacityExhausted` (14) when re-arming the spent
+    /// `F_q` shares does not fit the erasure budget of T's scope (the
+    /// quarantine stays, R13.1(3)); and the codec refusals.
     pub fn reset_quarantine(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
@@ -182,17 +188,17 @@ impl MemoryCommunityDomainV1 {
             .quarantine_index
             .get(&cqk1.digest())
             .ok_or(Error::EvidenceUnavailable)?;
-        if current.head != call.expected_ledger_digest || !same_reasons(current, call) {
+        if !is_current(current, call) {
             return Err(Error::Conflict);
         }
-        reset_records(context, call, (cqk1, &member), current).map(|records| ResetPremisesV1 {
-            records,
-            spent: current
-                .states
-                .values()
-                .filter(|state| state.share_spent)
-                .count() as u64,
-        })
+        let spent = current
+            .states
+            .values()
+            .filter(|state| state.share_spent)
+            .count() as u64;
+        self.check_rearm_budget(call.timeline, spent)?;
+        reset_records(context, call, (cqk1, &member), current)
+            .map(|records| ResetPremisesV1 { records, spent })
     }
 
     /// The re-verification under the guard: the retained TPS1 is the call's
@@ -266,6 +272,11 @@ fn reset_bound(call: &CommunityQuarantineResetCallV1<'_>, key: Hash) -> ResetBou
         authorization_ref: call.authorization_ref,
         authorization_not_after_micros: call.authorization_not_after_micros,
     }
+}
+
+/// Whether the call expects the ledger's head and its active set exactly.
+fn is_current(current: &QuarantineLedgerV1, call: &CommunityQuarantineResetCallV1<'_>) -> bool {
+    current.head == call.expected_ledger_digest && same_reasons(current, call)
 }
 
 /// Whether the call's expected reasons are the ledger's active set exactly:
