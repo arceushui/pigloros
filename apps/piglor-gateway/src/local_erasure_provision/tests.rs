@@ -377,8 +377,6 @@ fn a_provisioned_bundle_signed_by_its_root_composes() -> TestResult {
     Ok(())
 }
 
-/// Owner decision Q15: a routine rotation re-runs provisioning with a new
-/// credential at a higher epoch, through the raw store only.
 #[test]
 fn a_routine_rotation_registers_the_next_signer_epoch() -> TestResult {
     let deployment = Deployment::new(&[])?;
@@ -402,8 +400,6 @@ fn a_routine_rotation_registers_the_next_signer_epoch() -> TestResult {
     assert_eq!(decoded.signer_key_id, signer_key_id(ROTATED_SEED));
     assert_eq!(fixture.compose(&deployment, &rotated)?, None);
 
-    // Two stores provisioned from one document get different identities,
-    // so different bundles (ADR-136 Q16).
     let sibling = Fixture::new(true)?;
     let other = provision_local_erasure(
         &sibling.request("a"),
@@ -963,8 +959,6 @@ impl Fixture {
     }
 }
 
-/// Owner decision Q15: a routine rotation on a store that holds an erasure
-/// request opens no host, so it succeeds through the raw store.
 #[test]
 fn a_rotation_on_a_store_holding_a_request_needs_no_host() -> TestResult {
     let deployment = Deployment::new(&[])?;
@@ -1114,11 +1108,6 @@ fn a_run_interrupted_after_the_signer_registration_completes() -> TestResult {
     Ok(())
 }
 
-/// Owner decision of 2026-11-18 on #1431: a re-run with the registered key
-/// is unchanged; a compromise registers a new key only once the installed
-/// TPS1 revokes the old one. A routine rotation while a request pins a
-/// bundle is refused by the same rule, which the pos-runtime composition
-/// tests drive with a pinned request.
 #[test]
 fn a_new_signer_key_is_registered_only_as_the_tps1_allows() -> TestResult {
     let deployment = Deployment::new(&[])?;

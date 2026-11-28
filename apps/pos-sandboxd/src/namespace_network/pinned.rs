@@ -1,6 +1,5 @@
 //! Named network namespaces, each pinned by a bind mount of its namespace
-//! file under one directory, as iproute2 pins them under `/run/netns`
-//! (#911, owner decision 2026-11-09).
+//! file under one directory, as iproute2 pins them under `/run/netns`.
 //!
 //! A namespace is created on a dedicated thread that unshares its network
 //! namespace, so no other thread, and no process, ever enters it. Creation

@@ -168,7 +168,7 @@ pub struct MountfsdImageActivator {
 }
 
 impl MountfsdImageActivator {
-    /// Owner decision Q7.4: one `MountImage` transaction is bounded to 60 s.
+    /// Maximum duration of one `MountImage` transaction.
     pub(crate) const DEADLINE: Duration = Duration::from_mins(1);
 
     /// Connect to the fixed mountfsd socket and require a root peer.

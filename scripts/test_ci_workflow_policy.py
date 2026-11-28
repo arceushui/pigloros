@@ -508,11 +508,17 @@ RUST_PACKAGES_SCOPE_STEP = {
         'printf \'Rust packages: %s\\nDoctest packages: %s\\n\' "${packages}" "${doc_packages}"\n'
         'printf \'rust_packages=%s\\n\' "${packages}" >> "$GITHUB_OUTPUT"\n'
         'printf \'rust_doc_packages=%s\\n\' "${doc_packages}" >> "$GITHUB_OUTPUT"\n'
+        'if [[ " ${packages} " == *" -p pos-conformance "* || "${packages}" == --workspace ]]; then\n'
+        '  printf \'conformance=true\\n\' >> "$GITHUB_OUTPUT"\n'
+        'else\n'
+        '  printf \'conformance=false\\n\' >> "$GITHUB_OUTPUT"\n'
+        'fi\n'
     ),
 }
 RUST_PACKAGES_OUTPUTS = {
     "rust_packages": "${{ steps.rust_packages.outputs.rust_packages }}",
     "rust_doc_packages": "${{ steps.rust_packages.outputs.rust_doc_packages }}",
+    "conformance": "${{ steps.rust_packages.outputs.conformance }}",
 }
 CORE_JOB_NEEDS = stages.PREFLIGHT_STAGE_NEEDS
 CORE_JOB_IF = stages.PREFLIGHT_STAGE_IF
@@ -2310,12 +2316,17 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             arguments = calls.read_text(encoding="utf-8").split("\0")[:-1] if calls.exists() else []
             return values, arguments, completed.stdout
 
-    FULL_SCOPE = {"rust_packages": "--workspace", "rust_doc_packages": "--workspace"}
+    FULL_SCOPE = {
+        "rust_packages": "--workspace",
+        "rust_doc_packages": "--workspace",
+        "conformance": "true",
+    }
 
     def test_package_scope_selects_affected_members_on_a_pull_request(self) -> None:
         values, calls, _ = self.resolve_package_scope()
         self.assertEqual(values, {"rust_packages": "-p a -p b -p c",
-                                  "rust_doc_packages": "-p a -p b"})
+                                  "rust_doc_packages": "-p a -p b",
+                                  "conformance": "false"})
         self.assertEqual(calls, [
             "api", "--method", "GET", "--paginate", "-f", "per_page=100",
             "repos/owner/repository/pulls/848/files",
@@ -2323,7 +2334,23 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         ])
         values, _, _ = self.resolve_package_scope(
             listing='{"filename":"apps/c/src/main.rs"}\n')
-        self.assertEqual(values, {"rust_packages": "-p c", "rust_doc_packages": "none"})
+        self.assertEqual(values, {"rust_packages": "-p c", "rust_doc_packages": "none",
+                                  "conformance": "false"})
+
+    def test_package_scope_marks_only_the_exact_conformance_package(self) -> None:
+        for packages, expected in (
+            ("-p pos-conformance", "true"),
+            ("-p pos-conformance-extra", "false"),
+        ):
+            with self.subTest(packages=packages):
+                values, _, _ = self.resolve_package_scope(
+                    python_stub=(
+                        "printf 'rust_packages=" + packages
+                        + "\\nrust_doc_packages=none\\n'\n"
+                    )
+                )
+                self.assertEqual(values["rust_packages"], packages)
+                self.assertEqual(values["conformance"], expected)
 
     def test_package_scope_runs_the_workspace_whenever_unsure(self) -> None:
         for label, overrides in (
