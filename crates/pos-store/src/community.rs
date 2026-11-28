@@ -43,9 +43,9 @@ mod store_domain;
 mod vault;
 
 pub use extractor::{
-    prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
-    CommunityArtifactBatchInputV1, CommunityArtifactBatchV1, CommunityArtifactRecordInputV1,
-    CommunityControlBatchInputV1,
+    prepare_community_artifact_batch_v1, prepare_community_pass_control_batch_v1,
+    CommunityArtifactBatchFormV1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
+    CommunityArtifactRecordInputV1, CommunityControlBatchInputV1, CommunityPassControlBatchInputV1,
 };
 #[cfg(target_os = "linux")]
 pub use initialize::{
@@ -76,7 +76,11 @@ pub use observation::{
     CommunityObservationRecordsV1, CommunityObservationSourcesV1,
 };
 #[cfg(target_os = "linux")]
-pub use pass_abort::{CommunityPassAbortCallV1, CommunityPassAbortReceiptV1};
+pub use pass_abort::{
+    CommunityObservedFailureV1, CommunityPassAbortCallV1, CommunityPassAbortFailureCallV1,
+    CommunityPassAbortFailureInputV1, CommunityPassAbortFailureV1, CommunityPassAbortReceiptV1,
+    CommunityPassAbortScopeV1,
+};
 pub use pass_install::{
     community_reservation_horizons_v1, community_reuse_horizon_v1,
     community_roster_quarantine_keys_v1, install_community_pass_profile_v1,
@@ -119,5 +123,5 @@ pub use protection::{
 pub use quarantine::{
     CommunityPreExecutionFailureInputV1, CommunityPreExecutionFailureV1,
     CommunityPreExecutionTrustV1, CommunityQuarantineContextV1, CommunityQuarantineReceiptV1,
-    CommunitySetReasonCallV1,
+    CommunityQuarantineResetCallV1, CommunitySetReasonCallV1,
 };

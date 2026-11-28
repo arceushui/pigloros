@@ -116,20 +116,20 @@ impl StartedProviderUnit {
     }
 }
 
-/// The directory of the SIC1 kind-11 provider binaries (ADR-069 R11 §5.2).
+/// Directory containing the SIC1 kind-11 provider binaries.
 const PROVIDER_BINARY_DIRECTORY: &str = "/var/lib/pigloros/sandbox/providers/";
-/// The provider daemon mode's only argument (ADR-069 R11 §5.1 step 1).
+/// The provider daemon mode's only argument.
 pub(crate) const PROVIDER_RUNTIME_ARGUMENT: &str = "provider-runtime";
-/// The runtime's start-to-`READY=1` bound, 30 s (R11 §5.2, owner decision O7).
+/// The runtime's start-to-`READY=1` bound: 30 seconds.
 const PROVIDER_RUNTIME_START_TIMEOUT_USEC: u64 = 30_000_000;
-/// The recovery peer's start-to-`READY=1` bound, 5 s (R12 §7.3, O2).
+/// The recovery peer's start-to-`READY=1` bound: 5 seconds.
 const RECOVERY_PEER_START_TIMEOUT_USEC: u64 = 5_000_000;
-/// The recovery peer's whole lifetime, 5 s + 100 ms + 5 s, as defense in
-/// depth only (R12 §7.3 item 2).
+/// The recovery peer's whole lifetime: 5 seconds + 100 milliseconds +
+/// 5 seconds, as defense in depth.
 const RECOVERY_PEER_RUNTIME_MAX_USEC: u64 = 10_100_000;
 /// Owner-only files and directories (R11 §5.2, owner decision O9).
 const PROVIDER_UNIT_UMASK: u32 = 0o077;
-/// The runtime unit's control group, `/system.slice/<unit>` (R12 §7.1 step 8).
+/// The runtime unit's control group, `/system.slice/<unit>`.
 const SYSTEM_SLICE: &str = "/system.slice/";
 
 /// The exact property set of one provider unit: the runtime unit or the

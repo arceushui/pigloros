@@ -1,12 +1,11 @@
 #![cfg(all(target_os = "linux", any(test, feature = "test-support")))]
-//! ADR-123 §3a quiescent installation of the coordination child.
+//! Quiescent installation of the coordination child.
 //!
-//! This is the one step that creates the coordination child and its §3b
+//! This is the one step that creates the coordination child and its
 //! reserved entries; participants such as
 //! [`crate::owner_store_interlock::OwnerStoreFileInterlockV1`] only open them.
-//! In Wave 9 it stays test-support gated (ADR-123 G13): no deployable build can
-//! install a store that no ungated participant could open. It grants no store,
-//! key or consent authority and never opens `SQLite`.
+//! This module is available only in tests and `test-support` builds. It grants
+//! no store, key or consent authority and never opens `SQLite`.
 
 use std::io::Read;
 use std::path::Path;
@@ -38,11 +37,11 @@ pub enum OwnerStoreInstallationV1 {
 }
 
 /// Install the coordination child of the main file `main_basename` in an
-/// explicit private test database directory (ADR-123 §3a).
+/// explicit private test database directory.
 ///
 /// The caller is the operator's offline installation step. It asserts that no
 /// participant or ordinary process has the store open, and it must hold the
-/// ADR-134 §8 sibling Gateway mode lock exclusively for the whole call,
+/// sibling Gateway mode lock exclusively for the whole call,
 /// refusing on contention. This function does not take or check that lock:
 /// it lives in the Gateway, whose installation command takes it.
 ///

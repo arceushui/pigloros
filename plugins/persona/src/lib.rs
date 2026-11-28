@@ -193,11 +193,7 @@ impl InstalledPluginFactoryV1 for PersonaPlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PersonaModel
-// ---------------------------------------------------------------------------
-
-/// A simple preference model (stub for Wave 5).
+/// Scores options against weighted preferences.
 ///
 /// Stores a list of (dimension, score) pairs and scores options by matching
 /// dimension names in the option strings.
@@ -355,10 +351,6 @@ impl Driver for PersonaEvalDriver {
         Ok(StepOutput::new(vec![decision, source]))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

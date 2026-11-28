@@ -552,6 +552,7 @@ fn the_writer_refuses_in_the_step_5j_order() -> TestResult {
                 failure_evidence_digest: hash(42),
             }],
             evidence_not_after_micros: RECORDING,
+            states: BTreeMap::new(),
         },
     );
     domain.pass_states.entry(id(1)).and_modify(|state| {
@@ -604,6 +605,7 @@ fn only_an_active_reason_quarantines() -> TestResult {
         ordinal: 1,
         reasons,
         evidence_not_after_micros: RECORDING,
+        states: BTreeMap::new(),
     };
     domain.quarantine_index.insert(hash(50), ledger(Vec::new()));
     assert!(domain.stage_reserve(input()?).is_ok());

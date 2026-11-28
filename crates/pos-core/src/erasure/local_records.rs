@@ -1424,11 +1424,10 @@ local_record_api!(LocalErasureNegativeResultV1);
 
 /// ELRP1, the durable owner effect of one positive local-replica purge.
 ///
-/// `["ELRP1", 1, request, command, replica_id]`, at most 1 KiB. ELRP1 is a
-/// NEW tag by owner decision Q3 on #1412 (2026-11-17), pending its ADR-136
-/// amendment. The purge runs outside every transaction, because VACUUM
-/// cannot run inside one, so ELRP1 and its ELO1 commit together right after
-/// a successful purge; a crash between the two re-runs the idempotent purge.
+/// `["ELRP1", 1, request, command, replica_id]`, at most 1 KiB. The purge
+/// runs outside every transaction because `SQLite` `VACUUM` cannot run inside
+/// one. ELRP1 and its ELO1 commit together right after a successful purge; a
+/// crash between the two re-runs the idempotent purge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalErasureReplicaPurgeV1 {
     /// The ERQ1 request.
