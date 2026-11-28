@@ -188,6 +188,8 @@ mod local_replica_residual;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub(crate) mod owner_store_binding;
 mod pipeline_admission;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod subject_key_staging;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
 #[cfg(target_os = "linux")]
@@ -2373,6 +2375,8 @@ impl SqliteStore {
                     self.prepare_subject_key_deletion_schema()?;
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_consent_revocation_journal_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_key_staging_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
