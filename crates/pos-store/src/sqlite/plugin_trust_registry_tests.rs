@@ -1427,10 +1427,12 @@ fn a_retained_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> T
         });
         flag.store(admitted, Ordering::SeqCst);
     });
+    let (ptr1, prv1) = genesis.histories();
     let retained = |manifest: &ManifestSpec| -> TestResult<_> {
         Ok(h.store.evaluate_retained_release(
             "scope",
-            &genesis.evidence,
+            &ptr1,
+            &prv1,
             &manifest.projection()?,
             genesis.trusted()?,
             genesis.tick,

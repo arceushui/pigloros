@@ -10,8 +10,8 @@
 
 use crate::fixtures::{
     activation, bound_store, foreign_operator_signer, release_one, release_two, spec,
-    tps1_signed_by, tps_after, trusted, Env, Harness, ManifestSpec, Material, Registry,
-    RegistryError, Spec, TestResult, TpsSpec,
+    tps1_signed_by, tps_after, Env, Harness, ManifestSpec, Material, Registry, RegistryError, Spec,
+    TestResult, TpsSpec,
 };
 use pos_conformance::{PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1};
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
@@ -799,9 +799,11 @@ fn retained(
     material: &Material,
     manifest: &ManifestSpec,
 ) -> TestResult<Registry<CurrentReleaseEvaluationV1>> {
+    let (ptr1, prv1) = material.histories();
     Ok(h.store.evaluate_retained_release(
         "scope",
-        &material.evidence,
+        &ptr1,
+        &prv1,
         &manifest.projection()?,
         material.trusted()?,
         material.tick,
@@ -843,11 +845,13 @@ fn a_retained_evaluation_follows_an_adopted_policy() -> TestResult {
 fn a_scope_that_is_not_installed_is_missing_state() -> TestResult {
     let (store, _timeline, _guard) = bound_store::<Store>()?;
     let genesis = Env::new("scope")?.genesis()?;
+    let (ptr1, prv1) = genesis.histories();
     let one = release_one();
     assert_eq!(
         store.evaluate_retained_release(
             "scope",
-            &genesis.evidence,
+            &ptr1,
+            &prv1,
             &one.projection()?,
             genesis.trusted()?,
             genesis.tick,
@@ -855,12 +859,13 @@ fn a_scope_that_is_not_installed_is_missing_state() -> TestResult {
         Err(RegistryError::MissingState)
     );
     let h = admitted()?;
-    // On purpose the evidence is the one built for scope "scope": the scope name is the caller's
-    // choice, and a scope that is not installed is reported before any evidence check.
+    // On purpose the histories are the ones built for scope "scope": the scope name is the
+    // caller's choice, and a scope that is not installed is reported before any evidence check.
     assert_eq!(
         h.store.evaluate_retained_release(
             "other",
-            &genesis.evidence,
+            &ptr1,
+            &prv1,
             &one.projection()?,
             genesis.trusted()?,
             genesis.tick,
@@ -901,8 +906,8 @@ fn a_retained_evaluation_refuses_what_the_supplied_one_refuses() -> TestResult {
         retained(&h, &at_sixty, &short_lived)?,
         Err(trust(PluginTrustErrorV1::ManifestExpired))
     );
-    // A UTC second below the retained highest, an unauthorized release, and evidence built at
-    // other coordinates than the call.
+    // A UTC second below the retained highest, an unauthorized release, and histories that do
+    // not chain to the retained root pin (the genesis PTR1 left out).
     let h = admitted()?;
     let genesis = h.env.genesis()?;
     assert_eq!(
@@ -913,15 +918,20 @@ fn a_retained_evaluation_refuses_what_the_supplied_one_refuses() -> TestResult {
         retained(&h, &genesis, &unauthorized())?,
         Err(trust(PluginTrustErrorV1::PluginIdNotGranted))
     );
-    assert_eq!(
+    let longer = h
+        .env
+        .material(&spec(2, 2).at(50, 5), &tps_after(&genesis))?;
+    let (ptr1, prv1) = longer.histories();
+    assert!(matches!(
         h.store.evaluate_retained_release(
             "scope",
-            &genesis.evidence,
+            ptr1.get(1..).ok_or("no tail")?,
+            &prv1,
             &one.projection()?,
-            trusted(51)?,
-            genesis.tick,
+            longer.trusted()?,
+            longer.tick,
         ),
-        Err(bridge(PluginTrustBridgeErrorV1::EvaluationUtcMismatch))
-    );
+        Err(RegistryError::Trust(_))
+    ));
     Ok(())
 }

@@ -554,7 +554,8 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
     fn evaluate_retained_release(
         &self,
         scope: &str,
-        evidence: &VerifiedPluginTrustEvidenceV1,
+        ptr1_histories: &[&[u8]],
+        prv1_histories: &[&[u8]],
         projection: &ValidatedPluginManifestProjectionV1,
         trusted_utc: TrustedUtcSecondV1,
         tick: u64,
@@ -564,7 +565,7 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
                 plan_evaluate_retained(
                     transaction,
                     scope,
-                    evidence,
+                    (ptr1_histories, prv1_histories),
                     (trusted_utc, tick),
                     projection,
                 )
