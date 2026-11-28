@@ -250,3 +250,24 @@ pub fn network_escape(targets: &Targets<'_>) -> Vec<Attempt> {
 pub fn foreign_signals(last: u32) -> Vec<Attempt> {
     (1..=last).map(signal_foreign).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_or_silence_after_a_send_reached_a_receiver_and_a_refusal_did_not() {
+        assert!(answered_or_silent(Ok(5)).is_ok());
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            assert!(answered_or_silent(Err(kind.into())).is_ok(), "{kind:?}");
+        }
+        for kind in [
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NetworkUnreachable,
+        ] {
+            let error = answered_or_silent(Err(kind.into()));
+            assert_eq!(error.map_err(|error| error.kind()), Err(kind));
+        }
+    }
+}

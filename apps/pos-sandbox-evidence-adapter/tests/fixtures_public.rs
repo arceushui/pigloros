@@ -211,12 +211,9 @@ fn network_probes_follow_what_listens() -> TestResult {
     });
     assert!(udp_exchange(&echo_address).is_ok());
     server.join().map_err(|_| "echo thread panicked")??;
-    assert!(udp_exchange(&echo_address).is_err());
-    let unbound = {
-        let socket = UdpSocket::bind("127.0.0.1:0")?;
-        socket.local_addr()?
-    };
-    assert!(udp_exchange(&unbound).is_err());
+    // Whether a datagram to a closed port is refused (an ICMP error that a
+    // connected socket reads as ECONNREFUSED) depends on the host, so the
+    // refusal is tested on the classification of the reply, in probe.rs.
     // A receiver that takes the datagram and never answers is reached: an
     // escape, not a denial.
     let silent = UdpSocket::bind("127.0.0.1:0")?;
