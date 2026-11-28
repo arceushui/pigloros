@@ -291,17 +291,12 @@ impl CommunityInitializationGraphV1 {
     /// digest is `member_binding`: the CSR1 of its slot.
     #[cfg(target_os = "linux")]
     pub(super) fn state_revision_index(&self, member_binding: Hash) -> Option<usize> {
-        self.member_bindings
+        let magics: Vec<[u8; 4]> = self
+            .records
             .iter()
-            .position(|digest| *digest == member_binding)
-            .and_then(|slot| {
-                self.records
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, record)| record.record_magic == *b"CSR1")
-                    .nth(slot)
-                    .map(|(index, _)| index)
-            })
+            .map(|record| record.record_magic)
+            .collect();
+        state_revision_slot(&self.member_bindings, &magics, member_binding)
     }
 
     /// Every protected record: per slot, CSC1, CIS1, CSR1 and the
@@ -786,6 +781,28 @@ fn finish(
                         })
                     })
                 })
+        })
+}
+
+/// The index of the CSR1 of the slot of `member_binding` among `magics`, the
+/// record magics in graph order: `bindings` lists each slot's CMB1 digest,
+/// and every slot has exactly one CSR1, in slot order.
+#[cfg(target_os = "linux")]
+fn state_revision_slot(
+    bindings: &[Hash],
+    magics: &[[u8; 4]],
+    member_binding: Hash,
+) -> Option<usize> {
+    bindings
+        .iter()
+        .position(|digest| *digest == member_binding)
+        .and_then(|slot| {
+            magics
+                .iter()
+                .enumerate()
+                .filter(|(_, magic)| **magic == *b"CSR1")
+                .nth(slot)
+                .map(|(index, _)| index)
         })
 }
 
