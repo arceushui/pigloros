@@ -35,6 +35,8 @@ const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition
 
 type TestResult = Fallible<()>;
 
+mod limits;
+
 /// The staged commit of a new `SetReason` for `claim` under the default
 /// profile.
 fn staged(case: &mut QuarantineCase, claim: Claim<'_>) -> Fallible<StagedSetReasonV1> {
