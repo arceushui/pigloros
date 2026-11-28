@@ -193,6 +193,8 @@ mod plugin_trust_registry_rows;
 mod plugin_trust_registry_schema;
 mod registry_durability;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod subject_append_receipts;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod subject_key_deletion;
 
 use fork_code_two_read::{
@@ -2351,6 +2353,8 @@ impl SqliteStore {
                     self.prepare_erasure_fence_rows_schema()?;
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_subject_key_deletion_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_append_receipts_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
