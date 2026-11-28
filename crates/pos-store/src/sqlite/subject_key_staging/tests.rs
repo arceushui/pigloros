@@ -12,7 +12,8 @@ use rusqlite::{params, types::Value, Connection};
 
 use super::{
     sealed, PendingKeyDestructionsV1, SubjectKeyLifecycleV1 as Lifecycle,
-    SubjectKeyStagingRecordV1, MAX_STAGING_RECORDS, OUTCOME_UNKNOWN, REFUSED,
+    SubjectKeyStagingRecordV1, MAX_STAGING_RECORDS, OUTCOME_UNKNOWN, OWNER_SIGNING_OWNER_ID,
+    OWNER_SIGNING_ROLE, REFUSED,
 };
 use crate::sqlite::{SqliteStore, FAIL_BEGIN_IMMEDIATE};
 
@@ -795,43 +796,107 @@ fn startup_destruction_recovery_lists_every_pending_subject_key() -> TestResult 
     Ok(())
 }
 
+fn owner_signing(epoch: u64) -> IdentityResult {
+    key_identity(OWNER_SIGNING_OWNER_ID, OWNER_SIGNING_ROLE, epoch)
+}
+
+fn request_of(identity: KeyIdentityV1, seed: u8) -> KeyDestructionRequestV1 {
+    KeyDestructionRequestV1::new(identity, digest(seed), digest(200))
+}
+
+fn sorted_signing(store: &SqliteStore) -> Result<Vec<KeyDestructionRequestV1>, CoreError> {
+    let mut keys = store.pending_subject_key_destructions()?.signing_keys;
+    keys.sort_by_key(|request| request.identity.epoch);
+    Ok(keys)
+}
+
 #[test]
-fn startup_destruction_recovery_lists_every_pending_signing_key() -> TestResult {
+fn the_owner_signing_identity_is_the_fixed_adr_137_pair() {
+    assert_eq!(OWNER_SIGNING_OWNER_ID, "piglor-owner");
+    assert_eq!(OWNER_SIGNING_ROLE, KeyRoleV1::TimelineIntegritySigning);
+}
+
+#[test]
+fn no_pending_owner_signing_request_lists_nothing() -> TestResult {
     let mut store = registry_store()?;
-    let first = key_identity("piglor-owner", KeyRoleV1::TimelineIntegritySigning, 1)?;
-    let second = key_identity("bundle-signer", KeyRoleV1::TimelineIntegritySigning, 2)?;
-    pend(&mut store, first, 51)?;
-    pend(&mut store, second, 52)?;
-    // Another role under either owner id is not a timeline signing key.
-    pend(
-        &mut store,
-        key_identity("piglor-owner", KeyRoleV1::PluginReleaseSigning, 1)?,
-        53,
-    )?;
-    pend(
-        &mut store,
-        key_identity("bundle-signer", KeyRoleV1::ExportRecipientEncryption, 1)?,
-        54,
-    )?;
-    let mut pending = store.pending_subject_key_destructions()?;
-    assert!(pending.subject_keys.is_empty());
-    pending
-        .signing_keys
-        .sort_by_key(|request| request.identity.epoch);
+    assert!(sorted_signing(&store)?.is_empty());
+    register_identity(&mut store, owner_signing(1)?, 50)?;
+    assert!(sorted_signing(&store)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn every_epoch_of_the_owner_signing_identity_is_listed() -> TestResult {
+    let mut store = registry_store()?;
+    pend(&mut store, owner_signing(3)?, 53)?;
+    pend(&mut store, owner_signing(1)?, 51)?;
+    pend(&mut store, owner_signing(2)?, 52)?;
     assert_eq!(
-        pending.signing_keys,
+        sorted_signing(&store)?,
         vec![
-            KeyDestructionRequestV1::new(first, digest(51), digest(200)),
-            KeyDestructionRequestV1::new(second, digest(52), digest(200)),
+            request_of(owner_signing(1)?, 51),
+            request_of(owner_signing(2)?, 52),
+            request_of(owner_signing(3)?, 53),
         ]
     );
+    Ok(())
+}
 
-    // The subject-key group is unaffected by the signing requests.
+#[test]
+fn another_owner_id_with_the_signing_role_is_excluded() -> TestResult {
+    let mut store = registry_store()?;
+    pend(&mut store, owner_signing(1)?, 51)?;
+    pend(
+        &mut store,
+        key_identity("bundle-signer", OWNER_SIGNING_ROLE, 2)?,
+        52,
+    )?;
+    assert_eq!(
+        sorted_signing(&store)?,
+        vec![request_of(owner_signing(1)?, 51)]
+    );
+    Ok(())
+}
+
+#[test]
+fn the_owner_id_with_another_role_is_excluded() -> TestResult {
+    let mut store = registry_store()?;
+    pend(&mut store, owner_signing(1)?, 51)?;
+    pend(
+        &mut store,
+        key_identity(OWNER_SIGNING_OWNER_ID, KeyRoleV1::PluginReleaseSigning, 2)?,
+        52,
+    )?;
+    pend(
+        &mut store,
+        key_identity(
+            OWNER_SIGNING_OWNER_ID,
+            KeyRoleV1::ExportRecipientEncryption,
+            3,
+        )?,
+        53,
+    )?;
+    assert_eq!(
+        sorted_signing(&store)?,
+        vec![request_of(owner_signing(1)?, 51)]
+    );
+    Ok(())
+}
+
+#[test]
+fn both_groups_are_listed_together_and_independently() -> TestResult {
+    let mut store = registry_store()?;
+    pend(&mut store, owner_signing(1)?, 51)?;
+    pend(
+        &mut store,
+        key_identity("bundle-signer", OWNER_SIGNING_ROLE, 2)?,
+        52,
+    )?;
     register_directly(&mut store, &owner(3), 1, 61)?;
     let subject = begin_destruction(&mut store, &owner(3), 1, 61)?;
     let both = store.pending_subject_key_destructions()?;
     assert_eq!(both.subject_keys, vec![subject]);
-    assert_eq!(both.signing_keys.len(), 2);
+    assert_eq!(both.signing_keys, vec![request_of(owner_signing(1)?, 51)]);
     Ok(())
 }
 
