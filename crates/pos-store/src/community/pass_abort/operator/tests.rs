@@ -567,6 +567,12 @@ fn an_abort_states_the_first_members_state_revision() -> TestResult {
         CommunityPassFrontierV1::Initial
     ));
     assert!(selected.head_ref == refs[0]);
+    let state = case
+        .domain()
+        .pass_states
+        .get(&target())
+        .ok_or("no pass state")?;
+    assert_eq!(state.head, case.head);
     case.reserve(false)?;
     case.abort(Reason::AuthenticatedCancellation)??;
     let records = case.records()?;
@@ -580,14 +586,21 @@ fn an_abort_states_the_first_members_state_revision() -> TestResult {
 }
 
 /// I235: an operator Abort on a committed head succeeds, and its CAV1 states
-/// that head's frontier and ref. A Commit does not exist yet, so the head is
-/// the selected view a Commit will install: the second member's CSR1 under a
-/// committed frontier.
+/// that head's frontier and ref. A Commit does not exist yet (slice 3), so
+/// the head is what a Commit will install in one transaction: a new
+/// `pass_states` head and the selected view of a real CSR1 CMI1 reference
+/// (the second member's) under the `Committed` frontier of the pass key.
 #[test]
 fn an_abort_on_a_committed_head_succeeds() -> TestResult {
     let mut case = Case::new()?;
     let refs = state_revisions(case.domain())?;
     let key = pass_key()?;
+    let head = hash(0x77);
+    case.domain_mut()
+        .pass_states
+        .get_mut(&target())
+        .ok_or("no pass state")?
+        .head = head;
     case.domain_mut().selected_views.insert(
         target(),
         CommunitySelectedViewV1 {
@@ -597,6 +610,12 @@ fn an_abort_on_a_committed_head_succeeds() -> TestResult {
     );
     case.reserve(false)?;
     case.abort(Reason::AuthenticatedCancellation)??;
+    let state = case
+        .domain()
+        .pass_states
+        .get(&target())
+        .ok_or("no pass state")?;
+    assert_eq!(state.head, head);
     let records = case.records()?;
     let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
     assert!(matches!(

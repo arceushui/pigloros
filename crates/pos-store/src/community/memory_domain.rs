@@ -199,7 +199,13 @@ pub struct MemoryCommunityDomainV1 {
     pub(super) pass_states: BTreeMap<TimelineId, CommunityPassStateV1>,
     /// Each initialized Timeline's selected head as a CAV1 reads it: the
     /// frontier and the head ref of the first roster member's CSR1
-    /// (ADR-129 R16.5(4)). It moves with `pass_states[T].head`.
+    /// (ADR-129 R16.5(4)).
+    ///
+    /// Invariant: it is the view of the CSH1 whose digest is
+    /// `pass_states[T].head`. Initialization sets both, and a Commit MUST
+    /// replace both in the same transaction. It is a second map because the
+    /// head ref is not derivable from the digest alone and
+    /// `CommunityPassStateV1` literals in other tests would have to change.
     #[cfg(target_os = "linux")]
     pub(super) selected_views: BTreeMap<TimelineId, CommunitySelectedViewV1>,
     /// The ledger of unresolved reservations by `(T, reservation
