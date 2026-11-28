@@ -286,9 +286,7 @@ impl AttemptLimitEventDelta {
 }
 
 impl BoundAttemptCgroup {
-    /// Capture all required operating-limit event sources from the exact bound cgroup, or return
-    /// the capture taken when the cgroup was first observed empty (see `observe_empty`), which
-    /// stands in for the terminal capture once systemd has removed the cgroup.
+    /// Capture all required operating-limit event sources from the exact bound cgroup.
     ///
     /// This method never writes cgroup controllers or interprets event counters
     /// as a terminal result. The caller owns capture ordering around release
@@ -298,10 +296,7 @@ impl BoundAttemptCgroup {
     /// Rejects identity replacement or any missing, unsafe, unreadable,
     /// oversized, malformed, or incomplete source.
     pub fn capture_limit_events(&self) -> Result<AttemptLimitEventSnapshot, AttemptCgroupError> {
-        self.emptied.clone().map_or_else(
-            || self.capture_limit_events_with_verifier(Self::verify_limit_event_identity),
-            Ok,
-        )
+        self.capture_limit_events_with_verifier(Self::verify_limit_event_identity)
     }
 
     fn capture_limit_events_with_verifier(
@@ -451,78 +446,6 @@ mod tests {
             "/system.slice/test.service".to_owned(),
         )?;
         Ok((bound, directory))
-    }
-
-    #[test]
-    fn the_capture_taken_when_the_cgroup_is_first_empty_survives_its_removal(
-    ) -> Result<(), Box<dyn Error>> {
-        let temporary = tempfile::tempdir()?;
-        let (mut bound, directory) = fixture(temporary.path())?;
-        // Populated: the capture reads the live sources.
-        let live = bound.capture_limit_events()?;
-        assert!(matches!(
-            bound.observe_empty(),
-            Err(AttemptCgroupError::StillPopulated)
-        ));
-        fs::write(
-            directory.join("cpu.stat"),
-            b"usage_usec 1\nnr_throttled 2\nthrottled_usec 3\n",
-        )?;
-        assert_ne!(
-            bound
-                .capture_limit_events()?
-                .raw(AttemptLimitEventSource::CpuStat),
-            live.raw(AttemptLimitEventSource::CpuStat)
-        );
-        // Empty: the sources are read once, at that moment.
-        fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
-        fs::write(
-            directory.join("cpu.stat"),
-            b"usage_usec 7\nnr_throttled 8\nthrottled_usec 9\n",
-        )?;
-        bound.observe_empty()?;
-        fs::write(
-            directory.join("cpu.stat"),
-            b"usage_usec 70\nnr_throttled 80\nthrottled_usec 90\n",
-        )?;
-        // A second empty observation keeps the first capture.
-        bound.observe_empty()?;
-        let expected: &[u8] = b"usage_usec 7\nnr_throttled 8\nthrottled_usec 9\n";
-        assert_eq!(
-            bound
-                .capture_limit_events()?
-                .raw(AttemptLimitEventSource::CpuStat),
-            expected
-        );
-        // The cgroup is gone, as systemd leaves it: the capture is still there.
-        fs::remove_dir_all(&directory)?;
-        let kept = bound.capture_limit_events()?;
-        assert_eq!(kept.raw(AttemptLimitEventSource::CpuStat), expected);
-        assert_eq!(kept.counter(AttemptLimitEventCounter::CpuNrThrottled), 8);
-        Ok(())
-    }
-
-    #[test]
-    fn an_empty_cgroup_whose_sources_cannot_be_read_keeps_no_capture() -> Result<(), Box<dyn Error>>
-    {
-        let temporary = tempfile::tempdir()?;
-        let (mut bound, directory) = fixture(temporary.path())?;
-        fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
-        fs::remove_file(directory.join("cpu.stat"))?;
-        bound.observe_empty()?;
-        assert!(bound.capture_limit_events().is_err());
-        // The sources come back: a later capture reads them live.
-        fs::write(
-            directory.join("cpu.stat"),
-            b"usage_usec 1\nnr_throttled 2\nthrottled_usec 3\n",
-        )?;
-        assert_eq!(
-            bound
-                .capture_limit_events()?
-                .counter(AttemptLimitEventCounter::CpuNrThrottled),
-            2
-        );
-        Ok(())
     }
 
     #[test]
