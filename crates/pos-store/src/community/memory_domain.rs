@@ -5,7 +5,9 @@
 //! loses them. It has no process-restart durability and never reconstructs a
 //! lost identity.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 
 use pos_core::community_lifecycle::{
     CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
