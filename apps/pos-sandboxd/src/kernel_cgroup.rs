@@ -305,6 +305,10 @@ fn read_retained_events(events: &mut File) -> std::io::Result<Vec<u8>> {
 }
 
 /// Whether `error` is kernfs's answer for a node that was removed: `ENODEV`.
+///
+/// The proof assumes that the retained descriptor belongs to the verified cgroup2 mount (the open
+/// checks it with `fstatfs`): the same errno could also come from a descriptor of a superblock that
+/// was killed or unmounted, which is not this cgroup's removal.
 fn removed_node(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(Errno::NODEV.raw_os_error())
 }
@@ -440,8 +444,9 @@ impl BoundAttemptCgroup {
     /// `probe_events` reads the retained `cgroup.events` descriptor once the
     /// path is missing. kernfs keeps a removed directory's link count, so
     /// only `ENODEV` from that descriptor proves removal there; a renamed
-    /// live cgroup still reads, and every other outcome stays unproven. A cgroup that was removed
-    /// between the path check and the events read answers `ENODEV` to `read_events` the same way.
+    /// live cgroup still reads, and every other outcome stays unproven. A cgroup that was
+    /// removed between the path check and the events read answers `ENODEV` to `read_events` the
+    /// same way.
     fn observe_empty_with(
         &mut self,
         read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
@@ -471,7 +476,8 @@ impl BoundAttemptCgroup {
     }
 
     /// The basis of a cgroup whose path is still present: the events file says it is empty, or the
-    /// read finds the cgroup removed meanwhile (`ENODEV`).
+    /// read finds the cgroup removed meanwhile (`ENODEV`, see [`removed_node`] for what that
+    /// assumes of the retained descriptor).
     fn present_basis(
         &mut self,
         read_events: impl FnOnce(&mut File) -> std::io::Result<Vec<u8>>,
