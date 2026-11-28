@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -12,6 +13,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_provider_conformance.py"
@@ -29,6 +31,8 @@ CASES = {case["id"]: case for case in MANIFEST["cases"]}
 SINGLE = [case for case in MANIFEST["cases"] if case["driver"] == "single-execute"]
 OTHERS = [case for case in MANIFEST["cases"] if case["driver"] != "single-execute"]
 CASE = CASES["filesystem-escape"]
+CLEAN = ["clean"]
+CLEAN_TEXT = "clean\n"
 REFUSAL_CASE = {
     "id": "synthetic",
     "driver": "single-execute",
@@ -52,6 +56,11 @@ def perfect(case: dict, *, code: int | None = None) -> list[str]:
 
 def text(lines: list[str]) -> str:
     return "\n".join(lines) + "\n"
+
+
+def pin_of(manifest: object) -> str:
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def run_main(arguments: list[str]) -> tuple[int, str, str]:
@@ -88,7 +97,7 @@ class TempTestCase(unittest.TestCase):
 
     def passing_directory(self) -> None:
         for case in SINGLE:
-            self.write_case(case, perfect(case), timings="stage\t1\n", leftovers="")
+            self.write_case(case, perfect(case), timings="stage\t1\n", leftovers=CLEAN_TEXT)
 
     def write_manifest(self, manifest: object) -> pathlib.Path:
         path = self.root.parent / "manifest.json"
@@ -160,7 +169,7 @@ class ManifestTests(TempTestCase):
 class JudgeTests(unittest.TestCase):
     def test_every_single_execute_case_passes_on_its_expected_outcome_with_cleanup(self) -> None:
         for case in SINGLE:
-            verdict = CHECKER.judge_case(case, perfect(case), [])
+            verdict = CHECKER.judge_case(case, perfect(case), CLEAN)
             self.assertEqual(verdict, {"id": case["id"], "status": "passed"}, case["id"])
 
     def test_a_full_guest_report_with_its_evidence_rows_passes(self) -> None:
@@ -177,7 +186,7 @@ class JudgeTests(unittest.TestCase):
             f"raw\tsau1\t1\t{AGR1}",
             f"output\t12\t{AGR1}",
         ]
-        self.assertEqual(CHECKER.judge_case(CASE, lines, [])["status"], "passed")
+        self.assertEqual(CHECKER.judge_case(CASE, lines, CLEAN)["status"], "passed")
 
     def test_without_cleanup_evidence_a_matching_case_is_unproven_not_passed(self) -> None:
         for case in SINGLE:
@@ -187,42 +196,54 @@ class JudgeTests(unittest.TestCase):
 
     def test_every_leaked_resource_fails_the_case(self) -> None:
         verdict = CHECKER.judge_case(
-            CASE, perfect(CASE), ["mount\t/run/pos/work", "cgroup\tpos.slice/x"]
+            CASE, perfect(CASE), ["leak\tmount\t/run/pos/work", "leak\tcgroup\tpos.slice/x"]
         )
         self.assertEqual((verdict["status"], verdict["failure"]), ("failed", "resource_leak"))
         self.assertEqual(verdict["shown"], "mount: /run/pos/work; cgroup: pos.slice/x")
         for kind in CHECKER.LEAK_KINDS:
-            leak = CHECKER.judge_case(CASE, perfect(CASE), [f"{kind}\tdetail"])
+            leak = CHECKER.judge_case(CASE, perfect(CASE), [f"leak\t{kind}\tdetail"])
             self.assertEqual(leak["failure"], "resource_leak", kind)
 
     def test_malformed_cleanup_evidence_fails_the_case(self) -> None:
-        for row in ("mount", "mount\t", "socket\tx", "mount\ta\tb", "\tx"):
-            verdict = CHECKER.judge_case(CASE, perfect(CASE), [row])
-            self.assertEqual(verdict["failure"], "malformed_evidence", row)
+        for rows in (
+            [],
+            ["mount"],
+            ["mount\tx"],
+            ["leak\tmount"],
+            ["leak\tmount\t"],
+            ["leak\tsocket\tx"],
+            ["leak\tmount\ta\tb"],
+            ["clean", "clean"],
+            ["clean", "leak\tunit\tx"],
+            ["leak\tunit\tx", "clean"],
+            ["CLEAN"],
+        ):
+            verdict = CHECKER.judge_case(CASE, perfect(CASE), rows)
+            self.assertEqual(verdict["failure"], "malformed_evidence", rows)
 
     def test_a_different_outcome_fails_and_only_it_carries_the_blocker_note(self) -> None:
         lines = perfect(CASE)
         lines[1] = "outcome\tUnavailableAfterAdmission"
-        verdict = CHECKER.judge_case(CASE, lines, [])
+        verdict = CHECKER.judge_case(CASE, lines, CLEAN)
         self.assertEqual((verdict["status"], verdict["failure"]), ("failed", "outcome"))
         self.assertEqual(verdict["note"], CHECKER.KNOWN_BLOCKER)
         self.assertEqual(verdict["shown"], "executed UnavailableAfterAdmission events 11,12")
         other = CASES["task-exhaustion"]
-        wrong_code = CHECKER.judge_case(other, perfect(other, code=4), [])
+        wrong_code = CHECKER.judge_case(other, perfect(other, code=4), CLEAN)
         self.assertEqual(wrong_code["failure"], "terminal_code")
         self.assertNotIn("note", wrong_code)
 
     def test_a_terminal_code_outside_the_expected_ones_fails(self) -> None:
         case = CASES["task-exhaustion"]
         for code in (4, 6, 8):
-            verdict = CHECKER.judge_case(case, perfect(case, code=code), [])
+            verdict = CHECKER.judge_case(case, perfect(case, code=code), CLEAN)
             self.assertEqual(verdict.get("failure"), "terminal_code", code)
-        self.assertEqual(CHECKER.judge_case(case, perfect(case, code=5), [])["status"], "passed")
+        self.assertEqual(CHECKER.judge_case(case, perfect(case, code=5), CLEAN)["status"], "passed")
 
     def test_memory_exhaustion_accepts_either_of_its_two_codes(self) -> None:
         case = CASES["memory-exhaustion"]
         for code in (3, 4):
-            verdict = CHECKER.judge_case(case, perfect(case, code=code), [])
+            verdict = CHECKER.judge_case(case, perfect(case, code=code), CLEAN)
             self.assertEqual(verdict["status"], "passed", code)
 
     def test_a_missing_terminal_code_fails_when_one_is_expected(self) -> None:
@@ -230,20 +251,20 @@ class JudgeTests(unittest.TestCase):
         for events in ("events\t11,12", "events\t"):
             lines = perfect(case)
             lines[2] = events
-            verdict = CHECKER.judge_case(case, lines, [])
+            verdict = CHECKER.judge_case(case, lines, CLEAN)
             self.assertEqual(verdict["failure"], "terminal_code", events)
 
     def test_a_terminal_code_fails_when_none_is_expected(self) -> None:
         case = CASES["network-escape"]
-        verdict = CHECKER.judge_case(case, perfect(case, code=8), [])
+        verdict = CHECKER.judge_case(case, perfect(case, code=8), CLEAN)
         self.assertEqual(verdict["failure"], "terminal_code")
 
     def test_an_attempt_without_its_identity_fails(self) -> None:
         for agr1 in ("", "ab", "AB" * 32, "ab" * 33):
             lines = perfect(CASE)[:-1] + [f"agr1\t{agr1}"]
-            verdict = CHECKER.judge_case(CASE, lines, [])
+            verdict = CHECKER.judge_case(CASE, lines, CLEAN)
             self.assertEqual(verdict["failure"], "attempt_identity", agr1)
-        verdict = CHECKER.judge_case(CASE, perfect(CASE)[:-1], [])
+        verdict = CHECKER.judge_case(CASE, perfect(CASE)[:-1], CLEAN)
         self.assertEqual(verdict["failure"], "attempt_identity")
 
     def test_an_exchange_that_did_not_execute_fails_the_case(self) -> None:
@@ -252,19 +273,20 @@ class JudgeTests(unittest.TestCase):
             (["execute\tfailed\tprovider execution failed"], "failed provider execution failed"),
             (["execute\tunreportable"], "unreportable"),
         ):
-            verdict = CHECKER.judge_case(CASE, lines, [])
+            verdict = CHECKER.judge_case(CASE, lines, CLEAN)
             self.assertEqual(verdict["failure"], "outcome")
             self.assertEqual(verdict["shown"], shown)
 
     def test_a_matching_refusal_is_unproven_for_want_of_a_request_identity(self) -> None:
-        verdict = CHECKER.judge_case(REFUSAL_CASE, ["execute\trefused\tTrustRevoked"], [])
+        verdict = CHECKER.judge_case(REFUSAL_CASE, ["execute\trefused\tTrustRevoked"], CLEAN)
         self.assertEqual(verdict["status"], "unproven")
         self.assertIn("no request identity", verdict["reason"])
-        wrong = CHECKER.judge_case(REFUSAL_CASE, ["execute\trefused\tCleanupFailed"], [])
+        wrong = CHECKER.judge_case(REFUSAL_CASE, ["execute\trefused\tCleanupFailed"], CLEAN)
         self.assertEqual(wrong["failure"], "refusal")
-        executed = CHECKER.judge_case(REFUSAL_CASE, perfect(CASE), [])
+        executed = CHECKER.judge_case(REFUSAL_CASE, perfect(CASE), CLEAN)
         self.assertEqual(executed["failure"], "outcome")
-        leaked = CHECKER.judge_case(REFUSAL_CASE, ["execute\trefused\tTrustRevoked"], ["unit\tx"])
+        refused = ["execute\trefused\tTrustRevoked"]
+        leaked = CHECKER.judge_case(REFUSAL_CASE, refused, ["leak\tunit\tx"])
         self.assertEqual(leaked["failure"], "resource_leak")
 
     def test_every_other_driver_is_not_run_with_its_reason_and_driver(self) -> None:
@@ -340,22 +362,30 @@ class ReportTests(unittest.TestCase):
             self.malformed(["execute\texecuted", "outcome\tCompleted", f"events\t{value}"])
         report = CHECKER.parse_report(["execute\texecuted", "outcome\tCompleted", "events\t0,255"])
         self.assertEqual(report["events"], [0, 255])
+        padded = ["execute\texecuted", "outcome\tCompleted", "events\t005,0005,00000255"]
+        self.assertEqual(CHECKER.parse_report(padded)["events"], [5, 5, 255])
+        self.malformed(["execute\texecuted", "outcome\tCompleted", "events\t000000005"])
 
     def test_malformed_report_rows_become_a_case_failure_not_a_traceback(self) -> None:
-        verdict = CHECKER.judge_case(CASE, ["execute\texecuted", "outcome\tCompleted"], [])
+        verdict = CHECKER.judge_case(CASE, ["execute\texecuted", "outcome\tCompleted"], CLEAN)
         self.assertEqual((verdict["status"], verdict["failure"]), ("failed", "malformed_evidence"))
         self.assertIn("events", verdict["shown"])
         events = perfect(CASE)
         events[2] = "events\t1_0"
-        self.assertEqual(CHECKER.judge_case(CASE, events, [])["failure"], "malformed_evidence")
+        self.assertEqual(CHECKER.judge_case(CASE, events, CLEAN)["failure"], "malformed_evidence")
 
 
 class FileTests(TempTestCase):
+    def read(self, name: str) -> str | None:
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        return CHECKER.read_evidence(descriptor, name)
+
     def test_reading_is_strict_and_bounded(self) -> None:
         directory = self.root
-        self.assertIsNone(CHECKER.read_evidence(directory, "timings"))
+        self.assertIsNone(self.read("timings"))
         (directory / "timings").write_bytes(b"stage\t1\n")
-        self.assertEqual(CHECKER.read_evidence(directory, "timings"), "stage\t1\n")
+        self.assertEqual(self.read("timings"), "stage\t1\n")
         bad = {
             "non-ascii": b"stage\xc3\xa9\n",
             "control": b"stage\x00\n",
@@ -365,18 +395,31 @@ class FileTests(TempTestCase):
         for name, data in bad.items():
             (directory / "timings").write_bytes(data)
             with self.assertRaises(CHECKER.EvidenceError, msg=name):
-                CHECKER.read_evidence(directory, "timings")
+                self.read("timings")
         (directory / "timings").write_bytes(b"a" * CHECKER.MAX_EVIDENCE_BYTES)
-        self.assertEqual(len(CHECKER.read_evidence(directory, "timings")), 65536)
+        self.assertEqual(len(self.read("timings") or ""), 65536)
 
     def test_a_symlink_or_directory_is_not_evidence(self) -> None:
         (self.root / "target").write_text("stage\t1\n")
         os.symlink(self.root / "target", self.root / "timings")
         with self.assertRaises(CHECKER.EvidenceError):
-            CHECKER.read_evidence(self.root, "timings")
+            self.read("timings")
         (self.root / "leftovers").mkdir()
         with self.assertRaises(CHECKER.EvidenceError):
-            CHECKER.read_evidence(self.root, "leftovers")
+            self.read("leftovers")
+
+    def test_diagnostic_files_need_only_to_be_plain_files(self) -> None:
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        CHECKER.check_plain_file(descriptor, "execute-stderr")
+        (self.root / "execute-stderr").write_bytes(b"\xff\x00" * 100000)
+        CHECKER.check_plain_file(descriptor, "execute-stderr")
+        (self.root / "execute-status").mkdir()
+        with self.assertRaises(CHECKER.EvidenceError):
+            CHECKER.check_plain_file(descriptor, "execute-status")
+        with mock.patch.object(CHECKER.os, "stat", side_effect=PermissionError(13, "denied")):
+            with self.assertRaises(CHECKER.EvidenceError):
+                CHECKER.check_plain_file(descriptor, "execute-stderr")
 
     def test_lines_split_on_newline_only_with_no_blank_row(self) -> None:
         self.assertEqual(CHECKER.split_lines("", "f"), [])
@@ -473,7 +516,11 @@ class DirectoryTests(TempTestCase):
         (directory / "execute-report").write_bytes(b"x" * 70000)
         self.assertEqual(self.judged("filesystem-escape")["failure"], "malformed_evidence")
         (directory / "execute-report").write_text(text(perfect(CASE)))
-        (directory / "execute-stderr").write_bytes(b"\xff")
+        (directory / "execute-stderr").write_bytes(b"\xff" * 100000)
+        self.write_case(CASE, timings="stage\t1\n", leftovers=CLEAN_TEXT)
+        self.assertEqual(self.judged("filesystem-escape")["status"], "passed")
+        (directory / "execute-stderr").unlink()
+        os.symlink(self.root.parent, directory / "execute-stderr")
         self.assertEqual(self.judged("filesystem-escape")["failure"], "malformed_evidence")
 
     def test_a_directory_is_judged_and_the_rest_listed(self) -> None:
@@ -491,18 +538,18 @@ class DirectoryTests(TempTestCase):
 
     def test_timings_errors_are_a_note_on_a_failed_case_and_a_failure_elsewhere(self) -> None:
         for timings in ("stage\nbad\n", "stage\t1\nstage\t2\n", "stage\t1"):
-            self.write_case(CASE, perfect(CASE), timings=timings, leftovers="")
+            self.write_case(CASE, perfect(CASE), timings=timings, leftovers=CLEAN_TEXT)
             verdict = self.judged("filesystem-escape")
             self.assertEqual(verdict["failure"], "malformed_evidence", timings)
             self.assertNotIn("timings", verdict)
         other = CASES["task-exhaustion"]
-        self.write_case(other, perfect(other, code=4), timings="x\n", leftovers="")
+        self.write_case(other, perfect(other, code=4), timings="x\n", leftovers=CLEAN_TEXT)
         verdict = self.judged("task-exhaustion")
         self.assertEqual(verdict["failure"], "terminal_code")
         self.assertIn("malformed timings", verdict["note"])
         mismatch = perfect(CASE)
         mismatch[1] = "outcome\tCancelled"
-        self.write_case(CASE, mismatch, timings="x\n", leftovers="")
+        self.write_case(CASE, mismatch, timings="x\n", leftovers=CLEAN_TEXT)
         note = self.judged("filesystem-escape")["note"]
         self.assertIn(CHECKER.KNOWN_BLOCKER, note)
         self.assertIn("malformed timings", note)
@@ -528,7 +575,7 @@ class CommandLineTests(TempTestCase):
 
     def test_a_leak_fails_the_exit(self) -> None:
         self.passing_directory()
-        self.write_case(CASE, leftovers="unit\tpos-case.service\n")
+        self.write_case(CASE, leftovers="leak\tunit\tpos-case.service\n")
         status, out, _ = self.run_cli("--allow-not-run", self.ALL)
         self.assertEqual(status, 1)
         self.assertIn("failed    filesystem-escape", out)
@@ -544,8 +591,9 @@ class CommandLineTests(TempTestCase):
     def test_a_matching_refusal_is_unproven_and_fails_the_exit(self) -> None:
         manifest = {"version": 1, "cases": [REFUSAL_CASE]}
         path = self.write_manifest(manifest)
-        self.write_case(REFUSAL_CASE, ["execute\trefused\tTrustRevoked"], leftovers="")
-        status, out, _ = run_main([str(path), str(self.root)])
+        self.write_case(REFUSAL_CASE, ["execute\trefused\tTrustRevoked"], leftovers=CLEAN_TEXT)
+        with mock.patch.object(CHECKER, "PINNED_SHA256", pin_of(manifest)):
+            status, out, _ = run_main([str(path), str(self.root)])
         self.assertEqual(status, 1)
         self.assertIn("unproven  synthetic", out)
         self.assertIn("no request identity", out)
@@ -572,6 +620,125 @@ class CommandLineTests(TempTestCase):
 
     def test_help_exits_zero(self) -> None:
         self.assertEqual(run_main(["--help"])[0], 0)
+
+
+class PinTests(TempTestCase):
+    def pinned_load(self, manifest: object) -> dict:
+        path = self.write_manifest(manifest)
+        return CHECKER.load_manifest(path)
+
+    def test_the_committed_vector_matches_the_pin(self) -> None:
+        self.assertEqual(pin_of(MANIFEST), CHECKER.PINNED_SHA256)
+
+    def test_a_manifest_that_omits_adds_or_edits_a_case_is_refused(self) -> None:
+        omitted = copy.deepcopy(MANIFEST)
+        omitted["cases"].pop()
+        added = copy.deepcopy(MANIFEST)
+        added["cases"].append({**added["cases"][0], "id": "extra-case"})
+        edited = copy.deepcopy(MANIFEST)
+        edited["cases"][0]["expect"]["outcome"] = "Cancelled"
+        redriven = copy.deepcopy(MANIFEST)
+        redriven["cases"][0]["driver"] = "control"
+        for name, manifest in (
+            ("omitted", omitted),
+            ("added", added),
+            ("edited", edited),
+            ("redriven", redriven),
+        ):
+            with self.assertRaises(CHECKER.ConformanceError, msg=name) as caught:
+                self.pinned_load(manifest)
+            self.assertIn("pinned", str(caught.exception), name)
+
+    def test_a_control_only_manifest_judges_nothing_and_is_refused(self) -> None:
+        control = [case for case in MANIFEST["cases"] if case["driver"] == "control"][:1]
+        manifest = {"version": 1, "cases": control}
+        with self.assertRaises(CHECKER.ConformanceError):
+            CHECKER.validate_manifest(manifest)
+        path = self.write_manifest(manifest)
+        status, _, err = run_main([str(path), str(self.root), "--allow-not-run", "control"])
+        self.assertEqual(status, 2)
+        self.assertIn("single-execute", err)
+
+    def test_a_run_that_judges_no_single_execute_case_is_refused(self) -> None:
+        manifest = {"version": 1, "cases": [OTHERS[0]]}
+        with mock.patch.object(CHECKER, "PINNED_SHA256", pin_of(manifest)):
+            with self.assertRaises(CHECKER.ConformanceError):
+                self.pinned_load(manifest)
+
+    def test_a_deep_or_oversized_manifest_is_refused_not_a_traceback(self) -> None:
+        path = self.root.parent / "deep.json"
+        path.write_text("[" * 200000 + "]" * 200000)
+        with self.assertRaises(CHECKER.ConformanceError):
+            CHECKER.load_manifest(path)
+        path.write_text('{"version": 1, "pad": "' + "a" * CHECKER.MAX_MANIFEST_BYTES + '"}')
+        with self.assertRaises(CHECKER.ConformanceError):
+            CHECKER.load_manifest(path)
+        status, _, err = run_main([str(path), str(self.root)])
+        self.assertEqual(status, 2)
+        self.assertNotIn("Traceback", err)
+
+
+class UnreadableTests(TempTestCase):
+    def deny(self, path: pathlib.Path) -> None:
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o700)
+        if os.access(path, os.R_OK):
+            self.skipTest("the runner reads a mode 000 directory (root)")
+
+    def test_an_unreadable_case_directory_fails_that_case(self) -> None:
+        directory = self.write_case(CASE, perfect(CASE))
+        self.deny(directory)
+        verdicts = CHECKER.judge_directory(MANIFEST, self.root)
+        verdict = next(v for v in verdicts if v["id"] == "filesystem-escape")
+        self.assertEqual(verdict["failure"], "malformed_evidence")
+
+    def test_an_unreadable_cases_directory_exits_two(self) -> None:
+        self.write_case(CASE, perfect(CASE))
+        self.deny(self.root)
+        status, _, err = run_main([str(MANIFEST_PATH), str(self.root)])
+        self.assertEqual(status, 2)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_listing_that_fails_is_a_message_not_a_traceback(self) -> None:
+        self.write_case(CASE, perfect(CASE))
+        with mock.patch.object(CHECKER.os, "stat", side_effect=FileNotFoundError(2, "gone")):
+            status, _, err = run_main([str(MANIFEST_PATH), str(self.root)])
+        self.assertEqual(status, 2)
+        self.assertIn("cannot read the cases directory", err)
+        with mock.patch.object(CHECKER.os, "listdir", side_effect=PermissionError(13, "denied")):
+            status, _, err = run_main([str(MANIFEST_PATH), str(self.root)])
+        self.assertEqual(status, 2)
+
+    def test_a_case_directory_that_vanishes_or_fails_to_list_fails_that_case(self) -> None:
+        self.write_case(CASE, perfect(CASE))
+        real = os.listdir
+        calls = []
+
+        def listing(argument):
+            calls.append(argument)
+            if len(calls) > 1:
+                raise PermissionError(13, "denied")
+            return real(argument)
+
+        with mock.patch.object(CHECKER.os, "listdir", side_effect=listing):
+            verdicts = CHECKER.judge_directory(MANIFEST, self.root)
+        verdict = next(v for v in verdicts if v["id"] == "filesystem-escape")
+        self.assertEqual(verdict["failure"], "malformed_evidence")
+        self.assertIn("cannot be read", verdict["shown"])
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        self.assertEqual(CHECKER._read_case(descriptor, "task-exhaustion")["timings"], None)
+
+
+class RepeatedOptionTests(TempTestCase):
+    def test_a_repeated_allow_not_run_is_refused(self) -> None:
+        arguments = [str(MANIFEST_PATH), str(self.root)]
+        status, _, err = run_main(arguments + ["--allow-not-run", "control"] * 2)
+        self.assertEqual(status, 2)
+        self.assertIn("only once", err)
+        self.passing_directory()
+        status, _, _ = run_main(arguments + ["--allow-not-run", "control,admission,concurrent"])
+        self.assertEqual(status, 0)
 
 
 if __name__ == "__main__":

@@ -17,21 +17,29 @@ AGR1 digest); and no resource may remain. Nothing is softened: an outcome that
 differs fails the case, a case that ran with no report fails as `no_evidence`,
 evidence that is not exactly well formed fails as `malformed_evidence`, and a
 case without cleanup evidence is `unproven`, not passed. A matching refusal is
-also `unproven`: the execute report carries no request identity yet.
+also `unproven`: the execute report carries no request identity yet. A
+`timings` file that is malformed or repeats a name turns a case that would have
+passed or been unproven into a failed `malformed_evidence`, and is a note on a
+case that already failed.
+
+The manifest is pinned: its SHA-256 (canonical JSON) must equal PINNED_SHA256,
+so a manifest that omits, adds or edits a case is refused, and a run must judge
+at least one single-execute case. Changing the vector means changing the pin.
 
 Usage: check_provider_conformance.py MANIFEST CASES_DIRECTORY
-           [--allow-not-run DRIVER,...]
+           [--allow-not-run DRIVER,...]   (once)
 
 CASES_DIRECTORY must exist and holds one plain directory per single-execute
 case, named by its id, with only these plain files:
 
 - `execute-report`, the lines of the execute mode;
 - `execute-stderr` and `execute-status`, the guest's own diagnostics (not
-  judged);
+  judged and not read: only that each is a plain file is checked);
 - `timings`, lines `NAME<TAB>SECONDS`;
-- `leftovers`, the cleanup evidence: one line `KIND<TAB>DETAIL` per leaked
-  resource (KIND is mount, umount-failure, unit or cgroup), empty when nothing
-  leaked. The part-2b collector writes it; absent means `unproven`.
+- `leftovers`, the cleanup evidence: exactly the one row `clean` when nothing
+  leaked, or one row `leak<TAB>KIND<TAB>DETAIL` per leaked resource (KIND is
+  mount, umount-failure, unit or cgroup). An empty or truncated file is
+  malformed. The part-2b collector writes it; absent means `unproven`.
 
 Every case whose driver is not single-execute is listed as `not run` with its
 reason, and a `not run` case fails the exit status unless its driver is named
@@ -43,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import pathlib
@@ -53,6 +62,10 @@ from typing import Any
 
 TERMINAL_CODE_LIMIT = 10
 MAX_EVIDENCE_BYTES = 64 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
+# The SHA-256 of the canonical JSON (sorted keys, no spaces) of the committed
+# provider-cases-v1.json: the 19 cases this judge is written for.
+PINNED_SHA256 = "05e923005ac7b39cf8d45d0b919964d49266e6cfcde7b7bd679a05d92d93ec6e"
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 HEX = re.compile(r"^[0-9a-f]+$")
 IDENTIFIER = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -140,22 +153,33 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
         )
         _require(isinstance(case["arguments"], list), f"case {case_id}: arguments not a list")
         _validate_expect(case_id, case["expect"])
+    _require(
+        any(case["driver"] == SINGLE_EXECUTE for case in cases),
+        "the provider case manifest has no single-execute case to judge",
+    )
     return manifest
 
 
 def load_manifest(path: pathlib.Path) -> dict[str, Any]:
     try:
-        manifest = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, ValueError) as error:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_MANIFEST_BYTES + 1)
+        _require(len(data) <= MAX_MANIFEST_BYTES, "the provider case manifest is too large")
+        manifest = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
         raise ConformanceError(f"cannot read the provider case manifest: {error}") from error
-    return validate_manifest(manifest)
+    validate_manifest(manifest)
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    _require(digest == PINNED_SHA256, "the provider case manifest is not the pinned 19-case set")
+    return manifest
 
 
-def read_evidence(case_directory: pathlib.Path, name: str) -> str | None:
+def read_evidence(directory_fd: int, name: str) -> str | None:
     """The text of one evidence file, None when absent; strict and bounded."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
-        descriptor = os.open(case_directory / name, flags)
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
     except FileNotFoundError:
         return None
     except OSError as error:
@@ -177,6 +201,18 @@ def read_evidence(case_directory: pathlib.Path, name: str) -> str | None:
     return text
 
 
+def check_plain_file(directory_fd: int, name: str) -> None:
+    """A diagnostic file is not read: when present it must be a plain file."""
+    try:
+        mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise EvidenceError(f"{name} cannot be inspected: {error.strerror}") from error
+    if not stat.S_ISREG(mode):
+        raise EvidenceError(f"{name} is not a plain file")
+
+
 def split_lines(text: str, name: str) -> list[str]:
     """The newline-terminated rows of a file; no blank row is allowed."""
     if not text:
@@ -194,7 +230,7 @@ def _parse_events(value: str) -> list[int]:
         return []
     events = []
     for part in value.split(","):
-        if not (part.isascii() and part.isdigit() and len(part) <= 3 and int(part) <= 255):
+        if not (part.isascii() and part.isdigit() and len(part) <= 8 and int(part) <= 255):
             raise EvidenceError(f"events holds {part!r}, not an event code")
         events.append(int(part))
     return events
@@ -254,13 +290,17 @@ def parse_report(lines: list[str]) -> dict[str, Any]:
 
 
 def parse_leftovers(lines: list[str]) -> list[str]:
-    """The leaked resources, each `KIND: DETAIL`; none when the file is empty."""
+    """The leaked resources, each `KIND: DETAIL`; none after the row `clean`."""
+    if lines == ["clean"]:
+        return []
+    if not lines:
+        raise EvidenceError("leftovers is empty: it must say `clean` or list the leaks")
     leaked = []
     for line in lines:
         fields = line.split("\t")
-        if len(fields) != 2 or fields[0] not in LEAK_KINDS or not fields[1]:
+        if len(fields) != 3 or fields[0] != "leak" or fields[1] not in LEAK_KINDS or not fields[2]:
             raise EvidenceError(f"malformed leftovers row {line!r}")
-        leaked.append(f"{fields[0]}: {fields[1]}")
+        leaked.append(f"{fields[1]}: {fields[2]}")
     return leaked
 
 
@@ -344,59 +384,81 @@ def parse_timings(lines: list[str]) -> dict[str, float]:
     return timings
 
 
-def _case_directories(manifest: dict[str, Any], directory: pathlib.Path) -> None:
-    """Refuse a CASES_DIRECTORY that is not a plain tree of known single-execute cases."""
+def _open_directory(name: str | pathlib.Path, *, dir_fd: int | None = None) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    return os.open(name, flags, dir_fd=dir_fd)
+
+
+def _check_case_directories(manifest: dict[str, Any], root_fd: int) -> None:
+    """Refuse a cases directory that is not a plain tree of known single-execute cases."""
+    known = {c["id"] for c in manifest["cases"] if c["driver"] == SINGLE_EXECUTE}
     try:
-        listing = sorted(os.listdir(directory))
+        for name in sorted(os.listdir(root_fd)):
+            if name not in known:
+                raise ConformanceError(f"{name!r} is not a single-execute case id")
+            mode = os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
+            if not stat.S_ISDIR(mode):
+                raise ConformanceError(f"{name!r} is not a plain directory")
     except OSError as error:
         raise ConformanceError(f"cannot read the cases directory: {error.strerror}") from error
-    known = {c["id"] for c in manifest["cases"] if c["driver"] == SINGLE_EXECUTE}
-    for name in listing:
-        if name not in known:
-            raise ConformanceError(f"{name!r} is not a single-execute case id")
-        if not stat.S_ISDIR(os.lstat(directory / name).st_mode):
-            raise ConformanceError(f"{name!r} is not a plain directory")
 
 
-def _read_case(case_directory: pathlib.Path) -> dict[str, list[str] | None]:
+def _read_case(root_fd: int, case_id: str) -> dict[str, list[str] | None]:
     """The rows of every evidence file of a case, None where a file is absent."""
-    if case_directory.is_dir():
-        extra = sorted(set(os.listdir(case_directory)) - set(CASE_FILES))
+    try:
+        case_fd = _open_directory(case_id, dir_fd=root_fd)
+    except FileNotFoundError:
+        return {"execute-report": None, "timings": None, "leftovers": None}
+    except OSError as error:
+        raise EvidenceError(f"the case directory cannot be opened: {error.strerror}") from error
+    try:
+        extra = sorted(set(os.listdir(case_fd)) - set(CASE_FILES))
         if extra:
             raise EvidenceError(f"unexpected case file {extra[0]!r}")
-    files: dict[str, list[str] | None] = {}
-    for name in ("execute-report", "timings", "leftovers"):
-        text = read_evidence(case_directory, name)
-        files[name] = None if text is None else split_lines(text, name)
-    for name in ("execute-stderr", "execute-status"):
-        read_evidence(case_directory, name)
-    return files
+        files: dict[str, list[str] | None] = {}
+        for name in ("execute-report", "timings", "leftovers"):
+            text = read_evidence(case_fd, name)
+            files[name] = None if text is None else split_lines(text, name)
+        for name in ("execute-stderr", "execute-status"):
+            check_plain_file(case_fd, name)
+        return files
+    except OSError as error:
+        raise EvidenceError(f"the case directory cannot be read: {error.strerror}") from error
+    finally:
+        os.close(case_fd)
 
 
 def judge_directory(manifest: dict[str, Any], directory: pathlib.Path) -> list[dict[str, Any]]:
-    _require(directory.is_dir(), f"the cases directory {str(directory)!r} does not exist")
-    _case_directories(manifest, directory)
-    verdicts = []
-    for case in manifest["cases"]:
-        if case["driver"] != SINGLE_EXECUTE:
-            verdicts.append(judge_case(case, None))
-            continue
-        try:
-            files = _read_case(directory / case["id"])
-        except EvidenceError as error:
-            verdicts.append(_failed({"id": case["id"]}, "malformed_evidence", str(error)))
-            continue
-        verdict = judge_case(case, files["execute-report"], files["leftovers"])
-        if files["timings"] is not None:
-            try:
-                verdict["timings"] = parse_timings(files["timings"])
-            except EvidenceError as error:
-                if verdict["status"] == "failed":
-                    verdict["note"] = "; ".join(filter(None, [verdict.get("note"), str(error)]))
-                else:
-                    verdict = _failed({"id": case["id"]}, "malformed_evidence", str(error))
-        verdicts.append(verdict)
-    return verdicts
+    try:
+        root_fd = _open_directory(directory)
+    except OSError as error:
+        raise ConformanceError(
+            f"cannot open the cases directory {str(directory)!r}: {error.strerror}"
+        ) from error
+    try:
+        _check_case_directories(manifest, root_fd)
+        return [_judge_entry(case, root_fd) for case in manifest["cases"]]
+    finally:
+        os.close(root_fd)
+
+
+def _judge_entry(case: dict[str, Any], root_fd: int) -> dict[str, Any]:
+    if case["driver"] != SINGLE_EXECUTE:
+        return judge_case(case, None)
+    try:
+        files = _read_case(root_fd, case["id"])
+    except EvidenceError as error:
+        return _failed({"id": case["id"]}, "malformed_evidence", str(error))
+    verdict = judge_case(case, files["execute-report"], files["leftovers"])
+    if files["timings"] is None:
+        return verdict
+    try:
+        verdict["timings"] = parse_timings(files["timings"])
+    except EvidenceError as error:
+        if verdict["status"] != "failed":
+            return _failed({"id": case["id"]}, "malformed_evidence", str(error))
+        verdict["note"] = "; ".join(filter(None, [verdict.get("note"), str(error)]))
+    return verdict
 
 
 def render(verdicts: list[dict[str, Any]]) -> str:
@@ -429,6 +491,17 @@ def _drivers(value: str) -> frozenset[str]:
     return frozenset(drivers)
 
 
+class _Once(argparse.Action):
+    """Store the value, refusing a second occurrence of the option."""
+
+    def __call__(  # type: ignore[no-untyped-def]
+        self, parser, namespace, values, option_string=None
+    ):
+        if getattr(namespace, self.dest) is not None:
+            parser.error(f"{option_string} may be given only once")
+        setattr(namespace, self.dest, values)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="check_provider_conformance.py",
@@ -440,7 +513,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-not-run",
         type=_drivers,
-        default=frozenset(),
+        action=_Once,
+        default=None,
         metavar="DRIVER,...",
         help="drivers whose cases may stay `not run` without failing the exit status",
     )
@@ -459,7 +533,7 @@ def main(arguments: list[str]) -> int:
         print(f"check_provider_conformance: {error}", file=sys.stderr)
         return 2
     print(render(verdicts))
-    return exit_status(verdicts, options.allow_not_run)
+    return exit_status(verdicts, options.allow_not_run or frozenset())
 
 
 if __name__ == "__main__":
