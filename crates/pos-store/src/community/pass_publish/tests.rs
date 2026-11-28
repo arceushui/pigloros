@@ -970,10 +970,12 @@ fn an_unopenable_record_is_12_past_the_horizon() -> TestResult {
         .ok_or("publication")?
         .records
         .truncate(1);
-    assert_eq!(
-        domain.original_reserve(target(), OPERATION, horizon).err(),
-        Some(Error::EvidenceUnavailable)
-    );
+    for sample in [SAMPLE, horizon, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), OPERATION, sample).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
     Ok(())
 }
 
