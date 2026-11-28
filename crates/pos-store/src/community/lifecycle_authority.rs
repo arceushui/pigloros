@@ -822,6 +822,7 @@ impl CommunityAuthorityCallV1 {
 
     /// This call with its decision bound lowered to `bound` when that is earlier: a bound the
     /// operation's own metadata owner result sets (A5.4), which the final writer then checks.
+    #[cfg(target_os = "linux")]
     #[must_use]
     pub(super) fn bounded_by(mut self, bound: WallTime) -> Self {
         self.decision_bound = self.decision_bound.min(bound);
