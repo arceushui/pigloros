@@ -110,6 +110,12 @@ pub mod fork_replay;
 pub mod memory;
 #[cfg(any(test, feature = "test-support"))]
 pub mod owner_store_admission;
+#[cfg(all(
+    feature = "sqlite",
+    target_os = "linux",
+    any(test, feature = "test-support")
+))]
+pub mod owner_store_binding;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod owner_store_installation;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
