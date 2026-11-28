@@ -1050,6 +1050,31 @@ fn open_beneath_refuses_a_magic_link() -> TestResult {
 }
 
 #[test]
+fn open_beneath_refuses_a_magic_link_as_a_parent() -> TestResult {
+    // `/proc/<pid>/fd/<n>` is a magic link to a directory the process holds: a walk through it as
+    // a parent component would leave the root, so it is refused although the path resolves.
+    let (tree, _root) = beneath_tree()?;
+    let held = File::open(tree.path())?;
+    let through = format!("{}/fd/{}/top", std::process::id(), held.as_raw_fd());
+    let host_root = File::open("/proc")?;
+    // The control: the same path opens when the magic link may be followed.
+    assert!(File::open(format!("/proc/{through}")).is_ok());
+    assert!(open_beneath(&host_root, &through).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_directory_opens_and_is_not_an_adapter() -> TestResult {
+    let (_tree, root) = beneath_tree()?;
+    let directory = open_beneath(&root, "a/b")?;
+    assert!(matches!(
+        hold_adapter(directory),
+        Err(LauncherError::Adapter)
+    ));
+    Ok(())
+}
+
+#[test]
 fn a_fifo_opens_without_blocking_and_is_not_an_adapter() -> TestResult {
     let (_tree, root) = beneath_tree()?;
     let fifo = open_beneath(&root, "fifo")?;
