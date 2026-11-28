@@ -68,6 +68,29 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
             "Workspace coverage: lines 990/1000 (99.0%); regions 990/1000 (99.0%)",
         )
 
+    def test_accepts_exact_equality_despite_float_multiplication_artifact(self) -> None:
+        # Independently constructed 58/100 fixture: (58 / 100) * 100.0 == 57.99999999999999
+        # in IEEE-754 binary64, which must still satisfy an exact 58% floor.
+        payload = {
+            "data": [
+                {
+                    "totals": {
+                        "lines": {"count": 100, "covered": 58, "percent": 58.0},
+                        "regions": {"count": 50, "covered": 29, "percent": 58.0},
+                    },
+                    "files": [],
+                }
+            ]
+        }
+        summary, failures = floor.check_coverage_data(
+            payload, fail_under_lines=58.0, fail_under_regions=58.0
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            summary,
+            "Workspace coverage: lines 58/100 (58.0%); regions 29/50 (58.0%)",
+        )
+
     def test_rejects_lines_or_regions_below_floor_and_reports_multiline_spans(self) -> None:
         payload = make_payload(
             lines_covered=989,

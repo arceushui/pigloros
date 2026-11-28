@@ -93,7 +93,7 @@ COVERAGE_JOB_ENV = {
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
 COVERAGE_FLOOR_CHECKER_SHA256 = (
-    "091e6d8b7c22327be1cbb0a335e9bf1edcae5601584cbf66df0aa798d3c83dae"
+    "976168c9dd51dcfd222ede01c8868b67448bd668362a94c60b91f3236214ec41"
 )
 CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
 CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import json
 import math
 import pathlib
@@ -48,12 +49,16 @@ def _require_metric(totals: dict[str, Any], name: str) -> tuple[int, int, float]
         )
     if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
         raise CoverageExportError(f"invalid {name} coverage percent: {percent!r}")
-    computed = (covered / count) * 100.0
+    computed = (covered * 100) / count
     if abs(percent - computed) > 1e-4:
         raise CoverageExportError(
             f"inconsistent {name} coverage percent: reported={percent}, computed={computed}"
         )
     return covered, count, min(float(percent), computed)
+
+
+def _is_below_floor(covered: int, count: int, floor: float) -> bool:
+    return Fraction(covered * 100, count) < Fraction(str(floor))
 
 
 def _missed_count(metric: Any) -> int:
@@ -167,12 +172,12 @@ def check_coverage_data(
     )
 
     failures: list[str] = []
-    if lines_pct < lines_floor:
+    if _is_below_floor(lines_covered, lines_count, lines_floor):
         failures.append(
             f"line coverage {_format_below_threshold(lines_pct, lines_floor)}% "
             f"is below threshold {lines_floor:.2f}%"
         )
-    if regions_pct < regions_floor:
+    if _is_below_floor(regions_covered, regions_count, regions_floor):
         failures.append(
             f"region coverage {_format_below_threshold(regions_pct, regions_floor)}% "
             f"is below threshold {regions_floor:.2f}%"
