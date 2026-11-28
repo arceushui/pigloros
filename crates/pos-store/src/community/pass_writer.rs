@@ -330,8 +330,7 @@ impl MemoryCommunityDomainV1 {
         // The Reserve allocates its native producer ordinal and its pass
         // ordinal in its own transaction (annex §4). Nothing is burned here.
         let outcome = horizons.horizons.outcome_micros;
-        let allocated = self.reservation_for(&input, &cri1, state, outcome)?;
-        self.check_control_namespace(input.timeline, allocated.materialization_id)?;
+        let allocated = self.allocate_reservation(&input, &cri1, state, outcome)?;
         let (reservation, ordinals) = (allocated.reservation, allocated.ordinals);
         let facts = input.pass;
         // The materialization's rows bind in the Reserve transaction; the
@@ -388,6 +387,20 @@ impl MemoryCommunityDomainV1 {
         } else {
             Err(Error::InvalidBinding)
         }
+    }
+
+    /// [`Self::reservation_for`], once the materialization's control identity
+    /// is known not to be a committed control of T (R16.9(4)).
+    fn allocate_reservation(
+        &self,
+        input: &CommunityReserveInputV1,
+        cri1: &CommunityReservationRequestV1,
+        state: &CommunityPassStateV1,
+        outcome: u64,
+    ) -> Result<AllocatedV1, Error> {
+        let allocated = self.reservation_for(input, cri1, state, outcome)?;
+        self.check_control_namespace(input.timeline, allocated.materialization_id)?;
+        Ok(allocated)
     }
 
     /// The CPR1 of a Reserve and the ordinals it allocated: the next native
@@ -693,9 +706,15 @@ impl MemoryCommunityDomainV1 {
         &self,
         staged: &CommunityStagedReserveV1,
     ) -> Result<(), Error> {
-        self.check_apply_identity(staged.key)?;
-        self.check_control_namespace(staged.key.0, staged.materialization_id)?;
+        self.check_apply_slot(staged)?;
         self.check_ordinals(staged)
+    }
+
+    /// The apply's identity checks, then the materialization's control
+    /// identity against T's committed controls (R16.9(4)).
+    fn check_apply_slot(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
+        self.check_apply_identity(staged.key)?;
+        self.check_control_namespace(staged.key.0, staged.materialization_id)
     }
 
     /// R16.9(4) at the writer: the materialization's `M_id` is not a
