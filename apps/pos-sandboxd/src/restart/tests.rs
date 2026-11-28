@@ -722,8 +722,6 @@ mod cases {
         )? {
             return Ok(());
         }
-        // Attempt 2's recorded unit survived as a failed unit whose cgroup
-        // systemd removed (owner decision A).
         let runtime = seed(false)?;
         let host = host_with_failed(Listing::Surviving, vec![unit(2)?], &[unit(2)?]).await?;
         let network = Network::new(Cleanup::Removes);
@@ -766,9 +764,6 @@ mod cases {
         )? {
             return Ok(());
         }
-        // Attempt 2's recorded unit survived failed, its cgroup removed by
-        // systemd (owner decision A), and attempt 4's PAI3 provider root is
-        // still mounted on its attempt directory.
         let runtime = seed(true)?;
         let host = host_with_failed(Listing::Surviving, vec![unit(2)?], &[unit(2)?]).await?;
         // The public entry's host wiring, with restart detachment over a

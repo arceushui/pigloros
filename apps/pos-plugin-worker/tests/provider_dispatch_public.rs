@@ -1,22 +1,20 @@
 #![cfg(target_os = "linux")]
 
-//! ADR-062 Revision 8 slice N6 (#1234): ADR-068 exact provider dispatch of the checked-in
-//! `plugin-conformance` fixtures through the independent evaluator, and the flip of
-//! `expected/plugin-conformance/*` for verifier-accepted executions only.
+//! Runs the checked-in `plugin-conformance` fixtures through the independent
+//! evaluator and checks expected records only for verifier-accepted executions.
 //!
 //! The composition root of this test builds a signed in-memory CFB1 corpus from the checked-in
 //! fixture files of every family (`pos-reference`'s public corpus builder), hands the evaluator
 //! the adapter's exact `FixtureExecutorV1` declaration, and executes each dispatched case
 //! through the EAI1/EAO1 byte codec of the Plugin conformance adapter: every pass launches a
 //! fresh `pos-plugin-worker` process. The evaluator's CNR1 report is the verifier verdict.
-//! Local and Air-Gapped are both `ExecutionProfile` runs and Local-relaxation engineering
-//! evidence (ADR-062 Revision 8 Q6 and Q10); kernel-audited Air-Gapped is slice N7.
+//! Local and Air-Gapped runs provide engineering evidence; they do not establish
+//! kernel-isolated Air-Gapped execution.
 //!
 //! A family's evidence-status record is `executed` exactly when its case passes in both runs;
 //! the record then names each run's outcome and its actual output digest or failure code, and
-//! carries no time. Its content does not depend on its own bytes, so re-execution with the
-//! flipped record reaches the same record (the fixed point of the ADR-062 R8 provider-dispatch
-//! note).
+//! carries no time. Its content does not depend on its own bytes, so re-execution
+//! with the flipped record reaches the same record.
 
 use std::fs;
 use std::path::PathBuf;
@@ -336,6 +334,5 @@ fn n6_a_missing_or_mismatched_plugin_executor_launches_no_worker() -> TestResult
     Ok(())
 }
 
-/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
 const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
     pos_core::AuthorityTrustRootSealV1::for_composition_root();

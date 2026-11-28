@@ -1,11 +1,10 @@
-//! ADR-087 §2 steps 3 to 6 (#440): attach the quarantined SIM1 root at the
-//! held attempt directory and read its kernel identity back.
+//! Attach the quarantined SIM1 root at the held attempt directory and read its
+//! kernel identity back.
 //!
 //! Before mountfsd is called, the prepared attempt directory is verified
 //! again. The kernel command line must also veto systemd's userspace Verity
-//! fallback (ADR-087 Part C.3, accepted revision 31; owner decision Q7.8). The
-//! registry durably records the request's boot and time (owner decision D2),
-//! and one bounded `MountImage` call then activates the admitted image. Its single
+//! fallback. The registry durably records the request's boot and time, and one
+//! bounded `MountImage` call then activates the admitted image. Its single
 //! sealed root mount descriptor is attached by descriptor with `move_mount`
 //! onto the held root directory descriptor, so no path is resolved. It is
 //! then made private, and detached on rejection, through that descriptor's
@@ -21,8 +20,7 @@
 //! The held image is then admitted again. Any failure after attachment
 //! detaches the mount before returning, and success grants no admission
 //! authority. The live dm-verity table (root hash, salt and
-//! `root_hash_sig_key_desc`) is not read at run time; #444 records it (owner
-//! decision Q7.8).
+//! `root_hash_sig_key_desc`) is not read at run time.
 //!
 //! Kernel operations sit behind the crate-private [`AttachmentKernel`] port.
 //! Production uses only the fixed `/proc` and `/sys` host kernel.
@@ -129,8 +127,7 @@ impl VerifiedRootMount {
     }
 
     /// Recheck, immediately before `StartTransientUnit`, that current
-    /// authority and the attached mount are still the verified ones
-    /// (ADR-087 §2 step 7).
+    /// authority and the attached mount are still the verified ones.
     ///
     /// `entry` must hold the admission this root was activated from: the held
     /// image, partitions and executable it names must equal the ones this root
@@ -358,7 +355,7 @@ where
         .and_then(|prepared| recorded_image_is_held(directory, &prepared.0).map(|()| prepared));
     match prepared {
         Ok((expected, image)) => {
-            // The connection gets its own 60 s bound, like the call (owner decision Q7.4).
+            // Bound the connection attempt to 60 seconds, as with the mount call.
             let connected = tokio::time::timeout(MountfsdImageActivator::DEADLINE, connect())
                 .await
                 .unwrap_or(Err(ImageActivationError::Transport));
@@ -391,7 +388,7 @@ fn recorded_image_is_held(
 }
 
 /// Durably record the request's boot and time, so a restart can wait it out
-/// (owner decision D2), and only then send it.
+/// and only then send it.
 async fn send_recorded<A: ImageActivator>(
     directory: &PreparedAttemptDirectory,
     activator: A,

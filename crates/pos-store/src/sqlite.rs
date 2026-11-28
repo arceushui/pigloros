@@ -194,6 +194,8 @@ mod plugin_trust_registry_rows;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry_schema;
 mod registry_durability;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod subject_key_deletion;
 
 use fork_code_two_read::{
     sqlite_retained_key_evidence, sqlite_validated_admission, sqlite_validated_graph,
@@ -2349,6 +2351,8 @@ impl SqliteStore {
                     // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_key_deletion_schema()?;
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_gateway_consent_lease_schema()?;
                     self.prepare_authority_schema()
@@ -14876,15 +14880,9 @@ fn with_fork_authority_transaction<T>(
 ///
 /// Persisted grants and revocations are immutable, so once a mutation is
 /// `Unchanged` it stays `Unchanged`. An exact retry is therefore answered from
-/// one committed read without taking the write lock (#491). Any other outcome,
+/// one committed read without taking the write lock. Any other outcome,
 /// including an error, is decided again under `BEGIN IMMEDIATE`, and only a
 /// `Committed` outcome rewrites the authority state there.
-///
-/// Before #491 every outcome rewrote the state. That never failed another
-/// connection closed: the canonical bytes were identical, `SQLite` wrote no
-/// page, and `PRAGMA data_version` did not move. The real cost was write-lock
-/// contention, since each replay waited up to the 4 s busy timeout behind
-/// another writer and then failed as `Unavailable`.
 ///
 /// A read-only store answers an exact retry as `Unchanged`, because no write is
 /// needed; any mutation that must write still fails. A first-time record pays

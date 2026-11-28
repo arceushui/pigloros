@@ -35,7 +35,7 @@ ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
 # imported policy modules are pinned too: they supply EXPECTED's headroom step
 # (with the CI stage conditions that module imports) and the graph comparison.
 PRODUCER_SHA256 = {
-    "scripts/check_asan_ci_policy.py": "d8f34a83538f034127fd2ee0e0e9e89aa9843741fa3228f3c30d164a5d17d2ed",
+    "scripts/check_asan_ci_policy.py": "02553383756db91981d42745e2b005d7f73f10dc9c5c2ab30437df919f6fcb5b",
     "scripts/ci_stage_policy.py": "1ff0e611958501bfef1bfb54ea4016c129ed717d01de23a51cf8f7bf2cfd373e",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "f8935b411c586d0fdebf1c24aca650459bd166593ab3025ed0df05e4e2012a72",
@@ -47,7 +47,7 @@ PRODUCER_SHA256 = {
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
     "deploy/nixos/qemu-evidence/guest.nix": "e7066879731d9f335a00b8d16a7a79fb320476d3b879962a0b6fc1e36e62c57a",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "afe15409386efce6792806890974105f0bbbf5cb1440d4a3910362ce5cf5c637",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "475f7a7fcaa2431d2d1f42cc05ef81f960ef6cc98f6a2728ef91301527244288",
     "deploy/nixos/qemu-evidence/build-images.sh": "a8be58ad9c58a3cd6ed4d4120aab8a632463c466dff385e1f038edb98e0b9672",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt": "418702f8e3af31e90ec317776153beeeda4be61e489366379cab3a4a76455896",
     "deploy/nixos/dev-trust/root-hash-dev-test.key": "ca6cdbcf2f58cc20de6e45e63e387be37fc9d46e21d0e6e1212e6c9a0cd0dcd8",

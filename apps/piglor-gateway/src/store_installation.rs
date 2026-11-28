@@ -1,14 +1,11 @@
 #![cfg(all(target_os = "linux", any(test, feature = "test-support")))]
-//! The Gateway offline store installation command (ADR-123 §3a, Redmine
-//! #1467).
+//! Gateway offline store installation command.
 //!
-//! It takes the ADR-134 §8 sibling mode lock exclusively and nonblocking,
+//! It takes the sibling mode lock exclusively and nonblocking,
 //! holds it through the step, and runs the pos-store quiescent installation.
 //! A Gateway composed without the profile, or another installer, holds that
-//! lock, so contention refuses before anything is created. In Wave 9 the
-//! command stays test-support gated with no CLI or deployable wiring (ADR-123
-//! G13): no deployable build can install a store that no ungated participant
-//! could open.
+//! lock, so contention refuses before anything is created. This command is
+//! available only in tests and `test-support` builds.
 
 use pos_core::CoreError;
 use pos_store::owner_store_installation::install_owner_store_namespace_v1;
@@ -27,7 +24,7 @@ pub enum GatewayStoreInstallationErrorV1 {
     Store(#[from] CoreError),
 }
 
-/// Install the store at `sqlite_path` for profile composition (ADR-123 §3a).
+/// Install the store at `sqlite_path` for profile composition.
 ///
 /// The operator asserts that no participant or ordinary process has the store
 /// open. `sqlite_path` names the main file directly, in an absolute private

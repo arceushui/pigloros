@@ -201,9 +201,14 @@ network are ports, so the composition is exercised without systemd.
   namespace, veth pair and nftables firewall for exactly the admitted
   endpoints, in the lowest free slot of the installation's reserved range, and
   reads it all back before it returns; its connector opens each connection
-  from a thread inside the namespace, and dropping it removes the namespace
-  and frees the slot. `FailClosedLocalNetwork` establishes none and refuses
-  every connection.
+  from a thread inside the namespace, and removing it removes the namespace
+  and frees the slot. The provider runtime serves every Local attempt through
+  it, with the admission its issued grant carries. The egress probe of
+  restart reconciliation holds its own port instance over the same range: it
+  runs at step 7, before admission opens, and a probe that faults there closes
+  the runtime, which restarts, so the two instances never hold attempts at the
+  same time. `FailClosedLocalNetwork` (test builds only) establishes none and
+  refuses every connection.
 - Replay: every captured exchange is resolved from the durable capture store
   before launch; a missing or mismatched capture is unavailable and nothing
   starts.

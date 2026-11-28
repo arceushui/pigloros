@@ -17,7 +17,8 @@ use pos_core::{
 };
 
 use super::{
-    CommunityQuarantineReceiptV1, QuarantineLedgerV1, SetReasonPreparedV1, StagedSetReasonV1,
+    CommunityQuarantineReceiptV1, QuarantineLedgerV1, QuarantineReasonStateV1, SetReasonPreparedV1,
+    StagedSetReasonV1,
 };
 use crate::community::MemoryCommunityDomainV1;
 use crate::community_initialization_fixture::{
@@ -91,11 +92,12 @@ fn records(case: &QuarantineCase, control: [u8; 16]) -> Fallible<Vec<Vec<u8>>> {
         .quarantine_controls
         .get(&(target(), control))
         .ok_or("no committed SetReason")?;
+    let sealed = &committed.set_reason().ok_or("no SetReason")?.sealed;
     let key = domain
         .keys
-        .get(&committed.metadata_key)
+        .get(&sealed.metadata_key)
         .ok_or("no metadata key")?;
-    Ok(committed
+    Ok(sealed
         .records
         .iter()
         .map(|sealed| key.open(sealed).map(|bytes| bytes.to_vec()))
@@ -131,12 +133,24 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
         .ok_or("no index entry")?;
     assert_eq!(ledger.head, receipt.selected_ledger_digest());
     assert_eq!(ledger.ordinal, 1);
+    assert_eq!(
+        ledger.states.get(&Reason::Revoked.code()),
+        Some(&QuarantineReasonStateV1 {
+            evidence_not_after_micros: ledger.evidence_not_after_micros,
+            share_spent: true,
+        })
+    );
     let committed = after
         .quarantine_controls
         .values()
         .next()
         .ok_or("no committed SetReason")?;
-    let admission = committed.admission.as_ref().ok_or("no COA1")?;
+    let admission = committed
+        .set_reason()
+        .ok_or("no SetReason")?
+        .admission
+        .as_ref()
+        .ok_or("no COA1")?;
     let owner = community_catalogue_owner_v1(target(), GENERATION)?;
     let row = ArtifactRegistrationPersistencePortV1::read_artifact_registration(
         &after.store,
@@ -154,7 +168,13 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
     assert!(fields.child_artifacts.is_empty());
     let metadata_intent = *after
         .keys
-        .get(&committed.metadata_key)
+        .get(
+            &committed
+                .set_reason()
+                .ok_or("no SetReason")?
+                .sealed
+                .metadata_key,
+        )
         .ok_or("no metadata key")?
         .intent()
         .as_input();
@@ -244,7 +264,11 @@ fn an_active_reason_persists_only_its_outcome() -> TestResult {
         .quarantine_controls
         .get(&(target(), again))
         .ok_or("no committed SetReason")?;
-    assert!(committed.admission.is_none());
+    assert!(committed
+        .set_reason()
+        .ok_or("no SetReason")?
+        .admission
+        .is_none());
     // CCI1, CQC1, CQO1.
     assert_eq!(records(&case, again)?.len(), 3);
     Ok(())
@@ -366,11 +390,17 @@ fn a_retry_needs_its_retained_evidence() -> TestResult {
             .ok_or("no committed SetReason")?;
         match fault {
             0 => {
-                let key = committed.metadata_key;
+                let key = committed
+                    .set_reason()
+                    .ok_or("no SetReason")?
+                    .sealed
+                    .metadata_key;
                 domain.keys.remove(&key);
             }
             1 => committed.receipt.outcome = zeroize::Zeroizing::new(vec![0x80]),
-            _ => committed.generation = [0x99; 16],
+            _ => {
+                committed.set_reason_mut().ok_or("no SetReason")?.generation = [0x99; 16];
+            }
         }
         assert_eq!(
             set_reason(&mut case, claim(Basis::Artifact))?.err(),
@@ -427,6 +457,7 @@ fn an_active_reason_skips_the_horizon_check() -> TestResult {
                 failure_evidence_digest: hash(0x94),
             }],
             evidence_not_after_micros: EXPIRES - 1,
+            states: std::collections::BTreeMap::new(),
         },
     );
     let outcome = with_set_reason(

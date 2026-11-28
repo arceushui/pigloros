@@ -814,3 +814,39 @@ fn pass_failure_bounds_links_and_wire_framing_refuse_without_fresh_retry() -> Te
     );
     Ok(())
 }
+
+#[test]
+fn the_public_host_code_is_the_code_the_records_encode() -> TestResult {
+    for (host, mut value) in host_cases() {
+        let encoded = fields(&mut value)?.first().cloned();
+        assert_eq!(encoded, Some(uint(u64::from(host.code()))));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_guest_error_check_applies_the_cfi1_bounds() {
+    let guest = |code, coordinate| Guest {
+        code,
+        canonical_coordinate: coordinate,
+        related_digest: None,
+    };
+    let at_bound = [0_u8; 128];
+    let over_bound = [0_u8; 129];
+    assert_eq!(
+        guest(GuestCode::GuestDeclaredFailure(1), Some(&at_bound)).check(),
+        Ok(())
+    );
+    assert_eq!(
+        guest(GuestCode::GuestDeclaredFailure(1), Some(&over_bound)).check(),
+        Err(Error::BoundsExceeded)
+    );
+    assert_eq!(
+        guest(GuestCode::CapabilityRequired("cap/read"), None).check(),
+        Ok(())
+    );
+    assert_eq!(
+        guest(GuestCode::CapabilityRequired(""), None).check(),
+        Err(Error::InvalidBinding)
+    );
+}
