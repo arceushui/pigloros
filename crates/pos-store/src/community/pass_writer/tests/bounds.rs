@@ -244,21 +244,31 @@ fn seeded() -> Result<(MemoryCommunityDomainV1, Model), Box<dyn std::error::Erro
     ))
 }
 
-/// Stage and apply a Reserve of `rows` rows on the model Timeline
-/// `timeline`, reusing the retained observation; the refusal when refused.
-fn reserve(
-    domain: &mut MemoryCommunityDomainV1,
+/// A Reserve of `rows` rows on the model Timeline `timeline`, reusing the
+/// retained observation.
+fn call_for(
     timeline: usize,
     operation: [u8; 16],
     rows: u64,
-) -> Result<Option<Error>, Box<dyn std::error::Error>> {
+) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
     let call = CommunityReserveInputV1 {
         timeline: timeline_of(timeline),
         reservation_operation_id: operation,
         pass_rows: rows,
         ..reuse()?
     };
-    match domain.stage_reserve(bound(call)?) {
+    Ok(bound(call)?)
+}
+
+/// Stage and apply a Reserve of `rows` rows on the model Timeline
+/// `timeline`; the refusal when refused.
+fn reserve(
+    domain: &mut MemoryCommunityDomainV1,
+    timeline: usize,
+    operation: [u8; 16],
+    rows: u64,
+) -> Result<Option<Error>, Box<dyn std::error::Error>> {
+    match domain.stage_reserve(call_for(timeline, operation, rows)?) {
         Ok(staged) => {
             domain.apply_reserve(&SEAL, staged)?;
             Ok(None)

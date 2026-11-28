@@ -21,17 +21,28 @@ fn at(
     Ok(bound(call)?)
 }
 
+/// Stage and apply the Reserve at `sample`.
+fn reserved(domain: &mut MemoryCommunityDomainV1, sample: u64, operation: [u8; 16]) -> TestResult {
+    let staged = domain.stage_reserve(at(sample, operation)?)?;
+    domain.apply_reserve(&SEAL, staged)?;
+    Ok(())
+}
+
+/// Abort the pending Reserve of `operation`, registering no row.
+fn aborted(domain: &mut MemoryCommunityDomainV1, operation: [u8; 16]) -> TestResult {
+    let abort = domain.stage_abort(id(1), operation, 0)?;
+    domain.apply_abort(&SEAL, &abort)?;
+    Ok(())
+}
+
 /// Stage and apply the Reserve at `sample`, then resolve it by an Abort.
 fn reserved_and_aborted(
     domain: &mut MemoryCommunityDomainV1,
     sample: u64,
     operation: [u8; 16],
 ) -> TestResult {
-    let staged = domain.stage_reserve(at(sample, operation)?)?;
-    domain.apply_reserve(&SEAL, staged)?;
-    let abort = domain.stage_abort(id(1), operation, 0)?;
-    domain.apply_abort(&SEAL, &abort)?;
-    Ok(())
+    reserved(domain, sample, operation)?;
+    aborted(domain, operation)
 }
 
 /// The outcome horizon `H_r` of the pass `operation` of T.
