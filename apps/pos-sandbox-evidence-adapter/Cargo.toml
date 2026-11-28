@@ -20,5 +20,13 @@ blake3 = { workspace = true }
 pos-reference = { path = "../../crates/pos-reference" }
 thiserror = { workspace = true }
 
+# The probes use Linux-only system calls (mount, packet sockets); the library
+# is Linux-only (see src/lib.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["mount", "net", "process"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
