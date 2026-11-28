@@ -147,7 +147,6 @@ for ci_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
   ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
   printf 'CI SDK device: %s root=%s sdk=%s\\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
   test "${ci_sdk_device}" = "${ci_root_device}"
-  sudo du -sx -B1 -- "${ci_sdk_path}"
   sudo rm -rf --one-file-system -- "${ci_sdk_path}"
   printf 'CI SDK removed: %s\\n' "${ci_sdk_path}"
 done

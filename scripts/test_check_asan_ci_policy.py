@@ -133,7 +133,6 @@ class AsanCiPolicyTests(unittest.TestCase):
             '  test ! -L "${ci_sdk_path}"\n',
             '  test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"\n',
             '  test "${ci_sdk_device}" = "${ci_root_device}"\n',
-            '  sudo du -sx -B1 -- "${ci_sdk_path}"\n',
             '  printf \'CI SDK removed: %s\\n\' "${ci_sdk_path}"\n',
         )
         for line in protected_lines:
