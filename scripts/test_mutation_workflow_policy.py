@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import os
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -25,14 +27,17 @@ relevant=false
 if [[ "$FORCE_MUTATION" = true ]]; then
   relevant=true
 else
-  while IFS= read -r path; do
+  changed_paths="${RUNNER_TEMP}/mutation-changes.paths"
+  git diff --name-only --diff-filter=ACMRT -z "$BASE_SHA...$HEAD_SHA" \\
+    > "$changed_paths"
+  while IFS= read -r -d '' path; do
     case "$path" in
       *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/config.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/run_mutation_canary.sh|scripts/test_mutation_workflow_policy.py)
         relevant=true
         break
         ;;
     esac
-  done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
+  done < "$changed_paths"
 fi
 echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 """
@@ -41,7 +46,8 @@ MUTATION_IF = (
     "needs.mutation-baseline.result == 'success' && "
     "needs.mutation-canary.result == 'success'"
 )
-GATE_RUN = """test "${{ needs.mutation-changes.result }}" = success
+GATE_RUN = """set -euo pipefail
+test "${{ needs.mutation-changes.result }}" = success
 if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
   test "${{ needs.mutation-baseline.result }}" = success
   test "${{ needs.mutation-canary.result }}" = success
@@ -65,6 +71,40 @@ SHARED_HARNESS_ARGS = [
     "--", "--", "-Zunstable-options", "--fail-fast", "--include-ignored",
     "--test-threads=4",
 ]
+BASELINE_STEPS = [
+    {
+        "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    },
+    {
+        "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
+        "with": {"toolchain": "${{ env.RUSTUP_TOOLCHAIN }}"},
+    },
+    {
+        "uses": "Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266",
+        "with": {"shared-key": "mutation"},
+    },
+    {
+        "name": "Prove the mutation test harness",
+        "env": {"CARGO_INCREMENTAL": "1"},
+        "run": BASELINE_RUN,
+    },
+    {
+        "name": "Upload mutation baseline log",
+        "if": "always()",
+        "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+        "with": {
+            "name": "mutation-baseline",
+            "path": "${{ runner.temp }}/mutation-baseline.log",
+            "if-no-files-found": "error",
+        },
+    },
+]
+MUTATION_DIFF_RUN = """set -euo pipefail
+base_ref="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
+git diff --relative --unified=0 \\
+  "origin/${base_ref}...HEAD" \\
+  > "${RUNNER_TEMP}/changes.diff"
+"""
 
 
 def cargo_mutants_arguments(command: str) -> list[str]:
@@ -107,7 +147,12 @@ def shared_harness_arguments(arguments: list[str]) -> list[str]:
 
 def check_contract(workflow: dict, canary_script: str | None = None) -> None:
     """Reject toolchain drift, baseline bypasses, and permissive fan-in."""
-    if workflow.get("on", workflow.get(True)) != {
+    events_key = "on" if "on" in workflow else True
+    if set(workflow) != {
+        "name", events_key, "permissions", "concurrency", "env", "jobs",
+    }:
+        raise AssertionError("preserve the reviewed workflow-level controls")
+    if workflow.get(events_key) != {
         "workflow_call": None,
         "workflow_dispatch": None,
     }:
@@ -163,19 +208,20 @@ def check_contract(workflow: dict, canary_script: str | None = None) -> None:
                     "all failures stay blocking"
                 )
     baseline = jobs["mutation-baseline"]
+    if set(baseline) != {
+        "name", "needs", "if", "runs-on", "env", "timeout-minutes", "steps",
+    }:
+        raise AssertionError("baseline job controls must remain allowlisted")
     if (
-        baseline.get("needs") != "mutation-changes"
+        baseline.get("name") != "mutation test baseline"
+        or baseline.get("needs") != "mutation-changes"
+        or baseline.get("runs-on") != "ubuntu-24.04"
         or baseline.get("if") != "needs.mutation-changes.outputs.relevant == 'true'"
         or baseline.get("timeout-minutes") != 30
     ):
         raise AssertionError("baseline must run for every relevant change")
-    runs = [step for step in baseline["steps"] if "run" in step]
-    if runs != [{
-        "name": "Prove the mutation test harness",
-        "env": {"CARGO_INCREMENTAL": "1"},
-        "run": BASELINE_RUN,
-    }]:
-        raise AssertionError("baseline must execute the complete mutation harness")
+    if baseline["steps"] != BASELINE_STEPS:
+        raise AssertionError("baseline must retain its ordered, blocking steps and report")
     changes = jobs["mutation-changes"]
     if changes != {
         "name": "detect mutation-relevant changes",
@@ -245,13 +291,20 @@ def check_contract(workflow: dict, canary_script: str | None = None) -> None:
     ):
         raise AssertionError("the canary must use the repository toolchain and retain its full report")
     mutation = jobs["mutation"]
+    if set(mutation) != {
+        "name", "needs", "if", "runs-on", "timeout-minutes", "strategy", "steps",
+    }:
+        raise AssertionError("mutation worker controls must remain allowlisted")
     if (
-        mutation.get("needs") != [
+        mutation.get("name") != "diff mutation testing (shard ${{ matrix.shard }})"
+        or mutation.get("needs") != [
             "mutation-changes", "mutation-baseline", "mutation-canary"
         ]
         or mutation.get("if") != MUTATION_IF
+        or mutation.get("runs-on") != "ubuntu-24.04"
+        or mutation.get("timeout-minutes") != 70
     ):
-        raise AssertionError("mutants require a successful same-harness baseline")
+        raise AssertionError("mutation workers require the reviewed blocking controls")
     if mutation["strategy"] != {
         "fail-fast": False,
         "max-parallel": 8,
@@ -272,16 +325,41 @@ def check_contract(workflow: dict, canary_script: str | None = None) -> None:
     )
     if "if" in mutation_step:
         raise AssertionError("mutation execution must be unconditional")
-    canary_arguments = cargo_mutants_arguments(canary_script)
-    worker_arguments = cargo_mutants_arguments(mutation_step["run"])
-    canary_harness = shared_harness_arguments(canary_arguments)
-    worker_harness = shared_harness_arguments(worker_arguments)
-    if canary_harness != SHARED_HARNESS_ARGS or worker_harness != SHARED_HARNESS_ARGS:
-        raise AssertionError("canary and mutation shards must share the test harness")
-    if "--annotations=none" not in canary_arguments:
-        raise AssertionError("the expected canary survivor must not emit a GitHub warning")
-    if hashlib.sha256(canary_script.encode("utf-8")).hexdigest() != CANARY_SCRIPT_SHA256:
-        raise AssertionError("preserve the reviewed mutation-canary program")
+    if mutation["steps"] != [
+        {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {"fetch-depth": 0},
+        },
+        {
+            "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
+            "with": {"toolchain": "${{ env.RUSTUP_TOOLCHAIN }}"},
+        },
+        {
+            "uses": "Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266",
+            "with": {"shared-key": "mutation"},
+        },
+        {
+            "uses": "taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519",
+            "with": {"tool": "cargo-mutants@27.1.0"},
+        },
+        {"name": "Capture pull-request diff", "run": MUTATION_DIFF_RUN},
+        {
+            "name": "Run mutants in changed lines",
+            "env": {"CARGO_INCREMENTAL": "1"},
+            "run": mutation_step["run"],
+        },
+        {
+            "name": "Upload mutation report",
+            "if": "always()",
+            "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+            "with": {
+                "name": "mutation-report-shard-${{ matrix.shard }}",
+                "path": "mutants.out",
+                "if-no-files-found": "ignore",
+            },
+        },
+    ]:
+        raise AssertionError("mutation workers must retain their ordered reviewed steps")
     command = " ".join(mutation_step["run"].replace("\\\n", " ").split())
     required = (
         "timeout --foreground 60m cargo mutants --workspace --all-features "
@@ -298,18 +376,29 @@ def check_contract(workflow: dict, canary_script: str | None = None) -> None:
         != MUTATION_RUN_SHA256
     ):
         raise AssertionError("preserve the reviewed mutation program, not inert command text")
+    canary_arguments = cargo_mutants_arguments(canary_script)
+    worker_arguments = cargo_mutants_arguments(mutation_step["run"])
+    canary_harness = shared_harness_arguments(canary_arguments)
+    worker_harness = shared_harness_arguments(worker_arguments)
+    if canary_harness != SHARED_HARNESS_ARGS or worker_harness != SHARED_HARNESS_ARGS:
+        raise AssertionError("canary and mutation shards must share the test harness")
+    if "--annotations=none" not in canary_arguments:
+        raise AssertionError("the expected canary survivor must not emit a GitHub warning")
+    if hashlib.sha256(canary_script.encode("utf-8")).hexdigest() != CANARY_SCRIPT_SHA256:
+        raise AssertionError("preserve the reviewed mutation-canary program")
     gate = jobs["mutation-gate"]
-    if (
-        gate.get("needs") != [
+    if gate != {
+        "name": "diff mutation testing",
+        "if": "always()",
+        "needs": [
             "mutation-changes", "mutation-baseline", "mutation-canary", "mutation"
-        ]
-        or gate.get("if") != "always()"
-        or "continue-on-error" in gate
-        or gate["steps"] != [{
+        ],
+        "runs-on": "ubuntu-24.04",
+        "steps": [{
             "name": "Require every relevant mutation shard to pass",
             "run": GATE_RUN,
         }]
-    ):
+    }:
         raise AssertionError("fan-in must require the baseline and every shard")
 
 
@@ -346,9 +435,72 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
         extra_job["jobs"]["unreviewed"] = {"runs-on": "ubuntu-latest", "steps": []}
         cases.append(("extra job", extra_job))
 
+        workflow_shell_override = copy.deepcopy(self.workflow)
+        workflow_shell_override["defaults"] = {"run": {"shell": "bash {0}"}}
+        cases.append(("workflow shell override", workflow_shell_override))
+
         for description, changed in cases:
             with self.subTest(change=description), self.assertRaises(AssertionError):
                 check_contract(changed)
+
+    def test_rejects_job_graph_bypasses(self) -> None:
+        cases = []
+
+        gate_shell_override = copy.deepcopy(self.workflow)
+        gate_shell_override["jobs"]["mutation-gate"]["defaults"] = {
+            "run": {"shell": "bash {0}"},
+        }
+        cases.append(("gate shell override", gate_shell_override))
+
+        gate_without_strict_mode = copy.deepcopy(self.workflow)
+        gate_step = gate_without_strict_mode["jobs"]["mutation-gate"]["steps"][0]
+        gate_step["run"] = gate_step["run"].replace("set -euo pipefail\n", "", 1)
+        cases.append(("gate without strict mode", gate_without_strict_mode))
+
+        baseline_action = copy.deepcopy(self.workflow)
+        baseline_action["jobs"]["mutation-baseline"]["steps"].insert(
+            2, {"uses": "actions/checkout@unreviewed"},
+        )
+        cases.append(("injected baseline action", baseline_action))
+
+        skipped_installer = copy.deepcopy(self.workflow)
+        skipped_installer["jobs"]["mutation-baseline"]["steps"][1]["if"] = "false"
+        cases.append(("skipped baseline toolchain", skipped_installer))
+
+        worker_permissions = copy.deepcopy(self.workflow)
+        worker_permissions["jobs"]["mutation"]["permissions"] = {"contents": "write"}
+        cases.append(("worker write permission", worker_permissions))
+
+        for description, changed in cases:
+            with self.subTest(change=description), self.assertRaises(AssertionError):
+                check_contract(changed)
+
+    def test_classifier_fails_when_git_diff_fails(self) -> None:
+        run = self.workflow["jobs"]["mutation-changes"]["steps"][1]["run"]
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary) / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text("#!/usr/bin/env bash\nexit 47\n", encoding="utf-8")
+            fake_git.chmod(0o755)
+            output = pathlib.Path(temporary) / "github-output"
+            env = dict(os.environ)
+            env.update({
+                "BASE_SHA": "missing-base",
+                "HEAD_SHA": "deadbeef",
+                "FORCE_MUTATION": "false",
+                "GITHUB_OUTPUT": str(output),
+                "RUNNER_TEMP": temporary,
+                "PATH": str(fake_bin) + os.pathsep + env["PATH"],
+            })
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", run],
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 47, result.stderr.decode())
+            self.assertFalse(output.exists())
 
     def test_rejects_canary_execution_graph_drift(self) -> None:
         changes_run = self.workflow["jobs"]["mutation-changes"]["steps"][1]["run"]
@@ -596,7 +748,7 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
             }.items():
                 script = script.replace("${{ needs." + key + " }}", value)
             return subprocess.run(
-                ["bash", "-euo", "pipefail", "-c", script],
+                ["bash", "--noprofile", "--norc", "-c", script],
                 capture_output=True, check=False,
             ).returncode
 

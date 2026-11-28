@@ -45,14 +45,17 @@ jobs:
           if [[ "$FORCE_MUTATION" = true ]]; then
             relevant=true
           else
-            while IFS= read -r path; do
+            changed_paths="${RUNNER_TEMP}/mutation-changes.paths"
+            git diff --name-only --diff-filter=ACMRT -z "$BASE_SHA...$HEAD_SHA" \
+              > "$changed_paths"
+            while IFS= read -r -d '' path; do
               case "$path" in
                 *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/config.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/run_mutation_canary.sh|scripts/test_mutation_workflow_policy.py)
                   relevant=true
                   break
                   ;;
               esac
-            done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
+            done < "$changed_paths"
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 

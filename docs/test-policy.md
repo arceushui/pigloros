@@ -43,11 +43,12 @@ nightly-only harness arguments work.
 After that successful same-run baseline, every shard must use `--baseline run`
 to prove its own unmutated scratch copy before testing mutations. A fixture
 missing only from the copied tree must fail the baseline rather than count as
-a caught mutant. The aggregate gate requires the shared baseline and every
-shard. This also applies to manual workflow dispatch. The separate baseline has
-the normal test job's 30-minute limit. Mutant limits are 240 seconds for tests,
-600 seconds for builds, and a 60-minute shard watchdog. The test limit also
-bounds each shard's unmutated baseline, and pos-store's suite takes about 120
+a caught mutant. The aggregate gate requires the shared baseline, the canary,
+and every shard. Manual workflow dispatch has the same requirement. The
+separate baseline has the normal test job's 30-minute limit. Mutant test limits
+are 240 seconds, build limits are 600 seconds, and the shard watchdog is 60
+minutes. The test limit also bounds each shard's unmutated baseline, and
+pos-store's suite takes about 120
 seconds or more (mutation run 44010869119 timed out its baseline at the former
 120-second limit). `scripts/test_mutation_workflow_policy.py`
 locks this dependency and exercises failed, cancelled, missing and skipped
