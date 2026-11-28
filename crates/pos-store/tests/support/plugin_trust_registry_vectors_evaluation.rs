@@ -10,8 +10,8 @@
 
 use crate::fixtures::{
     activation, bound_store, foreign_operator_signer, release_one, release_two, spec,
-    tps1_signed_by, tps_after, Env, Harness, ManifestSpec, Material, Registry, RegistryError, Spec,
-    TestResult, TpsSpec,
+    tps1_signed_by, tps_after, trusted, Env, Harness, ManifestSpec, Material, Registry,
+    RegistryError, Spec, TestResult, TpsSpec,
 };
 use pos_conformance::{PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1};
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
@@ -786,5 +786,140 @@ fn the_policy_facts_follow_the_retained_policy_after_an_adoption() -> TestResult
     assert_ne!(decision.terminal_root(), newer.terminal_root());
     assert_eq!(evaluation.trusted_utc_second(), 52);
     assert_eq!(evaluation.tick(), 7);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// EV15: the evaluation under the scope's own retained anchor and TPS1
+// ---------------------------------------------------------------------------
+
+/// Evaluate `manifest` under the retained anchor and TPS1 of the harness scope.
+fn retained(
+    h: &Harness<Store>,
+    material: &Material,
+    manifest: &ManifestSpec,
+) -> TestResult<Registry<CurrentReleaseEvaluationV1>> {
+    Ok(h.store.evaluate_retained_release(
+        "scope",
+        &material.evidence,
+        &manifest.projection()?,
+        material.trusted()?,
+        material.tick,
+    ))
+}
+
+#[test]
+fn a_retained_evaluation_equals_the_supplied_one_and_carries_the_retained_tps1() -> TestResult {
+    let h = admitted()?;
+    let one = release_one();
+    let before = h.snapshot(&[&one])?;
+    let later = h.same_policy(60, 8)?;
+    let evaluation = retained(&h, &later, &one)??;
+    assert_eq!(h.evaluate(&later, &one)??, evaluation);
+    assert_eq!(evaluation.tps1_digest(), before.policy.tps1_digest());
+    assert_eq!(evaluation.trusted_utc_second(), 60);
+    assert_eq!(evaluation.tick(), 8);
+    // Nothing moved, not even the UTC floor.
+    assert_eq!(h.snapshot(&[&one])?, before);
+    assert_eq!(h.policy()?.highest_trusted_utc_second(), Some(50));
+    Ok(())
+}
+
+#[test]
+fn a_retained_evaluation_follows_an_adopted_policy() -> TestResult {
+    let mut h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let successor = h
+        .env
+        .material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
+    h.advance(&successor)??;
+    let evaluation = retained(&h, &successor, &release_one())??;
+    assert_eq!(evaluation.tps1_digest(), successor.tps1_digest());
+    assert_eq!(evaluation, h.evaluate(&successor, &release_one())??);
+    Ok(())
+}
+
+#[test]
+fn a_scope_that_is_not_installed_is_missing_state() -> TestResult {
+    let (store, _timeline, _guard) = bound_store::<Store>()?;
+    let genesis = Env::new("scope")?.genesis()?;
+    let one = release_one();
+    assert_eq!(
+        store.evaluate_retained_release(
+            "scope",
+            &genesis.evidence,
+            &one.projection()?,
+            genesis.trusted()?,
+            genesis.tick,
+        ),
+        Err(RegistryError::MissingState)
+    );
+    let h = admitted()?;
+    assert_eq!(
+        h.store.evaluate_retained_release(
+            "other",
+            &genesis.evidence,
+            &one.projection()?,
+            genesis.trusted()?,
+            genesis.tick,
+        ),
+        Err(RegistryError::MissingState)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_retained_evaluation_refuses_what_the_supplied_one_refuses() -> TestResult {
+    let one = release_one();
+    // A revoked release.
+    let mut h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let revoking = Spec {
+        epochs: 2,
+        revoked_artifacts: vec![one.release_digest()?],
+        ..Spec::default().at(51, 6)
+    };
+    let material = h.env.material(&revoking, &tps_after(&genesis))?;
+    h.advance(&material)??;
+    assert_eq!(
+        retained(&h, &material, &one)?,
+        Err(trust(PluginTrustErrorV1::ArtifactRevoked))
+    );
+    assert_eq!(retained(&h, &material, &one)?, h.evaluate(&material, &one)?);
+    // A release that expired before the evaluation second.
+    let mut h = Harness::<Store>::open()?;
+    let genesis = h.env.genesis()?;
+    let short_lived = ManifestSpec {
+        not_after: 55,
+        ..release_one()
+    };
+    h.admit(&genesis, &short_lived, 1)??;
+    let at_sixty = h.same_policy(60, 5)?;
+    assert_eq!(
+        retained(&h, &at_sixty, &short_lived)?,
+        Err(trust(PluginTrustErrorV1::ManifestExpired))
+    );
+    // A UTC second below the retained highest, an unauthorized release, and evidence built at
+    // other coordinates than the call.
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    assert_eq!(
+        retained(&h, &h.same_policy(40, 5)?, &one)?,
+        Err(RegistryError::TrustedTimeRegressed)
+    );
+    assert_eq!(
+        retained(&h, &genesis, &unauthorized())?,
+        Err(trust(PluginTrustErrorV1::PluginIdNotGranted))
+    );
+    assert_eq!(
+        h.store.evaluate_retained_release(
+            "scope",
+            &genesis.evidence,
+            &one.projection()?,
+            trusted(51)?,
+            genesis.tick,
+        ),
+        Err(bridge(PluginTrustBridgeErrorV1::EvaluationUtcMismatch))
+    );
     Ok(())
 }
