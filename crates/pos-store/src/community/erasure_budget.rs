@@ -185,11 +185,31 @@ impl MemoryCommunityDomainV1 {
         timeline: TimelineId,
         members: u64,
     ) -> Result<(), Error> {
-        let rows = 5 * members;
-        let reserve = COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * members;
+        // The context's `5n` rows and `F_q` fit exactly like a pass's rows
+        // and `F_p` (R13.1(3)): one implementation of the bound.
+        self.check_budget_fit(
+            timeline,
+            5 * members,
+            COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * members,
+        )
+    }
+
+    /// R13.1(3) for a reset: re-arming the `F_q` shares of `spent` pairs
+    /// holds `2 * spent` targets and `spent` rows more of T's reserve. They
+    /// must fit for every actor of the scope like any reserve, or the reset
+    /// gives 14 and the quarantine stays.
+    ///
+    /// # Errors
+    /// Returns `CapacityExhausted` when the re-armed reserve does not fit,
+    /// and the budget read's error.
+    pub(super) fn check_rearm_budget(&self, timeline: TimelineId, spent: u64) -> Result<(), Error> {
+        self.check_budget_fit(timeline, 0, 2 * spent)
+    }
+
+    /// Whether `rows` more rows and `reserve` more reserve targets on
+    /// `timeline` fit every actor of its scope (R13.1(3)): `14` otherwise.
+    fn check_budget_fit(&self, timeline: TimelineId, rows: u64, reserve: u64) -> Result<(), Error> {
         self.erasure_budget(timeline).and_then(|budget| {
-            // The context's `5n` rows and `F_q` fit exactly like a pass's
-            // rows and `F_p` (R13.1(3)): one implementation of the bound.
             let fits = budget.actors.iter().all(|actor| {
                 let pending = self.pending_erasure_demand(actor.actor);
                 trace_room(&budget, actor, &pending, timeline, rows, reserve).is_some()

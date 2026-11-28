@@ -10,11 +10,15 @@ use pos_core::community_lifecycle::{
     CommunityPassKeyV1, CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
     CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1 as Evidence,
     CommunityQuarantineReasonV1 as Reason, CommunityReservationInputV1, CommunitySharedCountsV1,
+    COMMUNITY_ERASURE_TARGET_LINE_V1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash};
 use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 
 use super::CommunityQuarantineResetCallV1;
+use crate::community::erasure_budget::{
+    CommunityErasureBudgetPortV1, CommunityPendingReservationV1,
+};
 use crate::community::pass_record::{
     CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1,
 };
@@ -28,6 +32,7 @@ use crate::community_initialization_fixture::{
     hash, profile_until, target, Fallible, QuarantineCase, Revocation, Roster, ENTRIES, GENERATION,
     HORIZON, INSTALLED_CATALOGUE, NATIVE_PROFILE,
 };
+use crate::erasure_budget_rows::community_rows;
 use crate::plugin_trust_registry_fixtures::{release_one, Material};
 
 /// The trust-root seal of the test composition.
@@ -484,4 +489,65 @@ fn unresolved_pass(head: Hash) -> Fallible<CommunityPassRecordV1> {
         sealed_result_digest: None,
         live: false,
     })
+}
+
+/// What a refused reset leaves alone: the ledger head and ordinal, the
+/// active pairs, the retained controls, the inventory generation and the
+/// pending ledger.
+fn untouched(case: &QuarantineCase) -> Fallible<(Hash, u64, u64, usize, u64, usize)> {
+    let domain = &case.domain.world.domain;
+    Ok((
+        ledger(case)?.head,
+        ledger(case)?.ordinal,
+        active_pairs(case),
+        domain.quarantine_controls.len(),
+        domain.inventory_generation,
+        domain.pending_reservations.len(),
+    ))
+}
+
+/// R13.1(3), I136: a reset re-arms the spent `F_q` share (two targets and a
+/// row), which must fit the actor's budget like any reserve. With T's actor
+/// exactly at the community line after the re-arm the reset applies; one
+/// target more pending gives 14, keeps the quarantine and changes nothing.
+#[test]
+fn a_reset_that_cannot_re_arm_its_reserve_gives_14() -> TestResult {
+    for (extra, applied) in [(0, true), (1, false)] {
+        let mut case = seeded(Revocation::None)?;
+        let domain = &mut case.domain.world.domain;
+        // Three members: `F_q` is 24 targets less the three active pairs'
+        // 6, and the reset's one spent share brings back two.
+        domain.erasure_contexts.entry(target()).or_default().members = 3;
+        let base = domain
+            .erasure_budget(target())?
+            .actors
+            .iter()
+            .map(|actor| actor.targets)
+            .max()
+            .ok_or("an actor")?;
+        let free = COMMUNITY_ERASURE_TARGET_LINE_V1 - base - (24 - 6) - 2;
+        domain
+            .store
+            .bind_erasure_rows_for_test(target(), community_rows(1_000, free / 2)?);
+        // Pending targets take the rest of the line, and `extra` one more.
+        domain.pending_reservations.insert(
+            (target(), [9; 16]),
+            CommunityPendingReservationV1 {
+                targets: free % 2 + extra,
+                rows: 0,
+            },
+        );
+        let before = untouched(&case)?;
+        let result = reset(&mut case, &Claim::of_seeded())?;
+        if applied {
+            result?;
+            assert_eq!(active_pairs(&case), 2);
+            assert!(ledger(&case)?.reasons.is_empty());
+        } else {
+            assert_eq!(result.err(), Some(Error::CapacityExhausted));
+            assert_eq!(untouched(&case)?, before);
+            assert_eq!(ledger(&case)?.reasons.len(), 2);
+        }
+    }
+    Ok(())
 }
