@@ -73,6 +73,7 @@ use crate::community::lifecycle_authority::{
 use crate::community::memory_domain::MemoryCommunityDomainV1;
 use crate::community::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use crate::community::store_domain::CommunityStoreDomainV1;
+#[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::{PluginTrustPolicyRegistryV1, TrustedUtcSecondV1};
 
 /// The Tick of the reset's trust evaluation: T's committed host Tick from

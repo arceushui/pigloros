@@ -38,6 +38,7 @@ use crate::community_initialization_fixture::{
     INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
 };
 use crate::erasure_budget_rows::{community_rows, erasure_row};
+#[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 use crate::plugin_trust_registry_fixtures::{release_one, spec, tps_after};
 
