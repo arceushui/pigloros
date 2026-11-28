@@ -434,6 +434,21 @@ fn a_rejected_requests_rows_are_deleted_and_no_other_requests_rows_are() -> Test
 }
 
 #[test]
+fn a_refusal_after_the_rejected_delete_rolls_the_delete_back() -> TestResult {
+    let fixture = Fixture::new()?;
+    machine(&fixture.shared).submit(fixture.request.clone(), fixture.request.provenance())?;
+    machine(&fixture.shared).reject(fixture.id(), reference(31))?;
+    seed_row(&fixture.path, fixture.parent, fixture.id(), 2)?;
+    seed_row(&fixture.path, fixture.parent, reference(77), 2)?;
+    fixture.assert_refused(CONTRADICTORY)?;
+    assert!(fixture
+        .rows()?
+        .contains(&row(fixture.parent, fixture.id(), 2)));
+    assert_eq!(fixture.rows()?.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn every_frozen_request_gets_its_own_rows() -> TestResult {
     let fixture = Fixture::frozen()?;
     let second = overlapping_request()?;
