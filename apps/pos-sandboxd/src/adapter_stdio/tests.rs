@@ -261,25 +261,38 @@ fn the_provider_only_writes_stdin_and_only_reads_stdout() {
     assert!(production.contains("capture(provider.output,"));
 }
 
+/// The launcher's source files, every directory below `directory` included; only a file named
+/// `tests.rs` is left out (it is test code).
+fn launcher_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> TestResult {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            launcher_files(&path, files)?;
+        } else if path.file_name().is_some_and(|name| name != "tests.rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// I9 (R10 §6): the launcher passes fds 0 to 2 through unchanged; it never
 /// names stdin or stdout.
 #[test]
 fn the_launcher_never_touches_stdin_or_stdout() -> TestResult {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/launcher");
-    let mut checked = 0;
-    for entry in std::fs::read_dir(directory)? {
-        let path = entry?.path();
-        // The directory of a module's own tests is not launcher code, and neither is `tests.rs`.
-        if path.is_dir() || path.file_name().is_some_and(|name| name == "tests.rs") {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path)?.to_lowercase();
+    let mut files = Vec::new();
+    launcher_files(&directory, &mut files)?;
+    for path in &files {
+        let source = std::fs::read_to_string(path)?.to_lowercase();
         for name in ["stdin", "stdout", "fd 0", "fd 1"] {
             assert!(!source.contains(name), "{} names {name}", path.display());
         }
-        checked += 1;
     }
-    assert!(checked >= 8);
+    assert!(files.len() >= 8);
+    assert!(files
+        .iter()
+        .any(|path| path.ends_with("launcher/process_identity.rs")));
+    assert!(files.iter().all(|path| !path.ends_with("tests.rs")));
     Ok(())
 }
 

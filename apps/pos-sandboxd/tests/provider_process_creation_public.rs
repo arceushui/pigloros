@@ -380,6 +380,44 @@ fn included_support_files_never_create_a_local_process() -> TestResult {
     Ok(())
 }
 
+/// The text of the function named `name` (`fn name`, whatever its qualifiers): from its first
+/// opening brace to the brace that closes it. A `None` means no such function or no body.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn function_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let rest = &text[text.find(name)?..];
+    let start = rest.find('{')?;
+    let mut depth = 0_usize;
+    for (offset, character) in rest[start..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[start..=start + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn function_body_matches_braces_whatever_the_qualifiers() {
+    let text = "pub const fn first() { a }\n\
+        pub(super) async fn second(x: u8) -> u8 { if x > 0 { 1 } else { 2 } }\n\
+        fn third() { c }\nfn unclosed() { { ";
+    assert_eq!(function_body(text, "fn first"), Some("{ a }"));
+    assert_eq!(
+        function_body(text, "fn second"),
+        Some("{ if x > 0 { 1 } else { 2 } }")
+    );
+    assert_eq!(function_body(text, "fn third"), Some("{ c }"));
+    assert_eq!(function_body(text, "fn unclosed"), None);
+    assert_eq!(function_body(text, "fn missing"), None);
+}
+
 /// The guest allow-list data files are data, not Rust, so the token scan never reads them. The
 /// process-related names in them are pinned here instead.
 #[test]
@@ -587,11 +625,7 @@ fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
         // without a leading dot.
         if path.ends_with("process_identity.rs") {
             for reader in ["fn own_process_identity", "fn peer_process_identity"] {
-                let body = text.split(reader).nth(1).and_then(|rest| {
-                    rest.split("\nfn ")
-                        .next()
-                        .and_then(|rest| rest.split("\npub(crate) fn ").next())
-                });
+                let body = function_body(&text, reader);
                 assert!(body.is_some(), "{reader} must exist in process_identity.rs");
                 assert!(
                     !body.unwrap_or_default().contains("provider_identity"),
