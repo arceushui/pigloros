@@ -337,12 +337,15 @@ fn a_store_with_no_requests_reconciles_to_no_rows() -> TestResult {
 
 #[test]
 fn a_stale_row_advances_to_an_awaiting_lifecycle() -> TestResult {
-    Fixture::frozen()?.awaiting()?.assert_repaired(2, 4)
+    let fixture = Fixture::frozen()?.awaiting()?;
+    fixture.assert_repaired(4, 4)?;
+    fixture.assert_repaired(2, 4)
 }
 
 #[test]
 fn a_stale_row_advances_to_complete_along_the_forward_edges() -> TestResult {
     let fixture = Fixture::complete()?;
+    fixture.assert_repaired(5, 5)?;
     fixture.assert_repaired(2, 5)?;
     fixture.assert_repaired(4, 5)
 }
@@ -350,6 +353,7 @@ fn a_stale_row_advances_to_complete_along_the_forward_edges() -> TestResult {
 #[test]
 fn a_stale_row_advances_to_partial_failure_and_on_to_complete() -> TestResult {
     let (fixture, partial) = Fixture::partial()?;
+    fixture.assert_repaired(6, 6)?;
     fixture.assert_repaired(2, 6)?;
     fixture.assert_repaired(4, 6)?;
 
@@ -444,6 +448,20 @@ fn every_frozen_request_gets_its_own_rows() -> TestResult {
     assert_eq!(reconcile(&fixture.shared)?, Ok(()));
     assert_eq!(fixture.rows()?, both);
     Ok(())
+}
+
+#[test]
+fn the_table_read_is_bounded_by_the_required_rows_and_both_sides_are_pinned() -> TestResult {
+    let at_bound = Fixture::frozen()?;
+    let second = overlapping_request()?;
+    frozen_coordinator(Rc::clone(&at_bound.shared), &second, required_target())?;
+    assert_eq!(at_bound.rows()?.len(), 2);
+    assert_eq!(reconcile(&at_bound.shared)?, Ok(()));
+    assert_eq!(at_bound.rows()?.len(), 2);
+
+    seed_row(&at_bound.path, TimelineId::new(), at_bound.id(), 2)?;
+    assert_eq!(at_bound.rows()?.len(), 3);
+    at_bound.assert_refused(CONTRADICTORY)
 }
 
 #[test]
@@ -615,7 +633,8 @@ fn the_lifecycle_edges_without_self_edges_have_no_cycle() {
         ALL.into_iter()
             .filter(move |next| *next != from && from.permits(*next))
     };
-    // After n rounds each set holds every state reachable in 1..=n+1 steps;
+    // Each round squares the reach, so after n rounds each set holds every
+    // state reachable in 1..=2^n steps (one step to start);
     // a path longer than the state count must repeat a state.
     let closure = ALL.into_iter().fold(
         ALL.map(|from| successors(from).collect::<Vec<_>>()),
