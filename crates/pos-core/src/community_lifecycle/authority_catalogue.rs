@@ -217,7 +217,9 @@ pub fn community_capability_attestation_digest_v1(snapshot: &AuthorityRegistrySn
 /// `community.operation:r:<O32>` constraint of the call's reservation
 /// operation. It binds one catalogue, one Timeline and one reservation
 /// operation, never an administrative call (its domain differs from
-/// [`community_authentication_nonce_v1`]'s).
+/// [`community_authentication_nonce_v1`]'s). The caller passes a well-formed
+/// `community.operation:r:<O32>` constraint: like the authentication nonce,
+/// this function does not validate it.
 #[must_use]
 pub fn community_execution_nonce_v1(
     catalogue_digest: Hash,
@@ -246,7 +248,7 @@ pub fn community_execution_authority_digest_v1(rows: &[(Hash, Hash)]) -> Result<
     if rows.is_empty() || rows.len() > MAX_EXECUTION_AUTHORITY_ROWS {
         return Err(Error::InvalidBinding);
     }
-    let mut preimage = Vec::with_capacity(1 + rows.len() * 69);
+    let mut preimage = Vec::new();
     encode_head(&mut preimage, 4, rows.len() as u64);
     for (member, request) in rows {
         encode_head(&mut preimage, 4, 2);

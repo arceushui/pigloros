@@ -547,7 +547,8 @@ fn capability_bindings_return_the_sorted_attested_set() -> TestResult {
 
 /// R8.1(4): T = `000102…0f`, O = `101112…1f`, H(CAP1) = `33`×32. The preimage
 /// is written from the ADR field list, and the nonce is its BLAKE3 under the
-/// `ExecutionNonce` domain.
+/// `ExecutionNonce` domain. Determinism holds by construction: the function
+/// is a pure hash of its three inputs.
 #[test]
 fn execution_nonce_reproduces_the_r8_1_4_vector() -> TestResult {
     let timeline = TimelineId::from_ulid(Ulid::from_bytes([
