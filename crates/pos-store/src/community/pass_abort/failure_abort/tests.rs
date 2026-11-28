@@ -852,7 +852,7 @@ fn a_used_control_identity_conflicts() -> TestResult {
     scene.case.domain_mut().quarantine_controls.insert(
         (target(), [0x71; 16]),
         CommittedQuarantineControlV1 {
-            kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+            kind: RetainedControlV1::SetReason(Box::new(RetainedSetReasonV1 {
                 bound: SetReasonBoundV1 {
                     key: hash(1),
                     expected_ledger: None,
@@ -868,7 +868,7 @@ fn a_used_control_identity_conflicts() -> TestResult {
                     records: Vec::new(),
                 },
                 admission: None,
-            }),
+            })),
             receipt: CommunityQuarantineReceiptV1 {
                 timeline: target(),
                 control_operation_id: [0x71; 16],

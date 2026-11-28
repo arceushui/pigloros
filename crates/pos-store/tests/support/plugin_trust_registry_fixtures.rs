@@ -259,10 +259,12 @@ fn prv1(record: &RevocationRecord<'_>) -> TestResult<Vec<u8>> {
     let spec = record.spec;
     // Only the terminal record carries the spec's revocation Tick, so a later record that adds
     // a revocation keeps the digest of every earlier record: the earlier floors stay ancestors.
+    // A spec whose revocations are effective before TICK lowers every earlier record to that
+    // Tick too, as the chain's Ticks never decrease.
     let record_tick = if record.terminal {
         spec.revocation_tick
     } else {
-        TICK
+        TICK.min(spec.revocation_tick)
     };
     let (keys, artifacts) = if record.terminal {
         let mut epochs = spec.revoked_publisher_epochs.clone();
@@ -497,6 +499,8 @@ pub fn tps1_signed_by(
 /// Verified evidence and the operator-signed TPS1 that maps it.
 pub struct Material {
     pub evidence: VerifiedPluginTrustEvidenceV1,
+    /// The raw PTR1 and PRV1 histories `evidence` was verified from.
+    pub chain: Chain,
     pub tps1: Vec<u8>,
     pub utc: i64,
     pub tick: u64,
@@ -507,6 +511,15 @@ impl Material {
     #[must_use]
     pub fn tps1_digest(&self) -> [u8; 32] {
         digest(&self.tps1)
+    }
+
+    /// The PTR1 and PRV1 histories as byte slices.
+    #[must_use]
+    pub fn histories(&self) -> (Vec<&[u8]>, Vec<&[u8]>) {
+        (
+            self.chain.roots.iter().map(Vec::as_slice).collect(),
+            self.chain.revocations.iter().map(Vec::as_slice).collect(),
+        )
     }
 
     /// A fixture value.
@@ -605,6 +618,7 @@ impl Env {
         let tps1 = tps1(&self.scope, &evidence, tps)?;
         Ok(Material {
             evidence,
+            chain: chain(&self.scope, spec)?,
             tps1,
             utc: spec.utc,
             tick: spec.tick,

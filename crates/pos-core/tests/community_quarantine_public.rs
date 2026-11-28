@@ -438,3 +438,52 @@ fn ledger_rejects_invalid_nested_key_reason_shapes_codes_and_trailers() -> TestR
     );
     Ok(())
 }
+
+#[test]
+fn reason_sets_validate_by_count_order_and_evidence() {
+    let row = |reason: Reason, byte: u8| Evidence {
+        reason,
+        failure_evidence_digest: hash(byte),
+    };
+    let valid = |rows: &[Evidence]| Reasons::from_reasons(rows).validate();
+    assert_eq!(valid(&[]), Ok(()));
+    assert_eq!(
+        valid(&[row(Reason::Trapped, 1), row(Reason::Revoked, 2)]),
+        Ok(())
+    );
+    let four = [
+        row(Reason::Trapped, 1),
+        row(Reason::ResourceExhausted, 2),
+        row(Reason::Revoked, 3),
+        row(Reason::Unavailable, 4),
+    ];
+    assert_eq!(valid(&four), Ok(()));
+    // More than four reasons is the count refusal, whatever else is wrong.
+    let five = [four[0], four[1], four[2], four[3], four[3]];
+    assert_eq!(valid(&five), Err(Error::BoundsExceeded));
+    // Codes must be strictly ascending: descending and equal codes are refused.
+    assert_eq!(
+        valid(&[row(Reason::Revoked, 1), row(Reason::Trapped, 2)]),
+        Err(Error::InvalidBinding)
+    );
+    assert_eq!(
+        valid(&[row(Reason::Trapped, 1), row(Reason::Trapped, 2)]),
+        Err(Error::InvalidBinding)
+    );
+    // A zero evidence digest is refused, first row or not.
+    let zero = Evidence {
+        reason: Reason::Trapped,
+        failure_evidence_digest: Hash::zero(),
+    };
+    assert_eq!(valid(&[zero]), Err(Error::InvalidBinding));
+    assert_eq!(
+        valid(&[
+            row(Reason::Trapped, 1),
+            Evidence {
+                reason: Reason::Revoked,
+                ..zero
+            }
+        ]),
+        Err(Error::InvalidBinding)
+    );
+}

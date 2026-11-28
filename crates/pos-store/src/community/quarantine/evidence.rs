@@ -490,7 +490,7 @@ impl MemoryCommunityDomainV1 {
         StagedSetReasonV1 {
             key: (failure.timeline, call.control_operation_id),
             committed: CommittedQuarantineControlV1 {
-                kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                kind: RetainedControlV1::SetReason(Box::new(RetainedSetReasonV1 {
                     bound: SetReasonBoundV1 {
                         key: operation.key,
                         expected_ledger: call.expected_ledger_digest,
@@ -506,7 +506,7 @@ impl MemoryCommunityDomainV1 {
                         records,
                     },
                     admission,
-                }),
+                })),
                 receipt,
             },
             keys,

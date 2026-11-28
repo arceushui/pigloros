@@ -123,5 +123,5 @@ pub use protection::{
 pub use quarantine::{
     CommunityPreExecutionFailureInputV1, CommunityPreExecutionFailureV1,
     CommunityPreExecutionTrustV1, CommunityQuarantineContextV1, CommunityQuarantineReceiptV1,
-    CommunityQuarantineResetCallV1, CommunitySetReasonCallV1,
+    CommunityQuarantineResetCallV1, CommunityResetTrustEvidenceV1, CommunitySetReasonCallV1,
 };

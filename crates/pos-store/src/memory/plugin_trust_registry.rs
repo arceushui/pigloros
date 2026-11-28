@@ -34,9 +34,9 @@ use pos_plugin_content::ValidatedPluginBundleContentV1;
 
 use super::MemoryStore;
 use crate::plugin_trust_registry::logic::{
-    plan_admit, plan_advance, plan_evaluate, plan_provision, plan_rollback, AdmitPlanV1,
-    AdmitWritesV1, AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1, ProvisionWriteV1,
-    RetainedScopeV1, RollbackPlanV1, RollbackWritesV1,
+    plan_admit, plan_advance, plan_evaluate, plan_evaluate_retained, plan_provision, plan_rollback,
+    AdmitPlanV1, AdmitWritesV1, AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1,
+    ProvisionWriteV1, RetainedScopeV1, RollbackPlanV1, RollbackWritesV1,
 };
 use crate::plugin_trust_registry::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
@@ -517,6 +517,24 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
             tick,
         };
         plan_evaluate(&self.plugin_trust, &input, projection)
+    }
+
+    fn evaluate_retained_release(
+        &self,
+        scope: &str,
+        ptr1_histories: &[&[u8]],
+        prv1_histories: &[&[u8]],
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> RegistryResult<CurrentReleaseEvaluationV1> {
+        plan_evaluate_retained(
+            &self.plugin_trust,
+            scope,
+            (ptr1_histories, prv1_histories),
+            (trusted_utc, tick),
+            projection,
+        )
     }
 }
 

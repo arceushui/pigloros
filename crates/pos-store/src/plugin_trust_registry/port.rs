@@ -181,4 +181,27 @@ pub trait PluginTrustPolicyRegistryV1 {
         trusted_utc: TrustedUtcSecondV1,
         tick: u64,
     ) -> Result<CurrentReleaseEvaluationV1, PluginTrustPolicyRegistryErrorV1>;
+
+    /// [`Self::evaluate_current_release`] under the anchor and the TPS1 bytes `scope` itself
+    /// retains, so the caller supplies neither and the anchor never leaves the registry.
+    ///
+    /// The caller supplies the raw PTR1 and PRV1 histories, not verified evidence: the registry
+    /// verifies them at the call's own UTC second and Tick under the retained anchor's root pin,
+    /// since only the host knows those coordinates. The retained scope and every row the
+    /// evaluation reads come from one read. The returned evaluation carries the retained TPS1
+    /// digest it read. It writes nothing and never raises the highest trusted UTC second.
+    ///
+    /// # Errors
+    /// Returns `MissingState` for a scope that is not provisioned, then `Trust` for histories
+    /// that do not verify at the call's coordinates, and then the closed registry error of the
+    /// first failing step of `evaluate_current_release`.
+    fn evaluate_retained_release(
+        &self,
+        scope: &str,
+        ptr1_histories: &[&[u8]],
+        prv1_histories: &[&[u8]],
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> Result<CurrentReleaseEvaluationV1, PluginTrustPolicyRegistryErrorV1>;
 }

@@ -246,6 +246,17 @@ impl<'a> CommunityQuarantineReasonsV1<'a> {
         Self(ReasonRows::Typed(reasons))
     }
 
+    /// Check the shape of the set: at most four reasons, strictly ascending
+    /// reason codes and nonzero evidence digests.
+    ///
+    /// # Errors
+    /// Returns `BoundsExceeded` for more than four reasons and
+    /// `InvalidBinding` for a zero evidence digest or codes that are not
+    /// strictly ascending.
+    pub fn validate(self) -> Result<()> {
+        validate_reasons(self)
+    }
+
     /// Number of active reasons, at most4 in an accepted ledger.
     #[must_use]
     pub const fn len(&self) -> usize {

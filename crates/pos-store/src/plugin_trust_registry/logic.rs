@@ -17,8 +17,8 @@ use pos_conformance::{
 };
 use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
-    ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
-    VerifiedPluginTrustEvidenceV1,
+    verify_plugin_trust_v1, ResolvedPluginTrustAuthorizationV1,
+    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
 use pos_plugin_content::ValidatedPluginBundleContentV1;
 
@@ -486,6 +486,41 @@ pub(crate) fn plan_evaluate(
         tick: input.tick,
         activation_event: active.activation_event,
     })
+}
+
+/// Decide `evaluate_retained_release`: verify the raw PTR1 and PRV1 histories at the call's
+/// coordinates under the retained root pin, then `plan_evaluate` under the anchor and the TPS1
+/// bytes the retained scope holds. A scope that is not provisioned is `MissingState`, reported
+/// before any evidence check: the scope name is the caller's choice, and nothing is read for a
+/// scope that is not installed.
+pub(crate) fn plan_evaluate_retained(
+    tx: &impl PluginTrustTransactionV1,
+    scope: &str,
+    (ptr1, prv1): (&[&[u8]], &[&[u8]]),
+    (utc, tick): (TrustedUtcSecondV1, u64),
+    projection: &ValidatedPluginManifestProjectionV1,
+) -> RegistryResult<CurrentReleaseEvaluationV1> {
+    let retained = tx
+        .scope(scope)?
+        .ok_or(PluginTrustPolicyRegistryErrorV1::MissingState)?;
+    let evidence = verify_plugin_trust_v1(
+        retained.anchor.root_anchor(),
+        ptr1,
+        prv1,
+        utc.as_i64(),
+        tick,
+    )?;
+    plan_evaluate(
+        tx,
+        &PolicyInputV1 {
+            anchor: &retained.anchor,
+            tps1_bytes: &retained.policy.tps1_bytes,
+            evidence: &evidence,
+            utc,
+            tick,
+        },
+        projection,
+    )
 }
 
 /// The outcome of `plan_admit`.

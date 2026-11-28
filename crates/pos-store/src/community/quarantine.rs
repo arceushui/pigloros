@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use pos_conformance::{PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1};
 use pos_core::community_lifecycle::{
     community_catalogue_owner_v1, community_decision_provenance_digest_v1,
-    community_quarantine_reason_v1, ArtifactRefV1, CommunityArtifactAdmissionV1,
+    community_quarantine_reason_v1, CommunityArtifactAdmissionV1,
     CommunityDecisionProvenanceInputV1, CommunityDigestListV1, CommunityDurableProfileV1,
     CommunityGenerationAdmissionV1, CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1,
     CommunityMetadataAnchorV1, CommunityOwnerBindingV1, CommunityPassFailureInputV1,
@@ -76,7 +76,7 @@ use crate::plugin_trust_registry::{
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
 };
 use evidence::StagedEvidenceV1;
-pub use reset::CommunityQuarantineResetCallV1;
+pub use reset::{CommunityQuarantineResetCallV1, CommunityResetTrustEvidenceV1};
 
 /// The trust evidence the store re-evaluates on its own registry
 /// (R9.9(7) erratum): the same inputs `evaluate_current_release` takes.
@@ -237,9 +237,9 @@ pub(super) struct SetReasonBoundV1 {
     pub(super) expected_head: Hash,
 }
 
-/// The bound content of one `AuthenticatedReset` (annex "Reset authority
-/// and compare-and-swap"): the CQK1, every compared premise, the opaque
-/// principal and authorization refs and the authorization deadline.
+/// The bound content of one `AuthenticatedReset` (R16.6): the CQK1 and
+/// every compared premise, which is the CQC1 without its host-derived
+/// fields. The key `(T, control_operation_id)` fixes the rest.
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct ResetBoundV1 {
     pub(super) key: Hash,
@@ -248,10 +248,15 @@ pub(super) struct ResetBoundV1 {
     pub(super) reasons: Vec<(u8, Hash)>,
     pub(super) expected_generation: [u8; 16],
     pub(super) expected_head: Hash,
-    pub(super) trust_snapshot_digest: Hash,
-    pub(super) principal_ref: ArtifactRefV1,
-    pub(super) authorization_ref: ArtifactRefV1,
-    pub(super) authorization_not_after_micros: u64,
+}
+
+/// One committed reset, retained for its retry (A5.3(5)): its bound
+/// content and the administrative decision's leaf grant, whose grantee is
+/// the principal that may retry (A5.3(6)). Slice R15-6b adds its sealed
+/// records.
+pub(super) struct RetainedResetV1 {
+    pub(super) bound: ResetBoundV1,
+    pub(super) leaf_grant_id: Hash,
 }
 
 /// One CQK1's current ledger head in the domain-private quarantine index
@@ -326,9 +331,9 @@ pub(super) struct RetainedSetReasonV1 {
 /// content only, since its records are R15-6's.
 pub(super) enum RetainedControlV1 {
     /// A `SetReason`, in or out of a failure Abort.
-    SetReason(RetainedSetReasonV1),
+    SetReason(Box<RetainedSetReasonV1>),
     /// An `AuthenticatedReset`.
-    Reset(ResetBoundV1),
+    Reset(RetainedResetV1),
 }
 
 /// One committed control, retained for its retry (A5.3(5)).
@@ -342,22 +347,16 @@ impl CommittedQuarantineControlV1 {
     /// A retained reset of `timeline` under `identity`, standing for any
     /// committed control of T's Control namespace.
     pub(super) fn reset_at(timeline: TimelineId, identity: [u8; 16]) -> Self {
-        let reference = ArtifactRefV1 {
-            schema_id: 1,
-            byte_length: 1,
-            digest: [1; 32],
-        };
         Self {
-            kind: RetainedControlV1::Reset(ResetBoundV1 {
-                key: Hash::from_bytes([1; 32]),
-                expected_ledger: Hash::from_bytes([2; 32]),
-                reasons: Vec::new(),
-                expected_generation: [0x20; 16],
-                expected_head: Hash::from_bytes([30; 32]),
-                trust_snapshot_digest: Hash::from_bytes([3; 32]),
-                principal_ref: reference,
-                authorization_ref: reference,
-                authorization_not_after_micros: 1,
+            kind: RetainedControlV1::Reset(RetainedResetV1 {
+                bound: ResetBoundV1 {
+                    key: Hash::from_bytes([1; 32]),
+                    expected_ledger: Hash::from_bytes([2; 32]),
+                    reasons: Vec::new(),
+                    expected_generation: [0x20; 16],
+                    expected_head: Hash::from_bytes([30; 32]),
+                },
+                leaf_grant_id: Hash::from_bytes([3; 32]),
             }),
             receipt: CommunityQuarantineReceiptV1 {
                 timeline,
@@ -371,17 +370,17 @@ impl CommittedQuarantineControlV1 {
     }
 
     /// The retained `SetReason`, if this is one.
-    pub(super) const fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
+    pub(super) fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
         match &self.kind {
-            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::SetReason(retained) => Some(&**retained),
             RetainedControlV1::Reset(_) => None,
         }
     }
 
     /// The retained `SetReason`, mutably, if this is one.
-    pub(super) const fn set_reason_mut(&mut self) -> Option<&mut RetainedSetReasonV1> {
+    pub(super) fn set_reason_mut(&mut self) -> Option<&mut RetainedSetReasonV1> {
         match &mut self.kind {
-            RetainedControlV1::SetReason(retained) => Some(retained),
+            RetainedControlV1::SetReason(retained) => Some(&mut **retained),
             RetainedControlV1::Reset(_) => None,
         }
     }
@@ -903,6 +902,29 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
+    /// The compare of an atomic control commit: the inventory generation and
+    /// the CSI1 the operation read must be unmoved (`EvidenceUnavailable`).
+    pub(super) fn selection_unmoved(
+        &self,
+        inventory_generation: u64,
+        read_selection: Hash,
+    ) -> Result<(), Error> {
+        let current = self
+            .selection
+            .as_ref()
+            .map(|(_, sealed)| sealed.address)
+            .or_else(|| {
+                self.bootstrap
+                    .as_ref()
+                    .map(|record| record.selection.address)
+            });
+        if self.inventory_generation == inventory_generation && current == Some(read_selection) {
+            Ok(())
+        } else {
+            Err(Error::EvidenceUnavailable)
+        }
+    }
+
     /// The atomic `SetReason` commit (R9.9(8)): the inventory generation and
     /// the CSI1 the operation read are compared, the CFO1 ARD1 is
     /// published, and only then are the keys, records, quarantine index and
@@ -915,20 +937,7 @@ impl MemoryCommunityDomainV1 {
         &mut self,
         staged: StagedSetReasonV1,
     ) -> Result<CommunityQuarantineReceiptV1, Error> {
-        let current = self
-            .selection
-            .as_ref()
-            .map(|(_, sealed)| sealed.address)
-            .or_else(|| {
-                self.bootstrap
-                    .as_ref()
-                    .map(|record| record.selection.address)
-            });
-        if self.inventory_generation != staged.inventory_generation
-            || current != Some(staged.read_selection)
-        {
-            return Err(Error::EvidenceUnavailable);
-        }
+        self.selection_unmoved(staged.inventory_generation, staged.read_selection)?;
         if let Some(evidence) = &staged.evidence {
             self.store
                 .commit_community_artifact_batch(&evidence.batch)?;

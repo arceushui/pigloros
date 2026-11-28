@@ -31,10 +31,15 @@ impl TrustedUtcSecondV1 {
             .or(Err(
                 PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable,
             ))
-            .map(|sample| {
-                // The quotient is at most `i64::MAX / 1_000_000`, so the saturation never applies.
-                Self(i64::try_from(sample.as_micros() / MICROS_PER_SECOND).unwrap_or(i64::MAX))
-            })
+            .map(|sample| Self::from_micros(sample.as_micros()))
+    }
+
+    /// The whole second a trusted sample of `micros` microseconds falls in.
+    ///
+    /// The quotient is at most `i64::MAX / 1_000_000`, so the saturation never applies.
+    #[must_use]
+    pub fn from_micros(micros: u64) -> Self {
+        Self(i64::try_from(micros / MICROS_PER_SECOND).unwrap_or(i64::MAX))
     }
 
     /// The UTC second since the Unix epoch.
