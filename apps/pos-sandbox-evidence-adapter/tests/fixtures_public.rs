@@ -35,7 +35,7 @@ use pos_sandbox_evidence_adapter::{
     apply, exit_code, run, AdapterRunError, After, Fixture, Mode, MODES,
 };
 use rustix::io::Errno;
-use rustix::net::{bind, getsockname, socket, AddressFamily, SocketType};
+use rustix::net::{bind, getsockname, ipproto, socket, AddressFamily, SocketType};
 use rustix::process::{kill_process, waitpid, Pid, Signal, WaitOptions, WaitStatus};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -109,19 +109,19 @@ const fn aimed_at(missing: &str, tcp: SocketAddr, resolver: SocketAddr) -> Targe
     }
 }
 
-/// A loopback TCP address that refuses every connection, a local UDP address
-/// that never answers, and the sockets that hold them: keep them alive for the
-/// whole test, so no other process can take either port.
+/// A loopback TCP address that refuses every connection, a resolver address
+/// that cannot be reached, and the socket that holds the TCP port: keep it
+/// alive for the whole test, so no other process can take the port.
 ///
 /// The TCP socket is bound but never listens, so a connect to it is refused at
-/// once on every host, whatever the runner's routing.
+/// once on every host, whatever the runner's routing. The resolver is an IPv6
+/// address, which the IPv4 datagram probe cannot send to on any host.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr, (OwnedFd, UdpSocket))> {
+fn silent_addresses() -> TestResult<(SocketAddr, SocketAddr, OwnedFd)> {
     let closed = socket(AddressFamily::INET, SocketType::STREAM, None)?;
     bind(&closed, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
     let tcp = SocketAddrV4::try_from(getsockname(&closed)?)?;
-    let silent = UdpSocket::bind("127.0.0.1:0")?;
-    Ok((tcp.into(), silent.local_addr()?, (closed, silent)))
+    Ok((tcp.into(), "[::1]:9".parse()?, closed))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -217,11 +217,15 @@ fn network_probes_follow_what_listens() -> TestResult {
         socket.local_addr()?
     };
     assert!(udp_exchange(&unbound).is_err());
+    // A receiver that takes the datagram and never answers is reached: an
+    // escape, not a denial.
+    let silent = UdpSocket::bind("127.0.0.1:0")?;
+    assert!(udp_exchange(&silent.local_addr()?).is_ok());
     assert!(udp_exchange(&"[::1]:9".parse()?).is_err());
 
-    assert!(create_socket(AddressFamily::INET, SocketType::DGRAM).is_ok());
+    assert!(create_socket(AddressFamily::INET, SocketType::DGRAM, None).is_ok());
     assert_eq!(
-        create_socket(AddressFamily::INET, SocketType::RAW).is_ok(),
+        create_socket(AddressFamily::INET, SocketType::RAW, Some(ipproto::ICMP)).is_ok(),
         has_net_raw()?
     );
     Ok(())
@@ -423,7 +427,6 @@ fn the_oversized_fixture_writes_exactly_its_bound_of_filler() -> TestResult {
 #[test]
 fn a_fixture_that_is_not_stopped_goes_on_to_report_honestly() -> TestResult {
     for values in [
-        &["work-area-exhaustion", "1"][..],
         &["task-exhaustion", "2"][..],
         &["memory-exhaustion", "1048577"][..],
         &["watchdog-expiry", "1"][..],

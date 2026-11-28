@@ -7,12 +7,17 @@
 //! provider sees as a crashed adapter and not as a contained one. A limit
 //! fixture runs past its bound and, if the sandbox does not stop it, goes on
 //! to report honestly, so an unenforced limit shows as a completed attempt.
+//! The output fixture is the exception: its filler has no frame, so an output
+//! limit that does not stop it leaves a stream no reader accepts, a protocol
+//! failure and not a completed attempt; only an enforced ceiling gives the
+//! output-limit outcome the suite expects.
 //! Every bound is an argument, so the host tests use tiny ones.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use pos_reference::adapter_transport::write_attempt;
@@ -267,13 +272,27 @@ pub fn fill_work_area(area: &Path, bytes: u64) -> io::Result<u64> {
 pub fn exhaust_tasks(tasks: u64, lifetime: Duration) -> usize {
     let started: Vec<_> = (0..tasks)
         .map_while(|_| {
+            let (gate, held) = mpsc::channel::<()>();
             std::thread::Builder::new()
-                .spawn(move || std::thread::sleep(lifetime))
+                .spawn(move || {
+                    // Held until every thread is started, so they are alive
+                    // together; a dropped gate releases the thread.
+                    held.recv().ok();
+                    std::thread::sleep(lifetime);
+                })
                 .ok()
+                .map(|handle| (gate, handle))
         })
         .collect();
     let count = started.len();
-    for handle in started {
+    let handles: Vec<_> = started
+        .into_iter()
+        .map(|(gate, handle)| {
+            drop(gate);
+            handle
+        })
+        .collect();
+    for handle in handles {
         drop(handle.join());
     }
     count

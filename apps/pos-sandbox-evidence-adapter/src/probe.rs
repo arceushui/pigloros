@@ -15,7 +15,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use rustix::mount::{mount, MountFlags};
-use rustix::net::{socket, AddressFamily, SocketType};
+use rustix::net::{ipproto, socket, AddressFamily, Protocol, SocketType};
 use rustix::process::{getpid, test_kill_process, Pid};
 
 /// One probe's result: `Err` is a denied operation.
@@ -130,8 +130,12 @@ pub fn mount_tmpfs(target: &Path) -> Attempt {
 ///
 /// # Errors
 /// Fails when the operation is denied, which is the expected answer.
-pub fn create_socket(family: AddressFamily, kind: SocketType) -> Attempt {
-    socket(family, kind, None)
+pub fn create_socket(
+    family: AddressFamily,
+    kind: SocketType,
+    protocol: Option<Protocol>,
+) -> Attempt {
+    socket(family, kind, protocol)
         .map(drop)
         .map_err(io::Error::from)
 }
@@ -152,7 +156,9 @@ pub fn connect_unix(path: &Path) -> Attempt {
     UnixStream::connect(path).map(drop)
 }
 
-/// Send one datagram to `address` from an IPv4 socket and wait for any reply.
+/// Send one datagram to `address` from an IPv4 socket and wait for a reply.
+///
+/// A reply, or no reply at all, shows the datagram reached a receiver.
 ///
 /// An IPv6 address cannot be reached from that socket, which is also a denial.
 ///
@@ -161,8 +167,27 @@ pub fn connect_unix(path: &Path) -> Attempt {
 pub fn udp_exchange(address: &SocketAddr) -> Attempt {
     UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .and_then(|socket| socket.set_read_timeout(Some(NETWORK_WAIT)).map(|()| socket))
-        .and_then(|socket| socket.send_to(b"probe", address).map(|_| socket))
-        .and_then(|socket| socket.recv_from(&mut [0_u8; 16]).map(drop))
+        .and_then(|socket| socket.connect(address).map(|()| socket))
+        .and_then(|socket| socket.send(b"probe").map(|_| socket))
+        .and_then(|socket| answered_or_silent(socket.recv(&mut [0_u8; 16])))
+}
+
+/// A datagram that was sent and then answered, or met only silence, reached
+/// a receiver: that is an escape. Anything else (a refusal from a closed
+/// port, say) is a denial.
+fn answered_or_silent(reply: io::Result<usize>) -> Attempt {
+    match reply {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Whether a process other than this one can be signalled with signal 0.
@@ -207,8 +232,8 @@ pub fn read_only_root_write(root: &Path) -> Vec<Attempt> {
 #[must_use]
 pub fn network_escape(targets: &Targets<'_>) -> Vec<Attempt> {
     vec![
-        create_socket(AddressFamily::INET, SocketType::RAW),
-        create_socket(AddressFamily::PACKET, SocketType::RAW),
+        create_socket(AddressFamily::INET, SocketType::RAW, Some(ipproto::ICMP)),
+        create_socket(AddressFamily::PACKET, SocketType::RAW, None),
         connect_tcp(&targets.tcp),
         udp_exchange(&targets.resolver),
         connect_unix(Path::new(targets.bus)),
