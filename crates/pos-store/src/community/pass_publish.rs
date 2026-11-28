@@ -175,6 +175,11 @@ impl MemoryCommunityDomainV1 {
     /// `sample_micros` is the discovering call's one trusted sample. At or
     /// after the pass's `H_r`, the CPR1's evidence horizon, the original
     /// evidence is expired and discovery gives 13 (R13.2(4), R10.7 step 4a).
+    /// A pass nobody reserved gives 12 first, a resolved one is judged the
+    /// same way (R10.7 4a: "disposed or expired original evidence 12 or 13").
+    /// It has no production caller yet: the discovery pipeline must take the
+    /// sample from the domain's own clock reservation, as every lifecycle
+    /// call does.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a pass nobody reserved here and

@@ -864,6 +864,8 @@ fn discovery_of_expired_original_evidence_gives_13() -> TestResult {
     let mut case = Case::new(&roster, &rows)?;
     let staged = case.stage(OPERATION)?;
     let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    // The tests' sample is before `H_r`, so `H_r - 1` is a live sample.
+    assert!(horizon > SAMPLE + 1);
     let publication = publication(&case.profile, &case.policy);
     let domain = &mut case.domain.world.domain;
     domain.publish_reserved_pass(&SEAL, staged, publication)?;
@@ -879,6 +881,29 @@ fn discovery_of_expired_original_evidence_gives_13() -> TestResult {
     assert_eq!(
         domain.original_reserve(target(), SECOND, u64::MAX).err(),
         Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// R10.7 4a ("disposed or expired original evidence 12 or 13"): a resolved
+/// pass is discovered like an unresolved one: its records before `H_r`, 13
+/// at or after it. Only a pass nobody reserved is 12.
+#[test]
+fn a_resolved_pass_is_discovered_by_the_same_horizon() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    let abort = domain.stage_abort(target(), OPERATION, 0)?;
+    domain.apply_abort(&SEAL, &abort)?;
+    assert!(domain.original_reserve(target(), OPERATION, SAMPLE).is_ok());
+    assert_eq!(
+        domain.original_reserve(target(), OPERATION, horizon).err(),
+        Some(Error::EvidenceExpired)
     );
     Ok(())
 }
