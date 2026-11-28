@@ -710,7 +710,7 @@ fn retain<T: 'static>(value: T) -> Retained<T> {
 /// never runs the destructor.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod retained {
+pub(super) mod retained {
     use std::any::Any;
     use std::cell::RefCell;
     use std::ops::{Deref, DerefMut};
@@ -758,7 +758,7 @@ mod retained {
 
     /// Really drop every parked value, closing its connection. Dropping one
     /// value can park another, so repeat until none remain.
-    pub(super) fn reclaim() {
+    pub(in crate::sqlite) fn reclaim() {
         loop {
             let batch = PARKED
                 .try_with(|parked| std::mem::take(&mut *parked.borrow_mut()))
