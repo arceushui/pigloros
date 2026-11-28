@@ -345,15 +345,26 @@ impl AttemptEvidence {
             termination,
         };
         let limits = Limits::of(&context.limits, context.elm1_digest)?;
-        consistent(
-            evidence.bound(context)
-                && evidence.observation_bound(context, limits.work)
-                && evidence.termination_shaped(context.mode, limits.work)
-                && evidence.ledger_within(limits)
-                && evidence.classified()
-                && evidence.chained(previous),
-        )
-        .map(|()| evidence)
+        // DIAGNOSTIC: which rule failed.
+        let rules = [
+            evidence.bound(context),
+            evidence.observation_bound(context, limits.work),
+            evidence.termination_shaped(context.mode, limits.work),
+            evidence.ledger_within(limits),
+            evidence.classified(),
+            evidence.chained(previous),
+        ];
+        if rules.contains(&false) {
+            std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "pos-sandboxd diag: evidence rules (bound, observation_bound, termination_shaped, ledger_within, classified, chained) = {rules:?}\nobserved={:?}\ntermination={:?}\n",
+                    evidence.observed, evidence.termination
+                ),
+            )
+            .ok();
+        }
+        consistent(rules.iter().all(|rule| *rule)).map(|()| evidence)
     }
 
     /// Verify that SPR1 binds these records (R9 §6 rules 5 and 6): the
