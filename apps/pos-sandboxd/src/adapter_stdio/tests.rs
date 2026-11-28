@@ -269,7 +269,8 @@ fn the_launcher_never_touches_stdin_or_stdout() -> TestResult {
     let mut checked = 0;
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
-        if path.file_name().is_some_and(|name| name == "tests.rs") {
+        // The directory of a module's own tests is not launcher code, and neither is `tests.rs`.
+        if path.is_dir() || path.file_name().is_some_and(|name| name == "tests.rs") {
             continue;
         }
         let source = std::fs::read_to_string(&path)?.to_lowercase();
