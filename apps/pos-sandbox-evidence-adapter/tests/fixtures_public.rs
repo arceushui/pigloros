@@ -215,7 +215,10 @@ fn network_probes_follow_what_listens() -> TestResult {
     // connected socket reads as ECONNREFUSED) depends on the host, so the
     // refusal is tested on the classification of the reply, in probe.rs.
     // A receiver that takes the datagram and never answers is reached: an
-    // escape, not a denial.
+    // escape, not a denial. The probe cannot tell a closed port from a silent
+    // receiver here: the CI baseline host did not deliver the ICMP
+    // port-unreachable for a closed loopback UDP port, so only silence was
+    // seen. The refusal classifier is unit-tested in probe.rs instead.
     let silent = UdpSocket::bind("127.0.0.1:0")?;
     assert!(udp_exchange(&silent.local_addr()?).is_ok());
     assert!(udp_exchange(&"[::1]:9".parse()?).is_err());
