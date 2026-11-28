@@ -33,7 +33,7 @@ use pos_core::community_lifecycle::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
     community_execution_nonce_v1, ArtifactRefV1, CommunityAuthorityCatalogueV1,
     CommunityInitializationSourceV1, CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1,
-    COMMUNITY_AUD_SCHEMA_V1, COMMUNITY_PRINCIPAL_SCHEMA_V1,
+    COMMUNITY_AUD_SCHEMA_V1, COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_PRINCIPAL_SCHEMA_V1,
 };
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalEvidenceV1, ForkAuthenticationPolicyV1,
@@ -61,7 +61,9 @@ const INITIALIZER_CATEGORY: &str = "community.initial-state";
 const PURPOSE: &str = "lifecycle-administration";
 const EXECUTION_PURPOSE: &str = "community-execution";
 
-/// The six closed administrative actions (ADR-129 §1, A5.1 and R8.3).
+/// The six closed administrative actions (ADR-129 §1, A5.1 and R8.3) plus
+/// the `run_pass` execute marker of R8.1, which is not an administrative
+/// action (R8.7 keeps A5.1 at six).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommunityAdministrativeActionV1 {
     /// First initialization of a Timeline.
@@ -449,12 +451,17 @@ impl CommunityLifecycleAuthorityV1 {
         &self.member_recipient
     }
 
-    /// Authenticate one administrative call from its one FAE1 (R6.2(3)).
+    /// Authenticate one administrative or `run_pass` call from its one FAE1
+    /// (R6.2(3), R8.1(8) step 3a).
     ///
     /// The FAE1 must decode canonically, verify under the installed FAP1,
-    /// carry the nonce bound to H(CAP1) and this request's resource, action
-    /// and operation constraint, and be valid at the operation's one trusted
-    /// sample. Its principal must have a CAP1 actor row. The FAE1 is a bearer
+    /// carry the nonce bound to H(CAP1) and this request, and be valid at the
+    /// operation's one trusted sample. An administrative request's nonce is
+    /// the authentication nonce over its resource, action and operation
+    /// constraint; a `run_pass` request's is the execution nonce over its
+    /// Timeline, `execute` and reservation operation constraint (R8.1(4)).
+    /// A `run_pass` call must also fit: its sample plus the CDP1 decision
+    /// deadline must not pass its decision bound (R8.1(5)). Its principal must have a CAP1 actor row. The FAE1 is a bearer
     /// credential: only its digest is kept, as the result's binding digest.
     ///
     /// Only a verified credential reserves the trusted clock, on `domain`'s
@@ -494,6 +501,7 @@ impl CommunityLifecycleAuthorityV1 {
                 record.issued_at <= now && now < record.expires_at
             })
             .and_then(|(verified, reservation)| self.call(request, &verified, reservation))
+            .filter(CommunityAuthorityCallV1::fits_execution_deadline)
             .ok_or(Error::EvidenceUnavailable)
     }
 
@@ -635,7 +643,6 @@ impl CommunityLifecycleAuthorityV1 {
                 action: call.request.action.as_str(),
                 audience: &self.catalogue.as_input().audience,
                 purpose: PURPOSE,
-                run_pass: false,
             },
         )
     }
@@ -674,7 +681,6 @@ impl CommunityLifecycleAuthorityV1 {
                 action: action.as_str(),
                 audience: &self.member_recipient,
                 purpose: PURPOSE,
-                run_pass: false,
             },
         )
     }
@@ -712,7 +718,6 @@ impl CommunityLifecycleAuthorityV1 {
                 action: "execute",
                 audience: &self.member_recipient,
                 purpose: EXECUTION_PURPOSE,
-                run_pass: true,
             },
         )
     }
@@ -763,7 +768,6 @@ impl CommunityLifecycleAuthorityV1 {
                 action: "read",
                 audience: &self.member_recipient,
                 purpose: PURPOSE,
-                run_pass: false,
             },
         )
     }
@@ -801,7 +805,8 @@ impl CommunityLifecycleAuthorityV1 {
     ) -> bool {
         call.catalogue_digest != self.catalogue_digest
             || domain.store_incarnation() != self.store_incarnation
-            || (call.request.action == CommunityAdministrativeActionV1::RunPass) != shape.run_pass
+            || (call.request.action == CommunityAdministrativeActionV1::RunPass)
+                != shape.is_run_pass()
     }
 
     /// Build the exact request, admit the chain through the attestation set
@@ -877,8 +882,14 @@ struct RequestShapeV1<'a> {
     action: &'static str,
     audience: &'a str,
     purpose: &'static str,
-    /// Whether the request is a `run_pass` member `execute`.
-    run_pass: bool,
+}
+
+impl RequestShapeV1<'_> {
+    /// Whether the request is a `run_pass` member `execute`, which is the one
+    /// shape under the execution purpose.
+    fn is_run_pass(&self) -> bool {
+        self.purpose == EXECUTION_PURPOSE
+    }
 }
 
 /// One authenticated administrative call (R6.2(6)).
@@ -923,12 +934,17 @@ impl CommunityAuthorityCallV1 {
         self.reservation.sampled_at()
     }
 
-    /// Whether a call that takes `deadline_micros` after its sample still
-    /// ends by its decision bound (R8.1(5) fit check: `t_r` + the CDP1
-    /// decision deadline <= `B`).
-    #[must_use]
-    pub const fn fits_before_bound(&self, deadline_micros: u64) -> bool {
-        self.at_time().as_micros().saturating_add(deadline_micros)
+    /// The R8.1(5) fit check: a `run_pass` call needs `t_r` plus the CDP1
+    /// decision deadline to be at most its decision bound `B`. Every other
+    /// call has no such deadline here.
+    const fn fits_execution_deadline(&self) -> bool {
+        !matches!(
+            self.request.action,
+            CommunityAdministrativeActionV1::RunPass
+        ) || self
+            .at_time()
+            .as_micros()
+            .saturating_add(COMMUNITY_DECISION_DEADLINE_MICROS_V1)
             <= self.decision_bound.as_micros()
     }
 

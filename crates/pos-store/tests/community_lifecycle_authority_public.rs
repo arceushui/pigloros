@@ -464,6 +464,16 @@ impl World {
         timeline: TimelineId,
         reservation_operation_id: [u8; 16],
     ) -> Fallible<Vec<u8>> {
+        self.execution_credential_until(EXPIRES, timeline, reservation_operation_id)
+    }
+
+    /// An execution FAE1 that expires at `expires_at`.
+    fn execution_credential_until(
+        &self,
+        expires_at: u64,
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+    ) -> Fallible<Vec<u8>> {
         let preimage = encode(&Value::Array(vec![
             Value::Bytes(self.catalogue.as_bytes().to_vec()),
             Value::Bytes(timeline.inner().to_bytes().to_vec()),
@@ -476,7 +486,7 @@ impl World {
                 adapter_id: ADAPTER.to_owned(),
                 assurance: 2,
                 issued_at: ISSUED,
-                expires_at: EXPIRES,
+                expires_at,
                 registry_binding: FAP_BINDING,
                 operation_nonce: *adr_h("ExecutionNonce", &preimage).as_bytes(),
             },
@@ -1545,6 +1555,27 @@ fn an_execution_credential_serves_only_its_run_pass_request() -> TestResult {
             .err(),
         Some(Error::EvidenceUnavailable)
     );
+    // An execution call serves no other member request (`read`, nor `execute` under the
+    // in-operation purpose); the initializer read is refused in
+    // `community_initializer_public.rs`.
+    for action in [
+        CommunityMemberActionV1::Read,
+        CommunityMemberActionV1::Execute,
+    ] {
+        assert_eq!(
+            world
+                .authority
+                .authorize_member(
+                    &call,
+                    &member,
+                    action,
+                    &world.domain,
+                    member_grant.grant_id()
+                )
+                .err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
     // An administrative call has no member `execute`, although its
     // operation constraint is the same `r` constraint.
     let abort = world.call(&pass_abort())?;
@@ -1555,7 +1586,21 @@ fn an_execution_credential_serves_only_its_run_pass_request() -> TestResult {
             .err(),
         Some(Error::EvidenceUnavailable)
     );
-    // The nonces separate the credentials by domain.
+    Ok(())
+}
+
+/// R8.1(4): the execution nonce separates the credentials by domain and
+/// binds the Timeline and the reservation operation; a zero Timeline or
+/// reservation identity has no request.
+#[test]
+fn the_execution_nonce_separates_domains_and_binds_its_fields() -> TestResult {
+    let release = implementation(3)?;
+    let member_grant = grant(1, 1, 0, &execution_scope(target(), &release)?)?;
+    let mut world = World::new(&[member_grant])?;
+    let credential = world.execution_credential(target(), RESERVATION)?;
+    assert!(world
+        .execution_call(&credential, target(), RESERVATION)
+        .is_ok());
     let administrative = world.credential(&pass_abort())?;
     assert_eq!(
         world
@@ -1596,19 +1641,47 @@ fn an_execution_credential_serves_only_its_run_pass_request() -> TestResult {
     Ok(())
 }
 
-/// R8.1(5): the call fits when its sample plus the decision deadline is not
-/// after its bound `B` (here the credential's expiry).
+/// R8.1(5), R8.1(8) step 3a: `authenticate` gives 12 for a `run_pass` call
+/// whose sample plus the 27 s decision deadline passes its decision bound, and
+/// accepts one that ends exactly at it. The bound is `B = min(t_r + 32 s,
+/// expires_at)`, so both sides of the minimum are checked.
 #[test]
-fn a_run_pass_call_fits_only_when_its_deadline_ends_by_its_bound() -> TestResult {
+fn a_run_pass_call_must_fit_its_decision_deadline_by_its_bound() -> TestResult {
     let release = implementation(3)?;
     let member_grant = grant(1, 1, 0, &execution_scope(target(), &release)?)?;
     let mut world = World::new(&[member_grant])?;
-    let credential = world.execution_credential(target(), RESERVATION)?;
-    let call = world.execution_call(&credential, target(), RESERVATION)?;
-    let room = EXPIRES - NOW;
-    assert!(call.fits_before_bound(27_000_000));
-    assert!(call.fits_before_bound(room));
-    assert!(!call.fits_before_bound(room + 1));
-    assert!(!call.fits_before_bound(u64::MAX));
+    let deadline = 27_000_000;
+    // B = expires_at: exactly the deadline fits, a microsecond less does not.
+    let fits = world.execution_credential_until(NOW + deadline, target(), RESERVATION)?;
+    let call = world.execution_call(&fits, target(), RESERVATION)?;
+    assert_eq!(call.decision_bound(), WallTime::from_micros(NOW + deadline));
+    let short = world.execution_credential_until(NOW + deadline - 1, target(), RESERVATION)?;
+    assert_eq!(
+        world.execution_call(&short, target(), RESERVATION).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // B = D = t_r + 32 s, below the expiry: the call fits.
+    let long = world.execution_credential_until(NOW + 40_000_000, target(), RESERVATION)?;
+    let call = world.execution_call(&long, target(), RESERVATION)?;
+    assert_eq!(
+        call.decision_bound(),
+        WallTime::from_micros(NOW + 32_000_000)
+    );
+    // The check belongs to `run_pass`: a short administrative call is kept.
+    let short_admin = sign(
+        AuthenticatedPrincipalRecordV1 {
+            expires_at: NOW + 1_000,
+            ..world.record(&pass_abort())?
+        },
+        SEED,
+    )?;
+    assert!(world
+        .authority
+        .authenticate(
+            &short_admin,
+            Request::derive(&pass_abort())?,
+            &mut world.domain
+        )
+        .is_ok());
     Ok(())
 }
