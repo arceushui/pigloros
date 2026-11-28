@@ -521,20 +521,41 @@ fn contextual() -> Fallible<QuarantineCase> {
     Ok(case)
 }
 
+/// The reset applied: two active pairs stay and no reason is left.
+fn assert_applied(
+    case: &QuarantineCase,
+    result: Result<CommunityQuarantineReceiptV1, Error>,
+) -> TestResult {
+    result?;
+    assert_eq!(active_pairs(case), 2);
+    let ledger = ledger(case)?;
+    assert!(ledger.reasons.is_empty());
+    Ok(())
+}
+
+/// The reset refused with 14 and left what `before` held.
+fn assert_refused(
+    case: &QuarantineCase,
+    result: Result<CommunityQuarantineReceiptV1, Error>,
+    before: (Hash, u64, u64, usize, u64, usize),
+) -> TestResult {
+    assert_eq!(result.err(), Some(Error::CapacityExhausted));
+    let now = untouched(case)?;
+    assert_eq!(now, before);
+    let ledger = ledger(case)?;
+    assert_eq!(ledger.reasons.len(), 2);
+    Ok(())
+}
+
 /// The reset of the seeded claim: applied, or the refusal and what it left.
 fn reset_or_refused(mut case: QuarantineCase, applied: bool) -> TestResult {
     let before = untouched(&case)?;
     let result = reset(&mut case, &Claim::of_seeded())?;
     if applied {
-        result?;
-        assert_eq!(active_pairs(&case), 2);
-        assert!(ledger(&case)?.reasons.is_empty());
+        assert_applied(&case, result)
     } else {
-        assert_eq!(result.err(), Some(Error::CapacityExhausted));
-        assert_eq!(untouched(&case)?, before);
-        assert_eq!(ledger(&case)?.reasons.len(), 2);
+        assert_refused(&case, result, before)
     }
-    Ok(())
 }
 
 /// R13.1(3), I136: a reset re-arms the spent `F_q` share (two targets and a
