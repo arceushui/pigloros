@@ -17,14 +17,19 @@ use std::{
     fs,
     io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_sandboxd::packaged_conformance::{
-    activate, describe, release, run, run_mode, ConformanceError,
+    activate, describe, release, run, run_mode, runtime, ConformanceError,
 };
 use pos_sandboxd::ImageActivationError;
 
@@ -203,6 +208,89 @@ impl io::Read for BrokenControl {
 /// exactly one provider executable must be installed while this is read.
 struct ObservingControl {
     seen: Arc<Mutex<Option<PathBuf>>>,
+    /// The execute mode's arguments (`execute EXPORT_DIRECTORY MAIN_PID`), run three times while
+    /// the installation is held, and what each run reported or ended in.
+    execute: Vec<OsString>,
+    executed: Arc<Mutex<Vec<String>>>,
+}
+
+/// Where SIC1 names the provider's execute socket.
+const EXECUTE_SOCKET: &str = "/run/pigloros/provider-execute.sock";
+
+/// Run the conformance binary's mode for `arguments` on its own runtime and thread, and return its
+/// report, or the error it ended in.
+fn run_on_thread(arguments: Vec<OsString>) -> String {
+    std::thread::spawn(move || {
+        let mut report = Vec::new();
+        let outcome = runtime().and_then(|runtime| {
+            runtime.block_on(run_mode(
+                arguments,
+                io::empty(),
+                &mut report,
+                describe,
+                release,
+            ))
+        });
+        outcome.map_or_else(
+            |error| format!("error: {error}"),
+            |()| String::from_utf8_lossy(&report).into_owned(),
+        )
+    })
+    .join()
+    .unwrap_or_else(|_| "panicked".to_owned())
+}
+
+impl ObservingControl {
+    /// Run the execute mode against this test process as the provider:
+    /// 1. no execute socket exists: the selector's client cannot be built;
+    /// 2. the exported evaluation names no sandbox requirement: no commitment exists;
+    /// 3. a listener that accepts and closes every connection: the exchange runs through
+    ///    admission, the commitment, the client and its report, and ends before an AGR1.
+    fn execute(&self) -> io::Result<()> {
+        let export = self
+            .execute
+            .get(1)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::other("no export directory"))?;
+        let no_requirement = export.with_file_name("export-without-requirement");
+        fs::create_dir(&no_requirement)?;
+        for name in ["spx1", "input"] {
+            fs::copy(export.join(name), no_requirement.join(name))?;
+        }
+        let corpus = pos_reference::selector_test_support::air_gapped_corpus()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        fs::write(no_requirement.join("evaluation"), corpus.request)?;
+        let mut other = self.execute.clone();
+        other[1] = no_requirement.into_os_string();
+
+        let mut results = vec![run_on_thread(self.execute.clone()), run_on_thread(other)];
+
+        fs::create_dir_all("/run/pigloros")?;
+        fs::set_permissions("/run/pigloros", fs::Permissions::from_mode(0o755))?;
+        let listener = UnixListener::bind(EXECUTE_SOCKET)?;
+        fs::set_permissions(EXECUTE_SOCKET, fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        let done = AtomicBool::new(false);
+        let closed = std::thread::scope(|scope| {
+            let acceptor = scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    drop(listener.accept());
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            let closed = run_on_thread(self.execute.clone());
+            done.store(true, Ordering::Relaxed);
+            drop(acceptor.join());
+            closed
+        });
+        fs::remove_file(EXECUTE_SOCKET)?;
+        results.push(closed);
+        *self
+            .executed
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))? = results;
+        Ok(())
+    }
 }
 
 impl io::Read for ObservingControl {
@@ -215,12 +303,13 @@ impl io::Read for ObservingControl {
             return Err(io::Error::other("more than one provider executable"));
         }
         *self.seen.lock().map_err(|_| io::Error::other("poisoned"))? = Some(installed.path());
+        self.execute()?;
         Ok(0)
     }
 }
 
 /// The stager's arguments over the DDI vector and small stand-in files in
-/// `scratch`.
+/// `scratch`, exporting into `scratch/export`.
 fn stager_arguments(scratch: &Path) -> Result<Vec<OsString>, Box<dyn Error>> {
     let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
@@ -239,6 +328,7 @@ fn stager_arguments(scratch: &Path) -> Result<Vec<OsString>, Box<dyn Error>> {
     fs::write(&adapter, b"adapter")?;
     fs::write(&spi1, b"spi1 bytes")?;
     fs::write(&provider, b"provider bytes")?;
+    fs::create_dir(scratch.join("export"))?;
     Ok(vec![
         "stage".into(),
         image.into(),
@@ -248,6 +338,7 @@ fn stager_arguments(scratch: &Path) -> Result<Vec<OsString>, Box<dyn Error>> {
         spi1.into(),
         "runtime.key".into(),
         provider.into(),
+        scratch.join("export").into(),
         "honest".into(),
     ])
 }
@@ -264,8 +355,15 @@ async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResul
     }
     let scratch = tempfile::tempdir()?;
     let seen = Arc::new(Mutex::new(None));
+    let executed = Arc::new(Mutex::new(Vec::new()));
     let control = ObservingControl {
         seen: Arc::clone(&seen),
+        execute: vec![
+            "execute".into(),
+            scratch.path().join("export").into(),
+            std::process::id().to_string().into(),
+        ],
+        executed: Arc::clone(&executed),
     };
     let mut report = Vec::new();
     let arguments = stager_arguments(scratch.path())?;
@@ -284,6 +382,29 @@ async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResul
         format!("staged\t{}\nunstaged\n", installed.display())
     );
     assert!(!Path::new("/var/lib/pigloros").exists());
+
+    // The stager exported the selector's side of the staged execution, each
+    // file private, and the execute mode read it and ran its whole exchange
+    // against a provider socket that closes every connection.
+    for name in ["spx1", "evaluation", "input"] {
+        let metadata = fs::metadata(scratch.path().join("export").join(name))?;
+        assert!(metadata.len() > 0, "{name}");
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600, "{name}");
+    }
+    let results = executed.lock().map_err(|_| "poisoned")?.clone();
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert!(
+        results[0].starts_with("error: the provider exchange could not be set up"),
+        "{results:?}"
+    );
+    assert!(
+        results[1].starts_with("error: the provider exchange could not be set up"),
+        "{results:?}"
+    );
+    assert_eq!(
+        results[2],
+        "execute\tfailed\tprovider execution failed before admission\n"
+    );
     Ok(())
 }
 
