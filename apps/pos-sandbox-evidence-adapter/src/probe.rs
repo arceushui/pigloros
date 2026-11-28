@@ -47,6 +47,10 @@ pub struct Targets<'a> {
     /// An address (RFC 5737 documentation) nothing may answer at over TCP.
     pub tcp: SocketAddr,
     /// The loopback stub resolver, over UDP.
+    ///
+    /// In the guest nothing may listen at the guest's address, and loopback
+    /// UDP must not be silently dropped: a datagram that is sent and met only
+    /// silence counts as an escape, so a contained adapter needs a refusal.
     pub resolver: SocketAddr,
     /// The system bus socket.
     pub bus: &'a str,
