@@ -212,10 +212,10 @@ impl MemoryCommunityDomainV1 {
     /// a zero identity or reservation, and for a CDP1 other than the one the
     /// pass was reserved under; `EvidenceUnavailable` for every authority
     /// failure, a pass nobody reserved, an unbootstrapped domain, a pass
-    /// record with no due member (there is no retained TPS1 digest to use), a missing pass
-    /// metadata key and a writer at or after the decision bound; `Conflict`
-    /// for a Committed pass, a retry with other bound content or by another
-    /// principal; `EvidenceExpired` for a retry at or after the pass's
+    /// record with no due member (there is no retained TPS1 digest to use),
+    /// a missing pass metadata key and a writer at or after the decision
+    /// bound; `Conflict` for a Committed pass, a retry with other bound
+    /// content or by another principal; `EvidenceExpired` for a retry at or after the pass's
     /// `H_r`; `OperationActive` while the pass's call is live;
     /// `StaleGeneration` and `StaleFrontier` for a moved generation or head;
     /// `EvidenceExpired` when the decision bound is after the metadata

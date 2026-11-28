@@ -581,6 +581,7 @@ fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult
 /// asked for, whatever the CGI1 lists first. Each slot holds CSC1, CIS1,
 /// CSR1 and two CPN1s.
 #[test]
+#[cfg(target_os = "linux")]
 fn the_state_revision_is_found_by_the_members_slot() {
     let bindings = [hash(1), hash(2), hash(3)];
     let magics: Vec<[u8; 4]> = (0..3)

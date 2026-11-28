@@ -676,6 +676,7 @@ fn an_abort_without_an_agreeing_selected_view_is_refused() -> TestResult {
             ..view
         },
     );
+    assert!(!views_agree(case.domain(), target()));
     assert_eq!(
         case.abort(Reason::AuthenticatedCancellation)?.err(),
         Some(Error::EvidenceUnavailable)

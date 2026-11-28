@@ -59,7 +59,8 @@ pub(in crate::community) fn state_revisions(
 
 /// What a Commit installs in one transaction (R16.5(4)): T's new head
 /// digest in the pass state and the selected view of that head, whose ref is
-/// a real CSR1 CMI1 reference. The Commit slice calls the same pair.
+/// a real CSR1 CMI1 reference. The Commit slice replaces this with its real
+/// transaction, which installs the same pair.
 pub(in crate::community) fn simulate_commit(
     domain: &mut MemoryCommunityDomainV1,
     timeline: TimelineId,
@@ -74,16 +75,13 @@ pub(in crate::community) fn simulate_commit(
     Ok(())
 }
 
-/// Whether T's selected view and pass state name one head.
+/// Whether `head_view` accepts T's selected view: it names the head the pass
+/// state holds. It asks the domain's own rule, so the two cannot drift.
 pub(in crate::community) fn views_agree(
     domain: &MemoryCommunityDomainV1,
     timeline: TimelineId,
 ) -> bool {
-    domain
-        .selected_views
-        .get(&timeline)
-        .zip(domain.pass_states.get(&timeline))
-        .is_some_and(|(view, state)| view.head_digest == state.head)
+    domain.agreed_view(timeline).is_some()
 }
 
 fn row(timeline: u8, head: u64, epoch: u64, tag: u8) -> CommunityAuthorityViewRowV1 {

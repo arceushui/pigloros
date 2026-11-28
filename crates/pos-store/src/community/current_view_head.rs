@@ -113,6 +113,16 @@ pub(super) struct CommunityHeadViewV1 {
 }
 
 impl MemoryCommunityDomainV1 {
+    /// T's selected view when it reads the head the pass state holds: the one
+    /// accept/refuse rule of [`Self::head_view`].
+    pub(super) fn agreed_view(&self, timeline: TimelineId) -> Option<&CommunitySelectedViewV1> {
+        self.selected_views
+            .get(&timeline)
+            .zip(self.pass_states.get(&timeline))
+            .filter(|(selected, state)| selected.head_digest == state.head)
+            .map(|(selected, _)| selected)
+    }
+
     /// The head view of T's CAV1: T's selected frontier and head ref, and
     /// `chains` joined by the row of the metadata `write` decision's chain
     /// (`metadata`: its leaf grant and request), read now.
@@ -127,11 +137,7 @@ impl MemoryCommunityDomainV1 {
         chains: Vec<CommunityAuthorityViewRowV1>,
         metadata: (Hash, &AuthorizationRequestV1),
     ) -> Result<CommunityHeadViewV1, Error> {
-        self.selected_views
-            .get(&timeline)
-            .zip(self.pass_states.get(&timeline))
-            .filter(|(selected, state)| selected.head_digest == state.head)
-            .map(|(selected, _)| selected)
+        self.agreed_view(timeline)
             .ok_or(Error::EvidenceUnavailable)
             .and_then(|selected| {
                 CommunityStoreDomainV1::authority_row(self, metadata.0, metadata.1).map(|row| {
