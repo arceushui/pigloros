@@ -503,12 +503,13 @@ fn a_materialization_identity_conflicts() -> TestResult {
 }
 
 /// The premises, each refused with its code and nothing changed: another
-/// ledger digest or reason set (4), a reason set that is not valid (3),
+/// ledger digest or reason set (4), a reason set that is not valid (3: more
+/// than four, codes not strictly ascending, a zero evidence digest),
 /// another generation (5) and head (6), no index row (12).
 #[test]
 fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
     let mut case = seeded(Revocation::None)?;
-    let refused: [(Claim, Error); 7] = [
+    let refused: [(Claim, Error); 9] = [
         (
             Claim::of_seeded().with(|c| c.ledger = hash(0x70)),
             Error::Conflict,
@@ -529,6 +530,31 @@ fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
         ),
         (
             Claim::of_seeded().with(|c| c.reasons.push(c.reasons[1])),
+            Error::InvalidBinding,
+        ),
+        (
+            Claim::of_seeded().with(|c| {
+                c.reasons = vec![
+                    c.reasons[0],
+                    c.reasons[1],
+                    Evidence {
+                        reason: Reason::Unavailable,
+                        failure_evidence_digest: hash(0x96),
+                    },
+                    Evidence {
+                        reason: Reason::Unavailable,
+                        failure_evidence_digest: hash(0x97),
+                    },
+                    Evidence {
+                        reason: Reason::Unavailable,
+                        failure_evidence_digest: hash(0x98),
+                    },
+                ];
+            }),
+            Error::InvalidBinding,
+        ),
+        (
+            Claim::of_seeded().with(|c| c.reasons[0].failure_evidence_digest = hash(0)),
             Error::InvalidBinding,
         ),
         (
@@ -674,27 +700,35 @@ fn a_moved_inventory_generation_or_selection_refuses_the_writer() -> TestResult 
     Ok(())
 }
 
-/// The writer refuses (12) at the deadline `B`, which is the FAE1 expiry here,
-/// and the quarantine stays; a retry commits.
+/// The writer refuses (12) at and after the deadline `B`, which is the FAE1
+/// expiry here, and the quarantine stays; one microsecond before it commits.
+/// Every case reads all six scripted marks, so the writer's marks are the
+/// script's fifth and sixth and the offset is the writer's elapsed time.
 #[test]
-fn the_writer_refuses_at_the_deadline() -> TestResult {
-    let mut case = seeded(Revocation::None)?;
-    let zero = Duration::ZERO;
-    case.domain.script_mono(&[
-        zero,
-        zero,
-        zero,
-        zero,
-        Duration::from_micros(EXPIRES - NOW),
-        zero,
-    ]);
-    assert_eq!(
-        reset(&mut case, &Claim::of_seeded())?.err(),
-        Some(Error::EvidenceUnavailable)
-    );
-    assert_eq!(ledger(&case)?.head, HEAD);
-    assert!(case.domain.world.domain.quarantine_controls.is_empty());
-    reset(&mut case, &Claim::of_seeded())??;
+fn the_writer_refuses_at_and_after_the_deadline() -> TestResult {
+    let bound = EXPIRES - NOW;
+    for (offset, refused) in [(bound - 1, false), (bound, true), (bound + 1_000, true)] {
+        let mut case = seeded(Revocation::None)?;
+        let zero = Duration::ZERO;
+        case.domain
+            .script_mono(&[zero, zero, zero, zero, Duration::from_micros(offset), zero]);
+        let result = reset(&mut case, &Claim::of_seeded())?;
+        let read = case
+            .domain
+            .mono
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .samples_taken();
+        assert_eq!(read, 6);
+        if refused {
+            assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
+            assert_eq!(ledger(&case)?.head, HEAD);
+            assert!(case.domain.world.domain.quarantine_controls.is_empty());
+        } else {
+            result?;
+            assert_ne!(ledger(&case)?.head, HEAD);
+        }
+    }
     Ok(())
 }
 
@@ -737,7 +771,10 @@ fn a_denied_metadata_write_refuses_every_reset() -> TestResult {
 #[test]
 fn a_decision_that_differs_at_the_writer_refuses_it() -> TestResult {
     type Tamper = fn(&mut StagedResetV1);
-    let tampers: [Tamper; 3] = [
+    // The leaf grant is also the locator of the second evaluation, so another
+    // leaf is refused by that evaluation itself before the comparison.
+    let tampers: [Tamper; 4] = [
+        |staged| staged.authority.leaf_grant_id = METADATA_LEAF,
         |staged| staged.authority.authorization_ref.digest[0] ^= 1,
         |staged| staged.authority.metadata.2.push(hash(1)),
         |staged| staged.premises.trust_snapshot_digest = hash(0x55),
@@ -749,6 +786,25 @@ fn a_decision_that_differs_at_the_writer_refuses_it() -> TestResult {
         assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
         assert_eq!(untouched(&case)?, before);
     }
+    Ok(())
+}
+
+/// A writer past the deadline with a changed decision refuses too, and writes
+/// nothing. Both refusals are 12, so which one is judged first cannot be
+/// observed; the bound check consumes the call and is judged first.
+#[test]
+fn a_late_writer_with_a_changed_decision_refuses() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let zero = Duration::ZERO;
+    let late = Duration::from_micros(EXPIRES - NOW);
+    case.domain
+        .script_mono(&[zero, zero, zero, zero, late, zero]);
+    let before = untouched(&case)?;
+    let result = reset_between(&mut case, |_, staged| {
+        staged.premises.trust_snapshot_digest = hash(0x55);
+    })?;
+    assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
+    assert_eq!(untouched(&case)?, before);
     Ok(())
 }
 

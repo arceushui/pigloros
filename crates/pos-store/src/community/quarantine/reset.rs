@@ -274,7 +274,9 @@ impl MemoryCommunityDomainV1 {
                 control_operation_id: call.control_operation_id,
             },
         )?;
-        CommunityQuarantineReasonsV1::from_reasons(call.expected_reasons).validate()?;
+        CommunityQuarantineReasonsV1::from_reasons(call.expected_reasons)
+            .validate()
+            .or(Err(Error::InvalidBinding))?;
         let authenticated = lifecycle.authenticate(call.credential, request, self)?;
         let administrative =
             lifecycle.authorize_administrative(&authenticated, self, call.administrative_leaf)?;
