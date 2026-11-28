@@ -52,7 +52,7 @@ use crate::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
         SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
-    error::{ActionSubmissionError, RuntimeError},
+    error::{ActionRejectionOriginV1, ActionSubmissionError, RuntimeError},
     output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     registry::factual_dependencies::{split_output, StagedFactual},
@@ -63,6 +63,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod action_origin_tests;
 mod adapter;
 mod authorized_pass;
 mod availability;
@@ -4249,9 +4252,7 @@ impl PluginRegistry {
             .ok_or(ActionSubmissionError::ErasureOperationUnavailable)?;
         let mut result = Err(ActionSubmissionError::ErasureOperationUnavailable);
         let mut approve = || {
-            result = self
-                .approve_action(proposal)
-                .map_err(ActionSubmissionError::from);
+            result = self.approve_action(proposal);
         };
         gate.with_fence(
             timeline,
@@ -4262,7 +4263,17 @@ impl PluginRegistry {
         result
     }
 
-    fn approve_action(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+    fn approve_action(
+        &self,
+        proposal: &ProposedAction,
+    ) -> Result<EventDraft, ActionSubmissionError> {
+        self.check_action_envelope(proposal).map_err(|reason| {
+            ActionRejectionOriginV1::Registry.action_submission_rejection(reason)
+        })?;
+        self.approve_action_draft(proposal)
+    }
+
+    fn check_action_envelope(&self, proposal: &ProposedAction) -> Result<(), ActionRejected> {
         if self.run_mode == RunMode::Replay {
             return Err(ActionRejected::UnknownEventType);
         }
@@ -4277,20 +4288,33 @@ impl PluginRegistry {
         if proposal.capability.as_str() != expected_capability {
             return Err(ActionRejected::CapabilityNotGranted);
         }
-
-        self.approve_action_draft(proposal)
+        Ok(())
     }
 
+    /// Run the owning approver and check its draft, tagging each refusal with
+    /// its ADR-141 §2 origin. The approver's own `Err` is tagged before the
+    /// draft checks run, so it is never reported as an approved-output refusal.
     fn approve_action_draft(
         &self,
         proposal: &ProposedAction,
-    ) -> Result<EventDraft, ActionRejected> {
-        let (approver, admission) = self.action_approver_and_admission(&proposal.event_type)?;
-        let draft = Self::validate_approver_draft(proposal, approver.approve(proposal))?;
+    ) -> Result<EventDraft, ActionSubmissionError> {
+        let (approver, admission) = self
+            .action_approver_and_admission(&proposal.event_type)
+            .map_err(|reason| {
+                ActionRejectionOriginV1::Registry.action_submission_rejection(reason)
+            })?;
+        let raw_draft = approver.approve(proposal).map_err(|reason| {
+            ActionRejectionOriginV1::Approver.action_submission_rejection(reason)
+        })?;
+        let draft = Self::validate_approver_draft(proposal, raw_draft).map_err(|reason| {
+            ActionRejectionOriginV1::ApprovedOutput.action_submission_rejection(reason)
+        })?;
         admission.validate_action(&draft).map_err(|error| {
-            ActionRejected::DomainValidationFailed(format!(
-                "action output admission failed: {error}"
-            ))
+            ActionRejectionOriginV1::ApprovedOutput.action_submission_rejection(
+                ActionRejected::DomainValidationFailed(format!(
+                    "action output admission failed: {error}"
+                )),
+            )
         })?;
         Ok(draft)
     }
@@ -4318,9 +4342,8 @@ impl PluginRegistry {
 
     fn validate_approver_draft(
         proposal: &ProposedAction,
-        result: Result<EventDraft, ActionRejected>,
+        draft: EventDraft,
     ) -> Result<EventDraft, ActionRejected> {
-        let draft = result?;
         if draft.entity != proposal.actor_entity_id {
             return Err(ActionRejected::DomainValidationFailed(
                 "approver returned an event for a different actor".to_owned(),
@@ -9407,9 +9430,10 @@ mod tests {
         );
         assert!(matches!(
             reg.submit_action(action_timeline, &wrong_capability),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::CapabilityNotGranted
-            ))
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::Registry,
+                reason: ActionRejected::CapabilityNotGranted,
+            })
         ));
 
         // Payload too large (>4096)
@@ -9421,12 +9445,13 @@ mod tests {
         );
         assert!(matches!(
             reg.submit_action(action_timeline, &too_large),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::PayloadTooLarge {
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::Registry,
+                reason: ActionRejected::PayloadTooLarge {
                     size: 5000,
                     max: 4096
-                }
-            ))
+                },
+            })
         ));
 
         // Unknown event type
@@ -9438,9 +9463,10 @@ mod tests {
         );
         assert!(matches!(
             reg.submit_action(action_timeline, &unknown),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::UnknownEventType
-            ))
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::Registry,
+                reason: ActionRejected::UnknownEventType,
+            })
         ));
 
         // Domain validation failure
@@ -9452,18 +9478,20 @@ mod tests {
         );
         assert!(matches!(
             reg.submit_action(action_timeline, &rejected),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::DomainValidationFailed(reason)
-            )) if reason == "rejected"
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::Approver,
+                reason: ActionRejected::DomainValidationFailed(reason),
+            }) if reason == "rejected"
         ));
 
         let replay = PluginRegistry::new_replay()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(matches!(
             replay.submit_action(action_timeline, &valid),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::UnknownEventType
-            ))
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::Registry,
+                reason: ActionRejected::UnknownEventType,
+            })
         ));
     }
 
@@ -9541,9 +9569,10 @@ mod tests {
         let result = reg.submit_action(TimelineId::new(), &proposal);
         assert!(matches!(
             result,
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::DomainValidationFailed(reason)
-            )) if reason.contains("action output admission failed")
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::ApprovedOutput,
+                reason: ActionRejected::DomainValidationFailed(reason),
+            }) if reason.contains("action output admission failed")
         ));
     }
 
@@ -9577,9 +9606,10 @@ mod tests {
         let action_timeline = TimelineId::new();
         assert!(matches!(
             actor_registry.submit_action(action_timeline, &proposal),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::DomainValidationFailed(reason)
-            )) if reason == "approver returned an event for a different actor"
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::ApprovedOutput,
+                reason: ActionRejected::DomainValidationFailed(reason),
+            }) if reason == "approver returned an event for a different actor"
         ));
 
         let forged_event_type = Kind::new("other.action.type");
@@ -9599,9 +9629,10 @@ mod tests {
             .test_ok();
         assert!(matches!(
             event_type_registry.submit_action(action_timeline, &proposal),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::DomainValidationFailed(reason)
-            )) if reason == "approver returned an event for a different event type"
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::ApprovedOutput,
+                reason: ActionRejected::DomainValidationFailed(reason),
+            }) if reason == "approver returned an event for a different event type"
         ));
     }
 
@@ -9629,9 +9660,10 @@ mod tests {
             PluginRegistry::new_replay()
                 .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .submit_action(TimelineId::new(), &proposal),
-            Err(ActionSubmissionError::Rejected(
-                ActionRejected::UnknownEventType
-            ))
+            Err(ActionSubmissionError::Rejected {
+                origin: ActionRejectionOriginV1::Registry,
+                reason: ActionRejected::UnknownEventType,
+            })
         ));
     }
 }

@@ -1025,7 +1025,9 @@ const fn gateway_problem(error: &GatewayError) -> Option<ProblemShape> {
         GatewayError::Store(error) => store_problem(error),
         GatewayError::ActionRegistry(_) => None,
         GatewayError::Ledger(error) => ledger_problem(error),
-        GatewayError::ActionRejected(rejected) => Some(action_rejected_problem(rejected)),
+        GatewayError::ActionRejected(reason) | GatewayError::ActionRejectedBy { reason, .. } => {
+            Some(action_rejected_problem(reason))
+        }
         other => Some(request_problem(other)),
     }
 }
@@ -3739,5 +3741,84 @@ osf_link = \"https://osf.io/example\"\n";
             let resp = GatewayError::ActionRejected(rejected).into_response();
             assert_eq!(resp.status(), expected_status);
         }
+    }
+
+    /// The frozen served `submitAction` answer of every ADR-057 rejection.
+    fn frozen_submit_action_rejections() -> [(ActionRejected, ProblemShape); 5] {
+        [
+            (
+                ActionRejected::UnknownEventType,
+                (
+                    ProblemCodeV1::UnsupportedVersion,
+                    StatusCode::BAD_REQUEST,
+                    false,
+                ),
+            ),
+            (
+                ActionRejected::CapabilityNotGranted,
+                (ProblemCodeV1::Unauthorized, StatusCode::FORBIDDEN, false),
+            ),
+            (
+                ActionRejected::InvalidActorEntityId,
+                (
+                    ProblemCodeV1::InvalidRequest,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    false,
+                ),
+            ),
+            (
+                ActionRejected::DomainValidationFailed("origin".into()),
+                (
+                    ProblemCodeV1::AdmissionRejected,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    false,
+                ),
+            ),
+            (
+                ActionRejected::PayloadTooLarge { size: 9, max: 8 },
+                (
+                    ProblemCodeV1::ResourceLimitExceeded,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    false,
+                ),
+            ),
+        ]
+    }
+
+    /// ADR-141 §2 and P4: a registry rejection of any origin, converted the
+    /// way the served route converts it, keeps the frozen `submitAction` answer.
+    #[test]
+    fn every_origin_keeps_the_frozen_submit_action_answer() {
+        let origins = [
+            pos_runtime::ActionRejectionOriginV1::Registry,
+            pos_runtime::ActionRejectionOriginV1::Approver,
+            pos_runtime::ActionRejectionOriginV1::ApprovedOutput,
+        ];
+        for origin in origins {
+            for (reason, expected) in frozen_submit_action_rejections() {
+                let error = GatewayError::from(pos_runtime::ActionSubmissionError::Rejected {
+                    origin,
+                    reason,
+                });
+                assert_eq!(gateway_problem(&error), Some(expected));
+                assert_eq!(error.into_response().status(), expected.1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_registry_rejection_carries_its_origin_and_reason() {
+        let error = GatewayError::from(pos_runtime::ActionSubmissionError::Rejected {
+            origin: pos_runtime::ActionRejectionOriginV1::ApprovedOutput,
+            reason: ActionRejected::InvalidActorEntityId,
+        });
+        assert_eq!(error.to_string(), "invalid actor entity ID");
+        assert!(matches!(
+            error,
+            GatewayError::ActionRejectedBy {
+                origin: pos_runtime::ActionRejectionOriginV1::ApprovedOutput,
+                reason: ActionRejected::InvalidActorEntityId,
+            }
+        ));
     }
 }

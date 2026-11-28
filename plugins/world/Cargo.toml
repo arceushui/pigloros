@@ -19,6 +19,7 @@ num-traits = { workspace = true }
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
+pos-state = { path = "../../crates/pos-state" }
 pos-store = { path = "../../crates/pos-store" }
 
 [lints]

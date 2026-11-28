@@ -105,7 +105,7 @@ use pos_plugin_world::{
     EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1,
+    ActionRejectionOriginV1, ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1,
     HumanActionAdmissionErrorV1, PluginRegistry,
 };
 use serde::{Deserialize, Serialize};
@@ -709,15 +709,17 @@ mod coverage_tests {
         );
         assert!(matches!(
             submit(EntityId::new(), 1),
-            Err(pos_runtime::ActionSubmissionError::Rejected(
-                pos_core::ActionRejected::DomainValidationFailed(_)
-            ))
+            Err(pos_runtime::ActionSubmissionError::Rejected {
+                origin: pos_runtime::ActionRejectionOriginV1::Approver,
+                reason: pos_core::ActionRejected::DomainValidationFailed(_),
+            })
         ));
         assert!(matches!(
             submit(body, 2),
-            Err(pos_runtime::ActionSubmissionError::Rejected(
-                pos_core::ActionRejected::DomainValidationFailed(_)
-            ))
+            Err(pos_runtime::ActionSubmissionError::Rejected {
+                origin: pos_runtime::ActionRejectionOriginV1::Approver,
+                reason: pos_core::ActionRejected::DomainValidationFailed(_),
+            })
         ));
     }
 
@@ -1780,9 +1782,19 @@ pub enum GatewayError {
     /// The existing `OwnTracks` owner-key file failed the activation policy.
     #[error("OwnTracks owner-key file is unavailable")]
     OwnTracksOwnerKeyUnavailable,
-    /// Proposed action was rejected by the capability check or approver (ADR-057).
+    /// Rejections that carry no registry origin: the Gateway's own route and
+    /// payload checks, and the not-admitted and contract families (ADR-057).
     #[error(transparent)]
     ActionRejected(#[from] ActionRejected),
+    /// The action registry, the owning approver or the approved-output check
+    /// refused a proposed action (ADR-141 §2).
+    #[error("{reason}")]
+    ActionRejectedBy {
+        /// Who refused the action.
+        origin: ActionRejectionOriginV1,
+        /// The closed ADR-057 rejection.
+        reason: ActionRejected,
+    },
     /// Human action submission requires an authenticated action principal.
     #[error("human action authorization is unavailable")]
     ActionAuthorizationUnavailable,
@@ -2117,7 +2129,9 @@ fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
 impl From<ActionSubmissionError> for GatewayError {
     fn from(error: ActionSubmissionError) -> Self {
         match error {
-            ActionSubmissionError::Rejected(error) => error.into(),
+            ActionSubmissionError::Rejected { origin, reason } => {
+                Self::ActionRejectedBy { origin, reason }
+            }
             ActionSubmissionError::ErasureOperationUnavailable => {
                 CoreError::ErasureContainmentUnavailable.into()
             }
@@ -5414,7 +5428,10 @@ mod tests {
         );
         assert!(matches!(
             gateway.submit_proposed_action(timeline_id, malformed).await,
-            Err(GatewayError::ActionRejected(_))
+            Err(GatewayError::ActionRejectedBy {
+                origin: ActionRejectionOriginV1::Approver,
+                reason: ActionRejected::DomainValidationFailed(_),
+            })
         ));
     }
 

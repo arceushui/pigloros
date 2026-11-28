@@ -10,6 +10,8 @@
 //! - [`RelationshipIndex`]: an adjacency index for directed [`Relationship`] values.
 //! - [`ProtectedProjectionProviderV1`] and [`DetachedProjectionCandidateV1`]:
 //!   private protected projection candidates folded by the live fold step.
+//! - [`ProjectionFoldV1`] and [`fold_projection_page_v1`]: the on-demand
+//!   Projection fold of a committed Timeline prefix (ADR-141 §9).
 //!
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
@@ -29,6 +31,7 @@ use pos_core::{
 };
 
 mod candidate;
+mod projection_page;
 mod staged;
 
 /// One staged consumer's private State map and the identity it must match.
@@ -47,6 +50,12 @@ pub use candidate::{
     DetachedProjectionCandidateV1, InitialStateV1, ProjectionCandidateErrorV1,
     ProtectedProjectionProviderV1, RecordedConsumerV1, StagedAccountingV1, StagedLimitErrorV1,
     MAX_STAGED_CONSUMERS_V1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
+};
+pub use projection_page::{
+    fold_projection_page_v1, projection_provenance_digest_v1, ProjectedEventV1, ProjectionEntryV1,
+    ProjectionFoldErrorV1, ProjectionFoldV1, ProjectionPageLimitV1, ProjectionPageV1,
+    MAX_PROJECTION_PAGE_ENTRIES_V1, PROJECTION_PROVENANCE_DIGEST_DOMAIN_V1,
+    PROJECTION_STATE_DIGEST_DOMAIN_V1,
 };
 pub use staged::{InstallErrorV1, RevokedSubjectsV1, StagedProjectionV1};
 

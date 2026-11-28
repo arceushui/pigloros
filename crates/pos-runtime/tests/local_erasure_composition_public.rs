@@ -9599,6 +9599,14 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
 mod acceptance;
 
 // ---------------------------------------------------------------------------
+// ADR-141 P6 and P7 (#306 C1): a root created under its identity and the
+// closed composition's refusal of a store with active requests.
+// ---------------------------------------------------------------------------
+
+#[path = "local_erasure_composition/owned_root_with_id.rs"]
+mod owned_root_with_id;
+
+// ---------------------------------------------------------------------------
 // ADR-129 revision 13 (#560 A4b-2, R13-1): the Memory community
 // erasure-budget counters against the authority's closure.
 // ---------------------------------------------------------------------------

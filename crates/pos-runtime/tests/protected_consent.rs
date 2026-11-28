@@ -10,8 +10,8 @@ use pos_core::{
     PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    schema::EventTypeSchema, ActionSubmissionError, Driver, LocalScheduledAdmissionHostV1,
-    ObservationView, OutputPolicyBindingV1, OutputPolicySourceV1,
+    schema::EventTypeSchema, ActionRejectionOriginV1, ActionSubmissionError, Driver,
+    LocalScheduledAdmissionHostV1, ObservationView, OutputPolicyBindingV1, OutputPolicySourceV1,
     PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use pos_store::{memory::MemoryStore, EventStore};
@@ -1537,9 +1537,10 @@ fn public_registry_rejects_oversized_actions() {
     );
     assert!(matches!(
         action_registry.submit_action(TimelineId::new(), &oversized),
-        Err(ActionSubmissionError::Rejected(
-            ActionRejected::PayloadTooLarge { .. }
-        ))
+        Err(ActionSubmissionError::Rejected {
+            origin: ActionRejectionOriginV1::Registry,
+            reason: ActionRejected::PayloadTooLarge { .. },
+        })
     ));
 }
 
@@ -1595,17 +1596,19 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
     let timeline = TimelineId::new();
     assert!(matches!(
         PluginRegistry::new().submit_action(timeline, &unknown),
-        Err(ActionSubmissionError::Rejected(
-            ActionRejected::UnknownEventType
-        ))
+        Err(ActionSubmissionError::Rejected {
+            origin: ActionRejectionOriginV1::Registry,
+            reason: ActionRejected::UnknownEventType,
+        })
     ));
     assert!(matches!(
         PluginRegistry::new_replay()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .submit_action(timeline, &unknown),
-        Err(ActionSubmissionError::Rejected(
-            ActionRejected::UnknownEventType
-        ))
+        Err(ActionSubmissionError::Rejected {
+            origin: ActionRejectionOriginV1::Registry,
+            reason: ActionRejected::UnknownEventType,
+        })
     ));
 }
 

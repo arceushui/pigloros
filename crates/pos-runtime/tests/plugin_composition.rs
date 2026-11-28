@@ -705,10 +705,13 @@ fn pinned_action_policy_rejects_an_oversized_approver_draft() {
         .test_err();
     assert!(matches!(
         error,
-        pos_runtime::ActionSubmissionError::Rejected(ActionRejected::PayloadTooLarge {
-            size: 4097,
-            max: 4096
-        })
+        pos_runtime::ActionSubmissionError::Rejected {
+            origin: pos_runtime::ActionRejectionOriginV1::ApprovedOutput,
+            reason: ActionRejected::PayloadTooLarge {
+                size: 4097,
+                max: 4096,
+            },
+        }
     ));
 }
 

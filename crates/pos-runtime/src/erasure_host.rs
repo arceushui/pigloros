@@ -4276,6 +4276,68 @@ impl ErasureCommandSenderV1<'_> {
         self.create_root(TimelineMeta::root_owned(name, owner))
     }
 
+    /// Create the root Timeline `id`, named `name` and owned by `owner`,
+    /// and publish its successor inventory generation (ADR-141 P6).
+    ///
+    /// The root is positively checked as [`Self::create_owned_timeline`]
+    /// checks a fresh root, so it is outside every request frozen before it
+    /// existed. Unlike [`Self::open_root_timeline`] it never returns a
+    /// recorded Timeline: when the store already holds `id` it refuses before
+    /// the candidate is verified, publishes nothing and leaves the host and
+    /// this sender usable.
+    ///
+    /// # Errors
+    /// Returns [`ErasureHostErrorV1::Conflict`] when the store already holds
+    /// `id`, else the payload-free host errors of [`Self::create_timeline`].
+    pub fn create_owned_root_with_id(
+        &mut self,
+        id: TimelineId,
+        name: &str,
+        owner: EntityId,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        let candidate = Timeline::new(TimelineMeta {
+            id,
+            mode: TimelineMode::Live,
+            name: Some(name.to_owned()),
+            owner: Some(owner),
+            fork_point: None,
+        });
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| {
+                self.host.apply_unaffected_topology_change(
+                    None,
+                    |permit, store| {
+                        store
+                            .get_timeline_for_host_transition(permit, id)
+                            .map_store_error()
+                            .and_then(|recorded| {
+                                recorded.map_or_else(
+                                    || Ok(candidate.clone()),
+                                    |_| Err(ErasureHostErrorV1::Conflict),
+                                )
+                            })
+                    },
+                    |permit, store, candidate| {
+                        store
+                            .create_timeline_for_host_transition_with_meta(
+                                permit,
+                                candidate.meta.clone(),
+                            )
+                            .map(|timeline| TopologyTransitionResultV1 {
+                                timeline,
+                                #[cfg(test)]
+                                created: true,
+                            })
+                    },
+                )
+            })
+            .map(|(timeline, generation)| {
+                self.generation = generation;
+                timeline
+            })
+    }
+
     /// Create the fresh root `meta` through the positively checked root
     /// topology transition.
     fn create_root(&mut self, meta: TimelineMeta) -> Result<Timeline, ErasureHostErrorV1> {
