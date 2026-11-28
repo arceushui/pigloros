@@ -20,6 +20,7 @@ import yaml
 
 import ci_stage_policy as stages
 import test_check_owner_runtime_custody_policy as custody_policy_tests
+import test_check_workspace_coverage_floor as coverage_floor_tests
 import test_merge_owner_bridge_lcov as native_lcov_tests
 import owner_bridge_windows_workflow_policy as native_policy
 from check_owner_runtime_custody_policy import UniqueKeys
@@ -32,23 +33,35 @@ CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 CODEQL_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "codeql.yml"
 RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
 TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
-# Workflows that run on main (push or schedule) own main-written caches. The
-# pull-request-only mutation and sim1 proof-risk workflows keep PR-scoped keys.
+RESTORE_ONLY_SAVE_IF = "false"
+ALLOWED_NON_PR_SAVE_IFS = frozenset({TRUSTED_MAIN_SAVE_IF, RESTORE_ONLY_SAVE_IF})
+# Workflows that run on main (push or schedule) own main-written caches, and
+# sim1-proof-risk restores main's feature-matrix cache without PR writes. The
+# pull-request-only mutation baseline keeps its own PR-scoped key.
 MAIN_WRITER_WORKFLOW_PATHS = (
     CI_WORKFLOW_PATH,
     ROOT / ".github" / "workflows" / "fuzz.yml",
     ROOT / ".github" / "workflows" / "memory-store-benchmark.yml",
+    ROOT / ".github" / "workflows" / "sim1-proof-risk.yml",
     ROOT / ".github" / "workflows" / "thread-sanitizer.yml",
 )
 TRUSTED_MAIN_DOCKER_CACHE_TO = (
     "${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}"
 )
 CORE_CACHE_KEYS = {
-    "feature-matrix": "feature-matrix",
-    "test": "test",
-    "test-shard": "test-nextest",
-    "clippy": "clippy",
-    "coverage": "coverage",
+    "feature-matrix": ("feature-matrix", TRUSTED_MAIN_SAVE_IF),
+    "test": ("test-nextest", RESTORE_ONLY_SAVE_IF),
+    "test-shard": ("test-nextest", TRUSTED_MAIN_SAVE_IF),
+    "clippy": ("clippy", TRUSTED_MAIN_SAVE_IF),
+    "coverage": ("coverage", TRUSTED_MAIN_SAVE_IF),
+}
+COVERAGE_FLOOR_STEP = {
+    "name": "Enforce workspace coverage floor",
+    "run": (
+        "python3 scripts/check_workspace_coverage_floor.py "
+        "--fail-under-lines 99 --fail-under-regions 99 "
+        '"${{ runner.temp }}/coverage.json"\n'
+    ),
 }
 CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
 CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
@@ -738,7 +751,7 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
 
     assert_main_push_prerequisites(workflow)
     assert_core_jobs_run_on_main_push(workflow)
-    for job_name, shared_key in CORE_CACHE_KEYS.items():
+    for job_name, (shared_key, expected_save_if) in CORE_CACHE_KEYS.items():
         steps = workflow["jobs"][job_name]["steps"]
         cache_steps = [
             step
@@ -754,7 +767,7 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
             raise AssertionError(f"{job_name} must use the pinned Rust cache action")
         if cache_step.get("with") != {
             "shared-key": shared_key,
-            "save-if": TRUSTED_MAIN_SAVE_IF,
+            "save-if": expected_save_if,
         }:
             raise AssertionError(f"{job_name} cache must use the trusted-main policy")
         if "if" in cache_step:
@@ -822,12 +835,26 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
         for step in job.get("steps", []):
             uses = step.get("uses", "") if isinstance(step, dict) else ""
             if uses.startswith("Swatinem/rust-cache@"):
-                if step.get("with", {}).get("save-if") != TRUSTED_MAIN_SAVE_IF:
+                if step.get("with", {}).get("save-if") not in ALLOWED_NON_PR_SAVE_IFS:
                     raise AssertionError(f"{job_name} Rust cache must save only from main")
             if uses.startswith("docker/build-push-action@"):
                 cache_to = step.get("with", {}).get("cache-to")
                 if cache_to is not None and cache_to != TRUSTED_MAIN_DOCKER_CACHE_TO:
                     raise AssertionError(f"{job_name} Docker cache must save only from main")
+
+
+def assert_workspace_coverage_floor_contract(workflow: dict) -> None:
+    """Require the coverage job to enforce both 99% workspace floors from coverage.json."""
+    steps = workflow["jobs"]["coverage"]["steps"]
+    matches = [
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == COVERAGE_FLOOR_STEP["name"]
+    ]
+    if matches != [COVERAGE_FLOOR_STEP]:
+        raise AssertionError(
+            "coverage must enforce the 99% line and region floors from coverage.json"
+        )
 
 
 STANDARD_STAGE_RUNNER_CAP = 8
@@ -3013,7 +3040,6 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             ("test ! -L", "true #"),
             ("readlink -e", "printf"),
             ("--one-file-system", ""),
-            ("sudo du -sx -B1", "true #"),
             ("df -B1", "true #"),
             ("df -i", "true #"),
             ("set -euo pipefail", "set +e"),
@@ -3046,6 +3072,24 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     steps[1].update(extra)
                     with self.assertRaisesRegex(AssertionError, "SDK headroom"):
                         assert_core_sdk_headroom(workflow)
+
+    def test_workspace_coverage_floor_uses_exported_json(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        assert_workspace_coverage_floor_contract(workflow)
+        for before, after in (
+            ("--fail-under-lines 99", "--fail-under-lines 98"),
+            ("--fail-under-regions 99", "--fail-under-regions 98"),
+        ):
+            mutated = copy.deepcopy(workflow)
+            step = next(
+                s for s in mutated["jobs"]["coverage"]["steps"]
+                if s.get("name") == COVERAGE_FLOOR_STEP["name"]
+            )
+            step["run"] = step["run"].replace(before, after)
+            with self.subTest(before=before), self.assertRaisesRegex(
+                AssertionError, "99% line and region floors"
+            ):
+                assert_workspace_coverage_floor_contract(mutated)
 
     def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -3863,6 +3907,7 @@ def load_tests(loader, tests, pattern):
     # The required central CI policy step also exercises the separately
     # triggered custody workflow, including its producer indirection.
     tests.addTests(loader.loadTestsFromModule(custody_policy_tests))
+    tests.addTests(loader.loadTestsFromModule(coverage_floor_tests))
     tests.addTests(loader.loadTestsFromModule(native_lcov_tests))
     return tests
 

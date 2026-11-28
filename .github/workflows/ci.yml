@@ -482,8 +482,10 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          shared-key: test
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Restore test-shard's main-written cache without saving a duplicate
+          # 1.1 GB cache entry or racing test-shard on main.
+          shared-key: test-nextest
+          save-if: 'false'
       # The workspace tests run in the test-shard matrix. Doctests are not
       # supported by nextest, so libtest still runs them here.
       # A scoped pull request whose affected members have no library target
@@ -549,7 +551,6 @@ jobs:
             ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
             printf 'CI SDK device: %s root=%s sdk=%s\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
             test "${ci_sdk_device}" = "${ci_root_device}"
-            sudo du -sx -B1 -- "${ci_sdk_path}"
             sudo rm -rf --one-file-system -- "${ci_sdk_path}"
             printf 'CI SDK removed: %s\n' "${ci_sdk_path}"
           done
@@ -1116,14 +1117,11 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - name: Enforce workspace coverage floor
-        run: |
-          jq -er '
-            .data[0].totals
-            | "Workspace coverage: lines \(.lines.covered)/\(.lines.count) (\(.lines.percent)%); regions \(.regions.covered)/\(.regions.count) (\(.regions.percent)%)"
-          ' "${{ runner.temp }}/coverage.json"
-          cargo llvm-cov report --json --summary-only --show-missing-lines \
-            --fail-under-lines 99 \
-            --fail-under-regions 99
+        run: >
+          python3 scripts/check_workspace_coverage_floor.py
+          --fail-under-lines 99
+          --fail-under-regions 99
+          "${{ runner.temp }}/coverage.json"
       - name: Preserve failed coverage diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -2448,8 +2446,10 @@ jobs:
           tool: cargo-modules
       - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
-          shared-key: modules
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Restore clippy's main-written cache without adding a separate
+          # main-only report entry to the 10 GB repository cache budget.
+          shared-key: clippy
+          save-if: 'false'
       - name: Module structure reports
         if: ${{ !cancelled() }}
         run: |

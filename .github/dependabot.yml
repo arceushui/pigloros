@@ -6,10 +6,18 @@ updates:
       - /fuzz
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
-      cargo-dependency:
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      cargo-major:
         group-by: dependency-name
+        update-types:
+          - major
   - package-ecosystem: github-actions
     directory: /
     schedule:
