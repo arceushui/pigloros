@@ -554,6 +554,8 @@ for value in 0 1 2; do
 done
 restore_fb_tunnels
 
+printf 'complete\n' >status
+
 # DIAGNOSTIC (diag branch only): what systemd 260 does with a unit that fails to start when
 # `SuccessExitStatus=` lists the statuses of the unit, for the E6 review: the start job result, the
 # state and the status, for a missing executable (203/EXEC), a namespace failure (226/NAMESPACE) and
@@ -582,5 +584,3 @@ for list in 1-199 1-255; do
   exec_probe "exit203-${list}" "${list}" -- "${shell}" -c 'exit 203'
   exec_probe "exit0-${list}" "${list}" -- "${shell}" -c 'exit 0'
 done
-
-printf 'complete\n' >status
