@@ -8,10 +8,10 @@
 use pos_core::community_lifecycle::{
     community_recipient_identity_digest_v1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
     CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
-    CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyIntentV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMaterializationInputV1,
-    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityObjectBindingV1,
-    CommunityPassKeyV1, CommunityProducerBindingV1, CommunityQuarantineControlInputV1,
+    CommunityCurrentViewV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
+    CommunityMaterializationInputV1, CommunityMaterializationReferenceV1,
+    CommunityMaterializationV1, CommunityObjectBindingV1, CommunityPassKeyV1,
+    CommunityProducerBindingV1, CommunityQuarantineControlInputV1,
     CommunityQuarantineControlKindV1, CommunityQuarantineControlV1, CommunityQuarantineDeltaRowV1,
     CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1, CommunityQuarantineOutcomeInputV1,
     CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
@@ -21,6 +21,7 @@ use pos_core::community_lifecycle::{
 use pos_core::{ArtifactChildEdgeV1, AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
 
+use super::super::super::current_view_head::CommunityViewRowsV1;
 use super::super::super::extractor::{
     prepare_community_pass_control_batch_v1, CommunityArtifactBatchV1,
     CommunityArtifactRecordInputV1, CommunityPassControlBatchInputV1,
@@ -28,7 +29,6 @@ use super::super::super::extractor::{
 use super::super::super::lifecycle_authority::CommunityLifecycleAuthorityV1;
 use super::super::super::memory_domain::MemoryCommunityDomainV1;
 use super::super::super::pass_record::{CommunityPassMemberDigestsV1, CommunityPassRecordV1};
-use super::super::super::planner::key_rows;
 use super::super::super::protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityRecordEvidenceV1,
 };
@@ -253,21 +253,18 @@ impl MemoryCommunityDomainV1 {
                 .map(|trust_rows| (head, trust_rows))
         })
         .and_then(|(head, trust_rows)| {
-            CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
-                CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                    store_incarnation: self.store_incarnation,
-                    timeline: pass_key.timeline(),
-                    generation: pass_key.generation(),
-                    inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
-                    frontier: head.frontier,
-                    selected_head: head.selected_head,
-                    scope_rows: vec![],
-                    authority_rows: head.authority_rows,
+            self.current_view(
+                head,
+                CommunityViewRowsV1 {
+                    coordinates: (
+                        pass_key.timeline(),
+                        pass_key.generation(),
+                        CommunityStoreDomainV1::inventory_generation(self),
+                    ),
                     trust_rows,
-                    key_rows: key_rows(keys),
-                    clock_latch,
-                })
-            })
+                    keys,
+                },
+            )
         })
     }
 }

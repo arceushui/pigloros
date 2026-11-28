@@ -13,15 +13,16 @@
 //!   present, and is not repeated when another row has its key.
 
 use pos_core::community_lifecycle::{
-    CommunityAuthorityViewRowV1, CommunityInitializationRequestV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMaterializationReferenceV1,
-    CommunityMaterializationV1, CommunityPassFrontierV1,
+    CommunityAuthorityViewRowV1, CommunityCurrentViewInputV1, CommunityCurrentViewV1,
+    CommunityInitializationRequestV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
+    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityPassFrontierV1,
+    CommunityTrustViewRowV1,
 };
 use pos_core::{AuthorizationRequestV1, Hash, TimelineId};
 use zeroize::Zeroizing;
 
 use super::memory_domain::MemoryCommunityDomainV1;
-use super::native_graph::CommunityInitializationGraphV1;
+use super::planner::key_rows;
 use super::store_domain::CommunityStoreDomainV1;
 
 /// The record magic of a `StateRevision` COW1.
@@ -48,9 +49,9 @@ pub(super) struct CommunitySelectedViewV1 {
 impl CommunitySelectedViewV1 {
     /// The initialization head's view: `head_digest`, the `Initial` frontier
     /// and the CMI1 reference of the CSR1 of the first member the CGI1
-    /// `cgi1` lists (`ordered_CMB1_digests[0]`), found in `graph` by its
-    /// CMB1 digest; `materializations` hold the graph's CMI1s in record
-    /// order.
+    /// `cgi1` lists (`ordered_CMB1_digests[0]`). `slot_of` finds that
+    /// member's CSR1 record index by its CMB1 digest, and `materializations`
+    /// hold the graph's CMI1s in record order.
     ///
     /// # Errors
     /// Returns the CGI1 and CMI1 codec refusals, and `EvidenceUnavailable`
@@ -59,7 +60,7 @@ impl CommunitySelectedViewV1 {
     pub(super) fn initial(
         head_digest: Hash,
         cgi1: &[u8],
-        graph: &CommunityInitializationGraphV1,
+        slot_of: impl FnOnce(Hash) -> Option<usize>,
         materializations: &[Zeroizing<Vec<u8>>],
     ) -> Result<Self, Error> {
         CommunityInitializationRequestV1::from_canonical_cbor(cgi1)
@@ -69,7 +70,7 @@ impl CommunitySelectedViewV1 {
                     .member_binding_digests
                     .iter()
                     .next()
-                    .and_then(|first| graph.state_revision_index(first))
+                    .and_then(slot_of)
                     .ok_or(Error::EvidenceUnavailable)
             })
             .and_then(|index| Self::at(head_digest, index, materializations))
@@ -103,6 +104,14 @@ impl CommunitySelectedViewV1 {
     }
 }
 
+/// The rows and coordinates of a CAV1 besides its head: its Timeline,
+/// generation and inventory generation, its trust rows and its keys.
+pub(super) struct CommunityViewRowsV1<'k> {
+    pub(super) coordinates: (TimelineId, [u8; 16], u64),
+    pub(super) trust_rows: Vec<CommunityTrustViewRowV1>,
+    pub(super) keys: &'k [&'k CommunityKeyIntentV1],
+}
+
 /// The frontier, head ref and authority rows of one CAV1.
 pub(super) struct CommunityHeadViewV1 {
     pub(super) frontier: CommunityPassFrontierV1,
@@ -121,6 +130,35 @@ impl MemoryCommunityDomainV1 {
             .zip(self.pass_states.get(&timeline))
             .filter(|(selected, state)| selected.head_digest == state.head)
             .map(|(selected, _)| selected)
+    }
+
+    /// The CAV1 of `head` and `rows`, with no scope rows and the clock latch
+    /// read now.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for a missing clock latch and the CAV1
+    /// codec refusals.
+    pub(super) fn current_view(
+        &self,
+        head: CommunityHeadViewV1,
+        rows: CommunityViewRowsV1<'_>,
+    ) -> Result<CommunityCurrentViewV1, Error> {
+        let (timeline, generation, inventory_generation) = rows.coordinates;
+        CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
+            CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                store_incarnation: self.store_incarnation,
+                timeline,
+                generation,
+                inventory_generation,
+                frontier: head.frontier,
+                selected_head: head.selected_head,
+                scope_rows: vec![],
+                authority_rows: head.authority_rows,
+                trust_rows: rows.trust_rows,
+                key_rows: key_rows(rows.keys),
+                clock_latch,
+            })
+        })
     }
 
     /// The head view of T's CAV1: T's selected frontier and head ref, and

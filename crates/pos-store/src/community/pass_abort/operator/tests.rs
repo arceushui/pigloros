@@ -594,11 +594,19 @@ fn the_head_ref_is_the_cgi1_first_members_state_revision() -> TestResult {
     let case = Case::new()?;
     let refs = state_revisions(case.domain())?;
     let opened = opened_records(case.domain())?;
-    let request = opened
+    let cgi1 = opened
         .iter()
-        .find_map(|bytes| CommunityInitializationRequestV1::from_canonical_cbor(bytes).ok())
-        .ok_or("no CGI1")?;
+        .find(|bytes| CommunityInitializationRequestV1::from_canonical_cbor(bytes).is_ok())
+        .ok_or("no CGI1")?
+        .to_vec();
+    let request = CommunityInitializationRequestV1::from_canonical_cbor(&cgi1)?;
     assert_eq!(request.as_input().member_binding_digests.len(), 2);
+    let listed_first = request
+        .as_input()
+        .member_binding_digests
+        .iter()
+        .next()
+        .ok_or("empty CGI1")?;
     let cmis: Vec<Zeroizing<Vec<u8>>> = opened
         .into_iter()
         .filter(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes).is_ok())
@@ -614,6 +622,18 @@ fn the_head_ref_is_the_cgi1_first_members_state_revision() -> TestResult {
         .get(&target())
         .ok_or("no selected view")?;
     assert!(selected.head_ref == first.head_ref && selected.head_ref != second.head_ref);
+    let looked = |member| (member == listed_first).then_some(7);
+    let view = CommunitySelectedViewV1::initial(head, &cgi1, looked, &cmis)?;
+    assert!(view.head_ref == refs[1]);
+    let other = |member| (member != listed_first).then_some(7);
+    assert_eq!(
+        CommunitySelectedViewV1::initial(head, &cgi1, other, &cmis).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        CommunitySelectedViewV1::initial(head, &cgi1, |_| None, &cmis).err(),
+        Some(Error::EvidenceUnavailable)
+    );
     for index in [0, 1, 3, 4, 99] {
         assert_eq!(
             CommunitySelectedViewV1::at(head, index, &cmis).err(),

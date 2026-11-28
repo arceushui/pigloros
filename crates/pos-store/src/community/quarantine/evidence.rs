@@ -18,30 +18,30 @@ use pos_core::community_lifecycle::{
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceInputV1,
     CommunityAuthorityEvidenceV1, CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1,
     CommunityClockBoundV1, CommunityCopyHolderV1, CommunityCopyInventoryInputV1,
-    CommunityCopyInventoryV1, CommunityCopyStateV1, CommunityCurrentViewInputV1,
-    CommunityCurrentViewV1, CommunityDecisionRowV1, CommunityDueMemberBudgetV1,
-    CommunityKeyIntentInputV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationInputV1, CommunityMaterializationReferenceV1,
-    CommunityMaterializationV1, CommunityMemberSlotsV1, CommunityMetadataSchemaV1,
-    CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityObjectBindingV1,
-    CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1, CommunityProducerBindingV1,
-    CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1, CommunityQuarantineOutcomeInputV1,
-    CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1,
-    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
-    CommunityQuarantineRevisionV1, CommunityRecordKindsV1, CommunityScopeBindingInputV1,
-    CommunityScopeBindingV1, CommunityScopeCoverageRowsV1, CommunityScopeMembersV1,
-    CommunitySharedCountsV1, CommunityTrustViewRowV1, CommunityTypedInputRefsV1,
+    CommunityCopyInventoryV1, CommunityCopyStateV1, CommunityCurrentViewV1, CommunityDecisionRowV1,
+    CommunityDueMemberBudgetV1, CommunityKeyIntentInputV1, CommunityKeyIntentV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationInputV1,
+    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityMemberSlotsV1,
+    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
+    CommunityObjectBindingV1, CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1,
+    CommunityProducerBindingV1, CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
+    CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
+    CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonsV1,
+    CommunityQuarantineRevisionInputV1, CommunityQuarantineRevisionV1, CommunityRecordKindsV1,
+    CommunityScopeBindingInputV1, CommunityScopeBindingV1, CommunityScopeCoverageRowsV1,
+    CommunityScopeMembersV1, CommunitySharedCountsV1, CommunityTrustViewRowV1,
+    CommunityTypedInputRefsV1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash};
 use zeroize::Zeroizing;
 
+use super::super::current_view_head::CommunityViewRowsV1;
 use super::super::extractor::{
     prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1, CommunityArtifactBatchV1,
     CommunityArtifactRecordInputV1, CommunityControlBatchInputV1,
 };
 use super::super::lifecycle_authority::CommunityLifecycleAuthorityV1;
 use super::super::memory_domain::MemoryCommunityDomainV1;
-use super::super::planner::key_rows;
 use super::super::private_hash::scope_set_digest;
 use super::super::protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
@@ -385,33 +385,29 @@ impl MemoryCommunityDomainV1 {
         inventory_generation: u64,
     ) -> Result<CommunityCurrentViewV1, Error> {
         let authority = &operation.authority;
-        CommunityStoreDomainV1::clock_latch(self)
-            .and_then(|clock_latch| {
-                self.head_view(
-                    operation.timeline(),
-                    vec![],
-                    (authority.leaf_grant_id, &authority.request),
-                )
-                .map(|head| (clock_latch, head))
-            })
-            .and_then(|(clock_latch, head)| {
-                self.trust_row(lifecycle.trust_scope(), operation)
-                    .and_then(|trust_row| {
-                        CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                            store_incarnation: self.store_incarnation,
-                            timeline: operation.timeline(),
-                            generation: operation.member.generation,
-                            inventory_generation,
-                            frontier: head.frontier,
-                            selected_head: head.selected_head,
-                            scope_rows: vec![],
-                            authority_rows: head.authority_rows,
-                            trust_rows: vec![trust_row],
-                            key_rows: key_rows(keys),
-                            clock_latch,
-                        })
-                    })
-            })
+        self.head_view(
+            operation.timeline(),
+            vec![],
+            (authority.leaf_grant_id, &authority.request),
+        )
+        .and_then(|head| {
+            self.trust_row(lifecycle.trust_scope(), operation)
+                .map(|trust_row| (head, trust_row))
+        })
+        .and_then(|(head, trust_row)| {
+            self.current_view(
+                head,
+                CommunityViewRowsV1 {
+                    coordinates: (
+                        operation.timeline(),
+                        operation.member.generation,
+                        inventory_generation,
+                    ),
+                    trust_rows: vec![trust_row],
+                    keys,
+                },
+            )
+        })
     }
 
     /// The member's CAV1 trust row (R6.5), read now from this domain's own

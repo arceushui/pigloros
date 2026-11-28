@@ -836,7 +836,7 @@ impl MemoryCommunityDomainV1 {
                 CommunitySelectedViewV1::initial(
                     graph.selected_head_digest(),
                     records.request(),
-                    &graph,
+                    |member| graph.state_revision_index(member),
                     &evidenced.materializations,
                 )
                 .map(|selected_view| (selection, receipt, selected_view))

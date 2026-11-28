@@ -32,16 +32,16 @@ use std::collections::BTreeMap;
 use pos_core::community_lifecycle::{
     community_recipient_identity_digest_v1, CommunityAbortReasonV1, CommunityArtifactOperationV1,
     CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityAuthorityViewRowV1,
-    CommunityClockBoundV1, CommunityCurrentViewInputV1, CommunityCurrentViewV1,
-    CommunityDecisionRowV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
-    CommunityScopeMembersV1, CommunityTrustViewRowV1,
+    CommunityClockBoundV1, CommunityCurrentViewV1, CommunityDecisionRowV1, CommunityKeyIntentV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
+    CommunityMetadataScopeV1, CommunityScopeMembersV1, CommunityTrustViewRowV1,
 };
 use pos_core::{
     AuthorityGranteeV1, AuthorityTrustRootSealV1, AuthorizationRequestV1, Hash, TimelineId,
 };
 use zeroize::Zeroizing;
 
+use super::super::current_view_head::CommunityViewRowsV1;
 use super::super::lifecycle_authority::{
     CommunityAdministrativeOperationV1, CommunityAdministrativeRequestV1,
     CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1, CommunityLifecycleAuthorityV1,
@@ -49,7 +49,6 @@ use super::super::lifecycle_authority::{
 use super::super::memory_domain::MemoryCommunityDomainV1;
 use super::super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::super::pass_record::CommunityPassRecordV1;
-use super::super::planner::key_rows;
 use super::super::quarantine::CommunityQuarantineContextV1;
 use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
@@ -515,21 +514,18 @@ impl MemoryCommunityDomainV1 {
                     .map(|trust_rows| (head, trust_rows))
             })
             .and_then(|(head, trust_rows)| {
-                CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
-                    CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                        store_incarnation: self.store_incarnation,
-                        timeline: pass_key.timeline(),
-                        generation: pass_key.generation(),
-                        inventory_generation,
-                        frontier: head.frontier,
-                        selected_head: head.selected_head,
-                        scope_rows: vec![],
-                        authority_rows: head.authority_rows,
+                self.current_view(
+                    head,
+                    CommunityViewRowsV1 {
+                        coordinates: (
+                            pass_key.timeline(),
+                            pass_key.generation(),
+                            inventory_generation,
+                        ),
                         trust_rows,
-                        key_rows: key_rows(&[key]),
-                        clock_latch,
-                    })
-                })
+                        keys: &[key],
+                    },
+                )
             })
     }
 

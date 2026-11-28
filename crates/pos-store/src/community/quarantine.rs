@@ -410,6 +410,23 @@ impl MetadataWriteV1 {
     }
 }
 
+/// The CFO1 horizon: the quarantine and metadata horizons, whichever ends
+/// first.
+fn failure_horizon(context: CommunityQuarantineContextV1<'_>) -> u64 {
+    context
+        .profile
+        .as_input()
+        .retention
+        .quarantine_not_after_micros
+        .min(
+            context
+                .binding
+                .metadata_policy
+                .as_input()
+                .metadata_not_after_micros,
+        )
+}
+
 /// The facts every staging step reads.
 pub(super) struct OperationV1<'c> {
     pub(super) context: CommunityQuarantineContextV1<'c>,
@@ -541,20 +558,13 @@ impl MemoryCommunityDomainV1 {
         if current.map(|ledger| ledger.head) != call.expected_ledger_digest {
             return Err(Error::Conflict);
         }
-        let retention = context.profile.as_input().retention;
         Ok(OperationV1 {
             context,
             call,
             key,
             member,
             authority,
-            failure_horizon: retention.quarantine_not_after_micros.min(
-                context
-                    .binding
-                    .metadata_policy
-                    .as_input()
-                    .metadata_not_after_micros,
-            ),
+            failure_horizon: failure_horizon(context),
         })
     }
 
