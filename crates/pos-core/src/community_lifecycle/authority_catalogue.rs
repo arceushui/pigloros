@@ -27,7 +27,7 @@ pub const MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1: usize = 8_192;
 pub const MAX_COMMUNITY_ACTOR_ROWS_V1: usize = 64;
 
 const MAPPING_PROFILE: &str = "pos.community.authority-mapping";
-const MAPPING_PROFILE_VERSION: u64 = 6;
+const MAPPING_PROFILE_VERSION: u64 = 8;
 
 // Buffer sizes are plain literals, so no arithmetic mutant can survive in
 // them; the assertions tie each one to the bounds it is derived from.
