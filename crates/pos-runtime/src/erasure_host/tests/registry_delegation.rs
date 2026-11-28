@@ -126,4 +126,16 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
             tick,
         )
     }
+
+    fn evaluate_retained_release(
+        &self,
+        scope: &str,
+        evidence: &VerifiedPluginTrustEvidenceV1,
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> Registry<CurrentReleaseEvaluationV1> {
+        self.inner
+            .evaluate_retained_release(scope, evidence, projection, trusted_utc, tick)
+    }
 }

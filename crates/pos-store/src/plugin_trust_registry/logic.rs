@@ -488,6 +488,33 @@ pub(crate) fn plan_evaluate(
     })
 }
 
+/// Decide `evaluate_retained_release`: `plan_evaluate` under the anchor and the TPS1 bytes the
+/// retained scope holds. A scope that is not provisioned is `MissingState`, reported before any
+/// evidence check: the scope name is the caller's choice, and nothing is read for a scope that is
+/// not installed.
+pub(crate) fn plan_evaluate_retained(
+    tx: &impl PluginTrustTransactionV1,
+    scope: &str,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+    (utc, tick): (TrustedUtcSecondV1, u64),
+    projection: &ValidatedPluginManifestProjectionV1,
+) -> RegistryResult<CurrentReleaseEvaluationV1> {
+    let retained = tx
+        .scope(scope)?
+        .ok_or(PluginTrustPolicyRegistryErrorV1::MissingState)?;
+    plan_evaluate(
+        tx,
+        &PolicyInputV1 {
+            anchor: &retained.anchor,
+            tps1_bytes: &retained.policy.tps1_bytes,
+            evidence,
+            utc,
+            tick,
+        },
+        projection,
+    )
+}
+
 /// The outcome of `plan_admit`.
 #[derive(Clone, Debug)]
 pub(crate) enum AdmitPlanV1 {

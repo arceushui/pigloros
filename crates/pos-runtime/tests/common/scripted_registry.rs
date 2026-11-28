@@ -178,4 +178,23 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
             tick,
         )
     }
+
+    fn evaluate_retained_release(
+        &self,
+        scope: &str,
+        evidence: &VerifiedPluginTrustEvidenceV1,
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> Registry<CurrentReleaseEvaluationV1> {
+        self.count();
+        if let Some(error) = self.forced {
+            return Err(error);
+        }
+        if let Some(accepted) = &self.accepted {
+            return Ok(accepted.clone());
+        }
+        self.inner
+            .evaluate_retained_release(scope, evidence, projection, trusted_utc, tick)
+    }
 }
