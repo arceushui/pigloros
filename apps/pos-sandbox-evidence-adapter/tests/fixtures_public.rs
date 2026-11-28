@@ -793,10 +793,15 @@ fn kill_and_wait(pid: u32) -> TestResult {
 fn cmdline_after_exec(pid: u32) -> TestResult<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        // A process that vanishes mid-poll fails the test, which is right.
         let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
-        if !cmdline.is_empty() || Instant::now() >= deadline {
+        if !cmdline.is_empty() {
             return Ok(cmdline);
         }
+        assert!(
+            Instant::now() < deadline,
+            "cmdline still empty after 10 s: {pid}"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
