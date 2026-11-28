@@ -594,6 +594,55 @@ fn a_reset_that_cannot_re_arm_its_rows_gives_14() -> TestResult {
     Ok(())
 }
 
+/// R13.1(3): the reserve a reset re-arms is two targets per spent share. With
+/// both reasons' shares spent it is four targets: exactly at the line the
+/// reset applies, one target more pending gives 14 and changes nothing.
+#[test]
+fn a_reset_re_arms_two_targets_per_spent_share() -> TestResult {
+    for (extra, applied) in [(0, true), (1, false)] {
+        let mut case = contextual()?;
+        let key = member_key(&case)?;
+        let domain = &mut case.domain.world.domain;
+        for state in domain
+            .quarantine_index
+            .get_mut(&key)
+            .ok_or("no ledger")?
+            .states
+            .values_mut()
+        {
+            state.share_spent = true;
+        }
+        let base = domain
+            .erasure_budget(target())?
+            .actors
+            .iter()
+            .map(|actor| actor.targets)
+            .max()
+            .ok_or("an actor")?;
+        let free = COMMUNITY_ERASURE_TARGET_LINE_V1 - base - (24 - 6) - 4;
+        domain
+            .store
+            .bind_erasure_rows_for_test(target(), community_rows(1_000, free / 2)?);
+        domain.pending_reservations.insert(
+            (target(), [9; 16]),
+            CommunityPendingReservationV1 {
+                targets: free % 2 + extra,
+                rows: 0,
+            },
+        );
+        let before = untouched(&case)?;
+        let result = reset(&mut case, &Claim::of_seeded())?;
+        if applied {
+            result?;
+            assert_eq!(active_pairs(&case), 1);
+        } else {
+            assert_eq!(result.err(), Some(Error::CapacityExhausted));
+            assert_eq!(untouched(&case)?, before);
+        }
+    }
+    Ok(())
+}
+
 /// R13.1(3): a reset that re-arms no share holds nothing more, so even an
 /// actor already past the line is never refused for the budget.
 #[test]
