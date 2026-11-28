@@ -279,6 +279,7 @@ fn run_ceremony(
     };
     let result_error = result.as_ref().err().copied();
     trace.update("caller-complete", surface, &driver, loopback);
+    trace.report_if_quarantined(result_error);
     retirement::retire(
         surface,
         loopback,

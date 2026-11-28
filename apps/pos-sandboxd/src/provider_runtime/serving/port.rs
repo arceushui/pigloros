@@ -42,7 +42,7 @@ use super::{
     close_answered, Classified, Deadlined, Place, Refusal, RequestIdentity, Responder,
     RESPONSE_DEADLINE,
 };
-use crate::provider_runtime::port::{serves, ExecutePort};
+use crate::provider_runtime::port::{mode_plan, ExecutePort};
 use crate::{sign_verified, AttemptLifecycleError, ExchangeClaim, RetainedResponse};
 
 /// The ELM1 limit whose window bounds an output transfer (R9 §4.6.5: IDs 7
@@ -97,7 +97,6 @@ const fn staging_code(error: &StagingError) -> Option<SandboxProviderErrorCode> 
         StagingError::InvalidSource | StagingError::Source(InstallationError::ArtifactInvalid) => {
             Some(Code::AuthorityMismatch)
         }
-        StagingError::CapabilityMissing => Some(Code::ProviderCapabilityMissing),
         StagingError::ImageIdentity => Some(Code::ImageIdentityMismatch),
         StagingError::InputTooLarge => Some(Code::FieldOutOfBounds),
         StagingError::BelowControlFloor => Some(Code::TrustRevoked),
@@ -326,22 +325,17 @@ impl Responder<'_> {
 
     /// Port steps 7 to W, then the input and the attempt.
     fn admit(&self, port: &ExecutePort, source: ExecuteSource, identity: RequestIdentity) {
-        let prepared = match PreparedProviderExecution::admit(
-            source,
-            &port.ledger,
-            self.admitted,
-            serves,
-            |request| {
+        let prepared =
+            match PreparedProviderExecution::admit(source, &port.ledger, self.admitted, |request| {
                 port.lifecycle.claim(
                     request.attempt_id,
                     request.request.request_id,
                     request.request_digest,
                 )
-            },
-        ) {
-            Ok(prepared) => prepared,
-            Err(refusal) => return self.refused(port, identity, *refusal),
-        };
+            }) {
+                Ok(prepared) => prepared,
+                Err(refusal) => return self.refused(port, identity, *refusal),
+            };
         let staged = match port
             .staging
             .create_input(prepared.request().attempt_id, prepared)
@@ -369,10 +363,10 @@ impl Responder<'_> {
         let (received, stream) = granted.receive();
         let response = match received {
             Ok(verified) => {
-                let mode = verified.entry().grant().execution_mode();
+                let plan = mode_plan(verified.entry().grant());
                 awaited
                     .admit(verified)
-                    .and_then(|owned| port.run(owned, mode, self.signer, key))
+                    .and_then(|owned| port.run(owned, plan, self.signer, key))
             }
             Err(failed) => awaited
                 .record_failed_input(&failed)

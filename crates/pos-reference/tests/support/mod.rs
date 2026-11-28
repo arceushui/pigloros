@@ -880,6 +880,23 @@ pub fn air_gapped_corpus_with_watchdog_ms(watchdog_ms: u64) -> TestResult<Corpus
     })
 }
 
+/// Build a complete Air-Gapped corpus whose every fixture has `budget` as its
+/// deterministic budget, and one selected operational watchdog.
+///
+/// With the default watchdog and budget (`1_000` and `[100; 8]`) it is
+/// byte-identical to [`air_gapped_corpus`].
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn air_gapped_corpus_with_limits(watchdog_ms: u64, budget: [u64; 8]) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mode: 1,
+        watchdog_ms,
+        fixture_budgets: &[budget; 7],
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a complete corpus with one selected operational watchdog.
 ///
 /// # Errors

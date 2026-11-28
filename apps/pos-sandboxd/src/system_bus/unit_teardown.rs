@@ -134,13 +134,11 @@ impl SystemdTransientUnitTransport {
     /// open. The unit is then stopped, emptied and removed as by
     /// [`Self::stop_attempt_unit`] with the same deadlines.
     ///
-    /// A unit whose `ControlGroup` is empty has no cgroup to bind. By the
-    /// owner's reading of ADR-087 §3 (owner decision A, 2026-11-10), such a
-    /// unit is proven empty when its `ActiveState` is `inactive` or `failed`:
-    /// systemd removes a unit's cgroup only once it is empty. A failed unit's
-    /// state is then cleared with `ResetFailedUnit`, and a fresh `GetUnit`
-    /// must observe the unit absent. The unit must still be the listed object,
-    /// and its `ControlGroup` is read again after its state.
+    /// An empty `ControlGroup` cannot be bound for cgroup cleanup. This path
+    /// accepts only `inactive` or `failed` units, clears a failed state with
+    /// `ResetFailedUnit`, and requires a fresh `GetUnit` to observe the unit
+    /// absent. It verifies the unit is still the listed object and rereads its
+    /// `ControlGroup` after checking its state.
     ///
     /// # Errors
     /// A unit, cgroup or binding that cannot be verified, including a unit
@@ -211,8 +209,8 @@ impl SystemdTransientUnitTransport {
         cgroup.map_err(SystemdTransientUnitTransportError::CgroupReadback)
     }
 
-    /// Remove a listed unit without a cgroup when it is inactive or failed
-    /// (owner decision A): reset a failed unit, then observe it absent.
+    /// Remove a listed unit without a cgroup when it is inactive or failed:
+    /// reset a failed unit, then observe it absent.
     async fn remove_cgroupless(
         &self,
         unit_name: &TransientServiceUnitName,

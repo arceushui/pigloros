@@ -1,4 +1,4 @@
-//! ADR-129 §6 CAT1 retained presentation annotation aggregate.
+//! CAT1 retained presentation annotation aggregate.
 //!
 //! CAT1 is a `PresentationOnly` guest-claim artifact: not a host CTR1, an
 //! authorization decision, an Event or a simulation input. Valid bytes prove
@@ -178,7 +178,7 @@ impl<'a> CommunityAnnotationManifestV1<'a> {
 
 /// Check one item against the running guest-index floor.
 ///
-/// Guest indices may repeat (nondecreasing, owner decision 2026-11-21): one
+/// Guest indices may repeat in nondecreasing order: one
 /// guest may contribute several items, which keeps the 1,024-item limit
 /// reachable with indices 0..=63. Bound violations take precedence over
 /// ordering violations.

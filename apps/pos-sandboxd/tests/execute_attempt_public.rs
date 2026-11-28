@@ -167,18 +167,19 @@ fn refusal(
             return Ok(Some(format!("uncharged, closed: {}", handed.closed())))
         }
     };
-    Ok(PreparedProviderExecution::admit(
-        source,
-        ledger,
-        installation,
-        |_| true,
-        |_| Ok::<(), Infallible>(()),
+    Ok(
+        PreparedProviderExecution::admit(
+            source,
+            ledger,
+            installation,
+            |_| Ok::<(), Infallible>(()),
+        )
+        .err()
+        .map(|refused| match refused.into_parts().1 {
+            RefusalCause::Staging(error) => format!("{error:?}"),
+            RefusalCause::Claim(never) => match never {},
+        }),
     )
-    .err()
-    .map(|refused| match refused.into_parts().1 {
-        RefusalCause::Staging(error) => format!("{error:?}"),
-        RefusalCause::Claim(never) => match never {},
-    }))
 }
 
 fn staging_directory() -> Result<(tempfile::TempDir, pos_sandboxd::StagingDirectory), BoxError> {

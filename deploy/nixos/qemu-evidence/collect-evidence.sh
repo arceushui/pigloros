@@ -226,7 +226,7 @@ start_runtime() { # BINARY
 # installation until its control FIFO closes. Part (c) and the execute
 # evidence run between start and stop.
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
-  local dir="daemon/$1" fifo="${STAGE_FIFO}" control line binary pid status=0 start=0 stop=0
+  local dir="daemon/$1" fifo="${STAGE_FIFO}" exports control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
   # The fallback-tunnel sysctl the runtime starts under: it refuses step 7 below 1.
   cat "${FB_TUNNELS_SYSCTL}" >"${dir}/fb-tunnels-sysctl"
@@ -238,8 +238,10 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   provision_runtime
   # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
   mkfifo -m 0600 "${fifo}"
+  # The stager writes the selector's side of the staged execution (SPX1, EVR1, EAI1) here.
+  exports="$(mktemp -d)"
   pos-sandboxd-conformance stage "$2" "$3" "$4" "${images}/adapter" "${spi1}" "${RUNTIME_KEY_FILE}" \
-    "${launcher}" honest <"${fifo}" >"${dir}/stage-report" 2>"${dir}/stage-stderr" &
+    "${launcher}" "${exports}" honest <"${fifo}" >"${dir}/stage-report" 2>"${dir}/stage-stderr" &
   pid=$!
   exec {control}>"${fifo}"
   for _ in $(seq 600); do
@@ -280,6 +282,7 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   exec {control}>&-
   wait "${pid}" || status=$?
   rm -- "${fifo}"
+  rm -rf -- "${exports}"
   printf '%s\n' "${status}" >"${dir}/stage-status"
   rm -rf "${RUNTIME_ROOT}"
 }

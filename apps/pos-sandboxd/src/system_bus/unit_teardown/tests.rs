@@ -1036,7 +1036,6 @@ pub(super) mod cases {
 
     #[tokio::test(start_paused = true)]
     async fn an_inactive_or_failed_unit_without_a_cgroup_is_removed() -> TestResult {
-        // Owner decision A: no cgroup and inactive or failed proves emptiness.
         for (state, lookup) in [("failed", Lookup::Unchanged), ("inactive", Lookup::Collect)] {
             let fixture = cgroupless(7, Some(state), &[""], lookup).await?;
             stop_listed(&fixture, UNIT_PATH).await??;

@@ -1,8 +1,7 @@
-//! `piglor-gateway provision-local-erasure`: the offline first step of the
-//! Local erasure bundle (ADR-136 §4 *Bundle*; #1429, owner decisions Q1,
-//! Q6, Q14 and Q15 of 2026-11-17 on #1412).
+//! `piglor-gateway provision-local-erasure`: offline provisioning of a Local
+//! erasure bundle.
 //!
-//! The command runs under its systemd unit as an ADR-134 §8 offline writer:
+//! The command runs under its systemd unit as an offline writer:
 //! it holds the store's shared mode lock and attaches to the store's
 //! binding, never binding it. The unit's credential directory holds exactly
 //! two credentials: [`LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME`], the role-2
@@ -65,12 +64,12 @@
 //! key for a registered identity, a lower epoch and a reused key. A new
 //! epoch becomes the registry's only active signing key, so the old signer
 //! can sign nothing more, even for a request pinned to its bundle. A new
-//! key is therefore registered only when no erasure request pins a bundle
-//! (the ADR-136 §5 pin rule composition applies); otherwise the command
+//! key is therefore registered only when no erasure request pins a bundle;
+//! otherwise the command
 //! refuses before any write. A compromise passes `--rotation compromise`
 //! and is registered only once the installed TPS1 revokes the old signer
 //! key and the root or signer of every pinned bundle. A re-run with the
-//! registered key is unchanged (owner decision of 2026-11-18 on #1431).
+//! registered key produces the same bundle.
 //! The pin check and the registration that follows are two steps over the
 //! store, so the command must run with the Gateway stopped: a serving
 //! Gateway could pin a bundle between them. The unit's
@@ -183,7 +182,7 @@ pub enum LocalErasureProvisionErrorV1 {
     /// `--signer-owner` and its registration is refused: a routine rotation
     /// while an erasure request pins a bundle, a `--rotation compromise`
     /// the installed TPS1 does not reflect, or a key registry whose current
-    /// signer cannot be read (owner decision of 2026-11-18 on #1431).
+    /// signer cannot be read.
     #[error("refused to register a new local erasure signer key: {0}")]
     Rotation(LocalErasureRotationRefusalV1),
 }
