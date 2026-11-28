@@ -1085,7 +1085,7 @@ impl Bootstrapped {
                 id: target(),
                 mode: TimelineMode::Live,
                 name: None,
-                owner: None,
+                owner: Some(actor()),
                 fork_point: None,
             })?;
         }
