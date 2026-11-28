@@ -884,8 +884,6 @@ fn a_reversed_snapshot_is_code_2() -> TestResult {
     Ok(())
 }
 
-/// A missing service result or an unproved cleanup is code 2; a cancelled
-/// run with an unproved cleanup reports Cancelled and is quarantined.
 /// A released attempt whose cgroup was removed before its counters could be read records a null
 /// terminal snapshot, which is missing evidence, code 2 (R17-E6): the timeout stop of systemd
 /// (`Result=timeout`) and a payload exit that fails the unit both end this way.
@@ -916,6 +914,8 @@ fn a_released_attempt_without_its_terminal_snapshot_is_missing_evidence() -> Tes
     Ok(())
 }
 
+/// A missing service result or an unproved cleanup is code 2; a cancelled
+/// run with an unproved cleanup reports Cancelled and is quarantined.
 #[test]
 fn missing_evidence_and_failed_cleanup_are_code_2() -> TestResult {
     let missing = Released {
