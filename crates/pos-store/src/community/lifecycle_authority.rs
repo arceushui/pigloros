@@ -25,9 +25,12 @@
 //!
 //! Community `run_pass` authority is ADR-129 revision 8's R8.1: one FAE1 under
 //! the execution nonce, then one `execute` decision per roster member under
-//! the call's own Timeline and reservation operation. `verify_recording` and
-//! `reconcile_original` authority stay unavailable (R8.1(10), R8.1(5)); nothing
-//! here can build them.
+//! the call's own Timeline and reservation operation. ADR-129 revision 9's
+//! R9.5 adds one Event-history `read` decision per owning Timeline of a
+//! materialization ([`CommunityLifecycleAuthorityV1::authorize_event_history`]),
+//! under the same execution purpose, and the CAP1 mapping profile 9.
+//! `verify_recording` and `reconcile_original` authority stay unavailable
+//! (R8.1(10), R8.1(5)); nothing here can build them.
 
 use pos_core::community_lifecycle::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,

@@ -1702,47 +1702,63 @@ fn event_scope(owners: &[TimelineId], purpose: &str) -> Scope {
     }
 }
 
-/// R9.5: an Event-history request names `community-events:<U32>` for one
-/// owning Timeline, the execution purpose and the installed recipient, with
-/// the call's `r` constraint; it belongs to `run_pass` calls alone, and a
-/// grant of another owner, purpose or recipient never matches.
-#[test]
-fn event_history_requests_name_the_owning_timeline_and_the_execution_purpose() -> TestResult {
-    let events = grant(1, 1, 0, &event_scope(&[target()], "community-execution"))?;
-    let other = grant(
-        2,
-        2,
-        0,
-        &event_scope(&[other_timeline()], "community-execution"),
-    )?;
-    let in_operation = grant(
-        3,
-        3,
-        0,
-        &event_scope(&[target()], "lifecycle-administration"),
-    )?;
-    let caller_audience = grant(
-        4,
-        4,
-        0,
-        &Scope {
-            audience: AUDIENCE.to_owned(),
-            ..event_scope(&[target()], "community-execution")
-        },
-    )?;
+/// The grants of the Event-history tests, in the order of [`event_world`].
+struct EventGrants {
+    events: CapabilityGrantV1,
+    other: CapabilityGrantV1,
+    in_operation: CapabilityGrantV1,
+    caller_audience: CapabilityGrantV1,
+}
+
+/// A world with the Event-history grants and an authenticated `run_pass` call.
+fn event_world() -> Fallible<(World, EventGrants, CommunityAuthorityCallV1)> {
+    let grants = EventGrants {
+        events: grant(1, 1, 0, &event_scope(&[target()], "community-execution"))?,
+        other: grant(
+            2,
+            2,
+            0,
+            &event_scope(&[other_timeline()], "community-execution"),
+        )?,
+        in_operation: grant(
+            3,
+            3,
+            0,
+            &event_scope(&[target()], "lifecycle-administration"),
+        )?,
+        caller_audience: grant(
+            4,
+            4,
+            0,
+            &Scope {
+                audience: AUDIENCE.to_owned(),
+                ..event_scope(&[target()], "community-execution")
+            },
+        )?,
+    };
     let mut world = World::new(&[
-        events.clone(),
-        other.clone(),
-        in_operation.clone(),
-        caller_audience.clone(),
+        grants.events.clone(),
+        grants.other.clone(),
+        grants.in_operation.clone(),
+        grants.caller_audience.clone(),
     ])?;
     let credential = world.execution_credential(target(), RESERVATION)?;
     let call = world.execution_call(&credential, target(), RESERVATION)?;
-    let authority = &world.authority;
-    let domain = &world.domain;
+    Ok((world, grants, call))
+}
 
-    let admission =
-        authority.authorize_event_history(&call, target(), domain, events.grant_id())?;
+/// R9.5: an Event-history request names `community-events:<U32>`, the
+/// execution purpose and the installed recipient, with the call's `r`
+/// constraint and no subject.
+#[test]
+fn an_event_history_request_has_the_r9_5_fields() -> TestResult {
+    let (world, grants, call) = event_world()?;
+    let admission = world.authority.authorize_event_history(
+        &call,
+        target(),
+        &world.domain,
+        grants.events.grant_id(),
+    )?;
     let built = admission.request();
     assert_eq!(
         built.resource(),
@@ -1759,29 +1775,68 @@ fn event_history_requests_name_the_owning_timeline_and_the_execution_purpose() -
     );
     assert!(built.subject_id().is_none());
     assert_eq!(built.authenticated().principal(), &caller()?);
-    // A second owning Timeline needs its own grant.
-    assert!(authority
-        .authorize_event_history(&call, other_timeline(), domain, other.grant_id())
-        .is_ok());
+    Ok(())
+}
+
+/// R9.5: each owning Timeline has its own decision on its own resource, and
+/// a grant of one owner never serves another.
+#[test]
+fn each_owning_timeline_needs_its_own_event_history_grant() -> TestResult {
+    let (world, grants, call) = event_world()?;
+    let first = world.authority.authorize_event_history(
+        &call,
+        target(),
+        &world.domain,
+        grants.events.grant_id(),
+    )?;
+    let second = world.authority.authorize_event_history(
+        &call,
+        other_timeline(),
+        &world.domain,
+        grants.other.grant_id(),
+    )?;
+    assert_eq!(
+        second.request().resource(),
+        format!(
+            "community-events:{}",
+            hex(&other_timeline().inner().to_bytes())
+        )
+    );
+    assert_ne!(first.request().resource(), second.request().resource());
     for (owner, leaf) in [
-        (other_timeline(), events.grant_id()),
-        (target(), other.grant_id()),
-        (target(), in_operation.grant_id()),
-        (target(), caller_audience.grant_id()),
+        (other_timeline(), grants.events.grant_id()),
+        (target(), grants.other.grant_id()),
     ] {
         assert_eq!(
-            authority
-                .authorize_event_history(&call, owner, domain, leaf)
+            world
+                .authority
+                .authorize_event_history(&call, owner, &world.domain, leaf)
                 .err(),
             Some(Error::EvidenceUnavailable)
         );
     }
-    // An administrative call has no Event-history request.
+    Ok(())
+}
+
+/// R9.5: a grant of the in-operation purpose or of a caller-chosen audience
+/// never matches, and an administrative call has no Event-history request.
+#[test]
+fn an_event_history_request_refuses_another_purpose_audience_or_call() -> TestResult {
+    let (mut world, grants, call) = event_world()?;
+    for leaf in [&grants.in_operation, &grants.caller_audience] {
+        assert_eq!(
+            world
+                .authority
+                .authorize_event_history(&call, target(), &world.domain, leaf.grant_id())
+                .err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
     let abort = world.call(&pass_abort())?;
     assert_eq!(
         world
             .authority
-            .authorize_event_history(&abort, target(), &world.domain, events.grant_id())
+            .authorize_event_history(&abort, target(), &world.domain, grants.events.grant_id())
             .err(),
         Some(Error::EvidenceUnavailable)
     );
