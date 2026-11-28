@@ -20,8 +20,9 @@
 //!
 //! The outcome is delivered exactly once, adapter staging is wiped, and the
 //! transaction is then rolled back explicitly: the read never commits. A
-//! panicking callback is caught only to finish the transaction, and the
-//! original panic is resumed afterwards.
+//! panic anywhere in the delivery step (`deliver_latest`, including the
+//! callback) is caught only to finish the transaction, and the original panic
+//! is resumed afterwards.
 //!
 //! The lookup names `idx_events_entity_type` with `INDEXED BY`, so a store
 //! without that index refuses with `ReadUnavailableBeforeDelivery` instead of
@@ -169,6 +170,9 @@ const fn outer_result(
             Err(Refusal::ErasureFencedTransactionFinishFailed)
         }
         // No outcome existed before the unproved rollback, so none was delivered.
+        // This also covers `Quarantined` from `guarded` before the operation
+        // ran (witness recheck or native proof failed before BEGIN): no closed
+        // ADR-121 result fits that case better.
         (Err(OwnerStoreBindingErrorV1::Quarantined), ReadEndV1::Unavailable) => {
             Err(Refusal::TransactionFinishFailedBeforeDelivery)
         }
@@ -215,7 +219,7 @@ fn read_in_transaction(
         })
 }
 
-/// Deliver the latest Event's outcome once, catching only the callback's unwind.
+/// Deliver the latest Event's outcome once, catching an unwind of the whole delivery step.
 fn deliver_once(
     keys: &SubjectKeyringV1,
     registry: Option<&KeyRegistryStateV1>,
@@ -268,8 +272,8 @@ impl KeyRegistryHistoricalDecryptionPortV1 for HeldRegistryV1 {
 /// The latest `subject.data.v1` Event of `subject` in the stitched Timeline.
 ///
 /// Segments are visited newest first and the walk keeps the first hit, which
-/// is the latest in Timeline Order. The Event keeps the logical sequence the
-/// stitched read would give it.
+/// is the latest in Timeline Order. The Event keeps its segment-local sequence,
+/// which the consumer does not read.
 fn latest_subject_data(
     conn: &rusqlite::Connection,
     timeline: TimelineId,
@@ -292,7 +296,7 @@ fn segment_latest(
     index: usize,
     subject: EntityId,
 ) -> Result<Option<Event>, CoreError> {
-    let (member, prefix) = chain[index];
+    let member = chain[index].0;
     SqliteStore::logical_segment_length_on(conn, chain, index, member)
         .and_then(|length| {
             conn.query_row(
@@ -312,15 +316,8 @@ fn segment_latest(
             local
                 .map(|local| {
                     let local = Seq::from_u64(u64::try_from(local).unwrap_or(0));
-                    SqliteStore::read_own_events_on(conn, member, local, Some(local)).map(
-                        |events| {
-                            events.into_iter().next().map(|mut event| {
-                                event.seq =
-                                    Seq::from_u64(prefix.as_u64().saturating_add(local.as_u64()));
-                                event
-                            })
-                        },
-                    )
+                    SqliteStore::read_own_events_on(conn, member, local, Some(local))
+                        .map(|events| events.into_iter().next())
                 })
                 .transpose()
         })

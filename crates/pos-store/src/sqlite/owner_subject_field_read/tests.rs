@@ -111,13 +111,27 @@ fn private_directory() -> TestResult<tempfile::TempDir> {
         .tempdir()?)
 }
 
-fn open_bound_store(directory: &tempfile::TempDir) -> TestResult<SqliteStore> {
+fn open_store(directory: &tempfile::TempDir) -> TestResult<SqliteStore> {
     let path = directory.path().join(MAIN);
-    let mut store = SqliteStore::open(path.to_str().ok_or("path")?)?;
+    Ok(SqliteStore::open(path.to_str().ok_or("path")?)?)
+}
+
+fn bind_mode(store: &mut SqliteStore) -> TestResult {
     store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(
         GatewayModeProfileRefV1::try_new("owner-subject-field-read-test", [7; 32])?,
     ))?;
+    Ok(())
+}
+
+fn bind_gate(store: &mut SqliteStore) -> TestResult {
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    Ok(())
+}
+
+fn open_bound_store(directory: &tempfile::TempDir) -> TestResult<SqliteStore> {
+    let mut store = open_store(directory)?;
+    bind_mode(&mut store)?;
+    bind_gate(&mut store)?;
     Ok(store)
 }
 
@@ -190,18 +204,51 @@ fn nonce_ledger() -> TestResult<VolatileSubjectNonceLedgerV1> {
     ))
 }
 
-fn seed() -> TestResult<Seed> {
-    let directory = private_directory()?;
-    let mut store = open_bound_store(&directory)?;
-    let (owner, owner_identity) = signing("piglor-owner");
+fn register_gateway_and_encryption(registry: &mut KeyRegistryStateV1) -> TestResult {
     let (gateway, gateway_identity) = signing("timeline-owner");
+    register_signing(registry, gateway_identity, &gateway)?;
+    register_encryption(registry)
+}
+
+fn seeded_registry() -> TestResult<(KeyRegistryStateV1, SigningKeyMaterial, KeyIdentityV1)> {
+    let (owner, owner_identity) = signing("piglor-owner");
     let mut registry = KeyRegistryStateV1::new();
     register_signing(&mut registry, owner_identity, &owner)?;
-    register_signing(&mut registry, gateway_identity, &gateway)?;
-    register_encryption(&mut registry)?;
-    store.save_key_registry(&registry)?;
-    let timeline = store.create_timeline("subject-data")?.id();
-    let keys = unlocked_keyring(owner_identity, owner.public_verification_key())?;
+    register_gateway_and_encryption(&mut registry)?;
+    Ok((registry, owner, owner_identity))
+}
+
+fn save_registry_and_timeline(
+    store: &mut SqliteStore,
+    registry: &KeyRegistryStateV1,
+) -> TestResult<TimelineId> {
+    store.save_key_registry(registry)?;
+    Ok(store.create_timeline("subject-data")?.id())
+}
+
+fn seeded_store(
+    directory: &tempfile::TempDir,
+) -> TestResult<(SqliteStore, TimelineId, SigningKeyMaterial, KeyIdentityV1)> {
+    let mut store = open_bound_store(directory)?;
+    let (registry, owner, identity) = seeded_registry()?;
+    let timeline = save_registry_and_timeline(&mut store, &registry)?;
+    Ok((store, timeline, owner, identity))
+}
+
+fn seed_keys(
+    owner: &SigningKeyMaterial,
+    identity: KeyIdentityV1,
+) -> TestResult<(SubjectKeyringV1, VolatileSubjectNonceLedgerV1)> {
+    Ok((
+        unlocked_keyring(identity, owner.public_verification_key())?,
+        nonce_ledger()?,
+    ))
+}
+
+fn seed() -> TestResult<Seed> {
+    let directory = private_directory()?;
+    let (store, timeline, owner, owner_identity) = seeded_store(&directory)?;
+    let (keys, nonces) = seed_keys(&owner, owner_identity)?;
     Ok(Seed {
         store,
         directory,
@@ -209,7 +256,7 @@ fn seed() -> TestResult<Seed> {
         owner,
         owner_identity,
         keys,
-        nonces: nonce_ledger()?,
+        nonces,
     })
 }
 
@@ -410,10 +457,16 @@ fn closed(store: QualifiedSqliteStoreV1) -> TestResult {
 
 /// Run `action` with the transaction-ending seam set.
 fn with_early_end<T>(action: impl FnOnce() -> T) -> T {
+    /// Resets the seam on every exit, including a panicking `action`.
+    struct ResetEarlyEnd;
+    impl Drop for ResetEarlyEnd {
+        fn drop(&mut self) {
+            END_TRANSACTION_EARLY.with(|flag| flag.set(false));
+        }
+    }
+    let _reset = ResetEarlyEnd;
     END_TRANSACTION_EARLY.with(|flag| flag.set(true));
-    let result = action();
-    END_TRANSACTION_EARLY.with(|flag| flag.set(false));
-    result
+    action()
 }
 
 #[test]
