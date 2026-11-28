@@ -52,8 +52,9 @@ use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
 use super::super::vault::{fresh_identity, VaultKeyV1};
 use super::{
-    control_request, failure_record, CommittedQuarantineControlV1, CommunityQuarantineReceiptV1,
-    OperationV1, QuarantineLedgerV1, SetReasonBoundV1, StagedSetReasonV1,
+    control_request, failure_record, ledger_states, CommittedQuarantineControlV1,
+    CommunityQuarantineReceiptV1, OperationV1, QuarantineLedgerV1, QuarantineReasonStateV1,
+    RetainedControlV1, RetainedSetReasonV1, SealedControlV1, SetReasonBoundV1, StagedSetReasonV1,
 };
 
 /// Preferred CBOR encoding of the empty scope-member array.
@@ -253,6 +254,14 @@ impl MemoryCommunityDomainV1 {
                                 ordinal,
                                 reasons,
                                 evidence_not_after_micros: horizon,
+                                states: ledger_states(
+                                    current,
+                                    operation.call.reason.code(),
+                                    QuarantineReasonStateV1 {
+                                        evidence_not_after_micros: operation.failure_horizon,
+                                        share_spent: true,
+                                    },
+                                ),
                             },
                         },
                     )
@@ -481,19 +490,23 @@ impl MemoryCommunityDomainV1 {
         StagedSetReasonV1 {
             key: (failure.timeline, call.control_operation_id),
             committed: CommittedQuarantineControlV1 {
-                bound: SetReasonBoundV1 {
-                    key: operation.key,
-                    expected_ledger: call.expected_ledger_digest,
-                    reason: call.reason.code(),
-                    host_failure: failure.host_failure,
-                    trust_policy_snapshot_digest: failure.trust_policy_snapshot_digest,
-                    expected_generation: call.expected_generation,
-                    expected_head: call.expected_state_head_digest,
-                },
-                generation: operation.member.generation,
-                metadata_key,
-                records,
-                admission,
+                kind: RetainedControlV1::SetReason(RetainedSetReasonV1 {
+                    bound: SetReasonBoundV1 {
+                        key: operation.key,
+                        expected_ledger: call.expected_ledger_digest,
+                        reason: call.reason.code(),
+                        host_failure: failure.host_failure,
+                        trust_policy_snapshot_digest: failure.trust_policy_snapshot_digest,
+                        expected_generation: call.expected_generation,
+                        expected_head: call.expected_state_head_digest,
+                    },
+                    generation: operation.member.generation,
+                    sealed: SealedControlV1 {
+                        metadata_key,
+                        records,
+                    },
+                    admission,
+                }),
                 receipt,
             },
             keys,

@@ -993,9 +993,9 @@ pub trait EventStore: Send {
 
     /// Create a timeline using caller-supplied metadata (preserves [`TimelineId`]).
     ///
-    /// Required for identity-preserving import across shared-world nodes (Wave 6 / #87).
+    /// Required for identity-preserving import across shared-world nodes.
     ///
-    /// Default fails closed so thin test stubs need not implement Wave 6 APIs.
+    /// The default implementation returns an unsupported-operation error.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] if the id already exists or the backend cannot
@@ -1018,7 +1018,7 @@ pub trait EventStore: Send {
     /// batch (no partial apply on validation failure). Seqs must be contiguous from
     /// `head + 1`, and each [`EventId`] must be unique in the store.
     ///
-    /// Default fails closed so thin test stubs need not implement Wave 6 APIs.
+    /// The default implementation returns an unsupported-operation error.
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist, or
@@ -1037,7 +1037,7 @@ pub trait EventStore: Send {
     ///
     /// Used to roll back a failed [`import_timeline_with_id`] after create succeeded.
     ///
-    /// Default fails closed so thin test stubs need not implement Wave 6 APIs.
+    /// The default implementation returns an unsupported-operation error.
     ///
     /// ADR-099 revision 13: an admitted Fork, meaning a Timeline for which the
     /// store holds a `FAR1` of any origin, is never deleted, so its provenance
@@ -1063,7 +1063,7 @@ pub trait EventStore: Send {
     /// Used by [`export_timeline_own`] / [`import_timeline_with_id`] to bind fork imports
     /// to parent history.
     ///
-    /// Default fails closed so thin test stubs need not implement Wave 6 APIs.
+    /// The default implementation returns an unsupported-operation error.
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline (or an ancestor) is missing,
@@ -1483,8 +1483,7 @@ pub use export_timeline_own as export_timeline_cow;
 
 /// Export only events stored on this timeline (no stitch / renumber).
 ///
-/// Prefer [`export_timeline_own`] in new code. This name is retained for existing
-/// Wave 6 call sites and means the same thing.
+/// Prefer [`export_timeline_own`], which has the same behavior.
 ///
 /// Preserves [`TimelineMeta::fork_point`] so [`import_timeline_with_id`] can recreate
 /// a copy-on-write child. Parent timeline must already exist at the destination.
@@ -2677,7 +2676,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_requires_preserving_backend(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Default trait stubs reject identity-preserving import (Wave 6 / #87).
         let entity = EntityId::new();
         let dummy_event = Event {
             id: EventId::new(),

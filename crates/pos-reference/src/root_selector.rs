@@ -1501,9 +1501,9 @@ struct SelectorProviderRequestAdmission<'a> {
     in_flight: &'a InFlightAttempt,
 }
 
-struct SelectedSandboxImage {
+pub(crate) struct SelectedSandboxImage {
     sim1: Vec<u8>,
-    image: AdmittedSandboxImage,
+    pub(crate) image: AdmittedSandboxImage,
 }
 
 struct ClosedSelectorAdmission {
@@ -2365,7 +2365,7 @@ fn write_namespace_conflict_terminal(
     }
 }
 
-fn selected_image_and_launch(
+pub(crate) fn selected_image_and_launch(
     admitted: &AdmittedSelectorProvider,
     requirement: &crate::evaluator_protocol::SandboxRequirement,
     admission_time: u64,

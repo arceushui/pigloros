@@ -130,8 +130,6 @@ fn a_denied_release_is_event_13() -> TestResult {
     Ok(())
 }
 
-/// Events 11 and 13 bind a status-2 KOE1, whose observation failed after
-/// `ReadyV1` (owner decision 2026-11-19, Q3).
 #[test]
 fn a_failed_observation_is_bound_by_events_11_and_13() -> TestResult {
     let grant = signed_grant()?;

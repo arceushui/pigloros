@@ -123,6 +123,8 @@ pub mod protected_sqlite_namespace;
 pub mod stitch;
 #[cfg(any(test, feature = "test-support"))]
 pub mod subject_data_consumer;
+#[cfg(any(test, feature = "test-support"))]
+pub mod subject_nonce_reservation;
 mod timeline_range;
 pub mod trusted_clock;
 

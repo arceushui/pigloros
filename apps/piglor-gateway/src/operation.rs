@@ -1,14 +1,14 @@
-//! The reusable operation-authorization seam of the Gateway (#1361).
+//! The reusable operation-authorization seam of the Gateway.
 //!
 //! A protected route names its [`GatewayOperationV1`] through an
-//! [`OperationSpecV1`] marker, extracts its [`OperationAuthority`] (the acting
-//! entity of the `x-piglor-actor-entity` header, never a credential: owner
-//! decision D1 on #302 makes loopback reachability the Local trust boundary),
-//! and authorizes it against the host-pinned Principal before it mutates or
-//! looks anything up. Before each decision the host compares the authority
+//! [`OperationSpecV1`] marker, extracts its [`OperationAuthority`] from the
+//! acting entity named by `x-piglor-actor-entity`, and authorizes it against
+//! the host-pinned Principal before it mutates or looks anything up. The
+//! header is not a credential; loopback reachability is the Local trust
+//! boundary. Before each decision the host compares the authority
 //! its store records with the pinned one and, when the store is ahead (a
 //! revocation recorded by another writer), recomposes the view and its
-//! registry together (owner decisions D3 and D10 on #302). A Principal with
+//! registry together. A Principal with
 //! consents is read through the consent Timeline of the host that owns the
 //! store: once another process records anything to the store, that read
 //! fails, so once the store is ahead of the pin (a revocation recorded
@@ -162,7 +162,7 @@ impl OperationSpecV1 for ReadOptionSpecOperation {
 ///
 /// Only [`OperationAuthority::run_as_actor`] makes one, from the decision it
 /// took, so a mutation that records its actor, such as the owner of a new
-/// root Timeline ([`Gateway::create_timeline`], ADR-136 §1), can never be
+/// root Timeline ([`Gateway::create_timeline`]) can never be
 /// handed an entity no decision admitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdmittedActorV1(EntityId);
@@ -285,7 +285,7 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
     /// [`Self::run`], handing `operation` the actor the decision admitted:
     /// `None` on a Gateway composition that protects nothing. A mutation
     /// that records its actor, such as the owner of a new root Timeline
-    /// (ADR-136 §1), takes it from here, never from the request.
+    /// takes it from here, never from the request.
     ///
     /// # Errors
     /// Returns the failures of [`Self::run`].

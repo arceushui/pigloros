@@ -1,5 +1,4 @@
-//! Detached protected projection candidates (ADR-094 §1, ADR-113 §1, §3 and
-//! §4 E5).
+//! Detached protected projection candidates.
 //!
 //! A [`ProtectedProjectionProviderV1`] opens a [`DetachedProjectionCandidateV1`]
 //! for an exact recorded consumer set, from an initial State, bound to one
@@ -80,9 +79,7 @@ pub enum ProjectionCandidateErrorV1 {
 
 /// The State a candidate starts from.
 ///
-/// It has one variant today, but ADR-113 §1 and §3 give `open_candidate` an
-/// `initial_state` input: a future PSS1-seeded candidate (#502) enters
-/// through it, so the provider contract does not change when it lands.
+/// The initial projection state assigned to each consumer in a candidate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InitialStateV1 {
     /// Every consumer starts with no entity State.
