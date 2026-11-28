@@ -47,6 +47,7 @@ use crate::MemoryTrustedClockAuthorityV1;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 mod bounds;
+mod life;
 
 const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 const GENERATION: [u8; 16] = [0x20; 16];
