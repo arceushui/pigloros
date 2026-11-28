@@ -79,7 +79,7 @@ pub const LAUNCH_BARRIER_MODE: &str = "launch-barrier";
 /// | 75 | the adapter is not a 64-bit little-endian ELF executable for this architecture |
 /// | 100 + n | the adapter could not be opened beneath the root, with OS error number n (at most 27) |
 #[must_use]
-pub const fn failure_status(error: &LauncherError) -> u8 {
+pub fn failure_status(error: &LauncherError) -> u8 {
     match error {
         LauncherError::Parameters => 64,
         LauncherError::Environment => 65,
@@ -95,15 +95,13 @@ pub const fn failure_status(error: &LauncherError) -> u8 {
 }
 
 /// The exit status of an adapter that could not be held (see [`failure_status`]).
-const fn adapter_status(fault: AdapterFault) -> u8 {
+fn adapter_status(fault: AdapterFault) -> u8 {
     match fault {
         AdapterFault::NotRegular => 68,
         AdapterFault::Unreadable => 74,
         AdapterFault::NotNative => 75,
-        // Error numbers are at most 133 on Linux, so the sum stays below 256; the mask keeps it
-        // defined for any value.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        AdapterFault::Open(number) => 100 + (number & 0x7f) as u8,
+        // The mask keeps the sum below 256 for any error number (Linux's are at most 133).
+        AdapterFault::Open(number) => 100 + u8::try_from(number & 0x7f).unwrap_or_default(),
     }
 }
 
