@@ -268,7 +268,10 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         )
     }
 
-    /// Records the call like `evaluate_current_release`, then delegates.
+    /// Records the call like `evaluate_current_release`, then delegates. A
+    /// scripted `historical_evaluation` is returned as it stands, before any
+    /// scope check, exactly as `evaluate_current_release` returns it before any
+    /// anchor check.
     fn evaluate_retained_release(
         &self,
         scope: &str,
