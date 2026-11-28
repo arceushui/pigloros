@@ -76,7 +76,7 @@ pub enum DbusValue {
     Descriptor,
     /// 11, `(aiai)`: the exit statuses and the signals of `SuccessExitStatus` (R17-E6), each list
     /// in ascending order.
-    ExitStatusSet(Vec<i32>, Vec<i32>),
+    ExitStatusSet(Vec<u8>, Vec<u8>),
 }
 
 impl DbusValue {
@@ -474,25 +474,22 @@ fn verified_stdio_value(name: &str) -> Option<&'static str> {
     }
 }
 
-fn integers_value(values: &[i32]) -> Value {
+fn integers_value(values: &[u8]) -> Value {
     Value::Array(
         values
             .iter()
-            .map(|value| uint_value(u64::from(value.unsigned_abs())))
+            .map(|value| uint_value(u64::from(*value)))
             .collect(),
     )
 }
 
 /// At most `maximum` strictly increasing integers in `0..=255`.
-fn integers(value: &Value, maximum: usize) -> Result<Vec<i32>> {
+fn integers(value: &Value, maximum: usize) -> Result<Vec<u8>> {
     let values = list(value, 0, maximum)?
         .iter()
         .map(|value| {
             uint(value).and_then(|number| {
-                i32::try_from(number)
-                    .ok()
-                    .filter(|number| (0..=255).contains(number))
-                    .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+                u8::try_from(number).map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)
             })
         })
         .collect::<Result<Vec<_>>>()?;

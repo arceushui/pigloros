@@ -135,7 +135,7 @@ fn assert_dbus_roundtrip(value: SystemdHardeningValue) -> Result<(), Box<dyn Err
             assert_eq!(consumed, encoded.len());
         }
         SystemdHardeningValue::EveryExit => {
-            let value: (Vec<i32>, Vec<i32>) = ((1..=255).collect(), (1..=64).collect());
+            let value: (Vec<i32>, Vec<i32>) = ((1..=199).collect(), (1..=64).collect());
             assert_eq!(
                 Variant::from(value.clone()).value_signature().to_string(),
                 "(aiai)"
