@@ -151,10 +151,10 @@ INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
         .arg(lpv1_hex()?)
         .stdin(Stdio::from(launcher))
         .output()?;
-    // Exit status 67 is the peer refusal and 68 the missing adapter (the launcher exit table in
-    // the README).
+    // Exit status 67 is the peer refusal and 102 the missing adapter, 100 plus ENOENT (the launcher
+    // exit table in the README).
     let status = if rustix::process::getuid().is_root() {
-        68
+        102
     } else {
         67
     };
