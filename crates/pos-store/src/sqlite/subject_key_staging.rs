@@ -128,16 +128,19 @@ pub struct SubjectKeyStagingRecordV1 {
     pub store_file_id: Vec<u8>,
 }
 
-/// The registry role that signs Timeline integrity records (ADR-137 D4 names no role for the owner's signing identity).
-const TIMELINE_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
+/// The owner id of the owner's own signing identity (ADR-137 D4, amended).
+pub const OWNER_SIGNING_OWNER_ID: &str = "piglor-owner";
+
+/// The registry role of the owner's own signing identity (ADR-137 D4, amended).
+pub const OWNER_SIGNING_ROLE: KeyRoleV1 = KeyRoleV1::TimelineIntegritySigning;
 
 /// The `DestructionPending` requests that ADR-137 D4 resumes at owner start.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingKeyDestructionsV1 {
     /// Every `SubjectDataEncryption` request, of any subject and epoch.
     pub subject_keys: Vec<KeyDestructionRequestV1>,
-    /// Every `TimelineIntegritySigning` request, of any owner id and epoch.
-    /// The caller keeps the requests of its own signing identity.
+    /// Every request of the owner's signing identity (`OWNER_SIGNING_OWNER_ID`,
+    /// `OWNER_SIGNING_ROLE`), of any epoch.
     pub signing_keys: Vec<KeyDestructionRequestV1>,
 }
 
@@ -607,10 +610,9 @@ impl SqliteStore {
     /// admission and P5. A failure of one identity leaves it pending and does
     /// not block the others. Requests of every other role are not listed.
     ///
-    /// ADR-137 D4 names no owner id or role for the owner's own signing
-    /// identity, so this store does not pick one: `signing_keys` holds every
-    /// pending `TimelineIntegritySigning` request and the caller must keep
-    /// only those of its own owner id.
+    /// Per ADR-137 D4 (amended) the owner's own signing identity is the pair
+    /// `OWNER_SIGNING_OWNER_ID` and `OWNER_SIGNING_ROLE`, of any epoch.
+    /// `signing_keys` holds only the pending requests of that pair.
     ///
     /// # Errors
     /// Fails closed, with a fixed message, for an absent or unreadable
@@ -626,7 +628,10 @@ impl SqliteStore {
                     subject_keys,
                     signing_keys: others
                         .into_iter()
-                        .filter(|request| request.identity.role == TIMELINE_SIGNING_ROLE)
+                        .filter(|request| {
+                            request.identity.owner_id.as_str() == OWNER_SIGNING_OWNER_ID
+                                && request.identity.role == OWNER_SIGNING_ROLE
+                        })
                         .collect(),
                 }
             })
