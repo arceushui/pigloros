@@ -362,9 +362,8 @@ class ReportTests(unittest.TestCase):
             self.malformed(["execute\texecuted", "outcome\tCompleted", f"events\t{value}"])
         report = CHECKER.parse_report(["execute\texecuted", "outcome\tCompleted", "events\t0,255"])
         self.assertEqual(report["events"], [0, 255])
-        padded = ["execute\texecuted", "outcome\tCompleted", "events\t005,0005,00000255"]
-        self.assertEqual(CHECKER.parse_report(padded)["events"], [5, 5, 255])
-        self.malformed(["execute\texecuted", "outcome\tCompleted", "events\t000000005"])
+        for value in ("005", "0005", "00", "05", "5,007"):
+            self.malformed(["execute\texecuted", "outcome\tCompleted", f"events\t{value}"])
 
     def test_malformed_report_rows_become_a_case_failure_not_a_traceback(self) -> None:
         verdict = CHECKER.judge_case(CASE, ["execute\texecuted", "outcome\tCompleted"], CLEAN)
