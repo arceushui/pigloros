@@ -103,8 +103,10 @@ fn assert_member_deltas(was: &Parts, now: &Parts, member: u8) {
 fn member_commits(case: &mut QuarantineCase, member: u8, before: (u64, u64)) -> TestResult {
     let was = parts(case)?;
     mint(case, member)?;
-    assert_member_deltas(&was, &parts(case)?, member);
-    assert_eq!(held(case)?, before);
+    let now = parts(case)?;
+    assert_member_deltas(&was, &now, member);
+    let after = held(case)?;
+    assert_eq!(after, before);
     Ok(())
 }
 
@@ -119,14 +121,31 @@ fn every_member_commits(case: &mut QuarantineCase) -> TestResult {
     Ok(())
 }
 
-/// I136, targets: with T's actor exactly at the community line (committed
-/// targets, `F_q` and a pending reservation fill it), a `SetReason` of each
-/// member mints its CFO1 (two targets) from its own `F_q` share (two
-/// targets), is never refused, and leaves the actor at the line.
-#[test]
-fn a_set_reason_at_the_targets_line_is_never_refused() -> TestResult {
-    let mut case = QuarantineCase::new(&SEAL, Revocation::Artifact)?;
-    let (targets, _) = held(&case)?;
+/// What T's actor holds in targets.
+fn held_targets(case: &QuarantineCase) -> Fallible<u64> {
+    Ok(held(case)?.0)
+}
+
+/// What T holds in rows.
+fn held_rows(case: &QuarantineCase) -> Fallible<u64> {
+    Ok(held(case)?.1)
+}
+
+/// `read` of the case is exactly `expected`.
+fn assert_held_at(
+    case: &QuarantineCase,
+    read: fn(&QuarantineCase) -> Fallible<u64>,
+    expected: u64,
+) -> TestResult {
+    let now = read(case)?;
+    assert_eq!(now, expected);
+    Ok(())
+}
+
+/// T's actor exactly at the community line: committed targets, `F_q` and a
+/// pending reservation fill it.
+fn fill_targets_line(case: &mut QuarantineCase) -> TestResult {
+    let (targets, _) = held(case)?;
     let free = COMMUNITY_ERASURE_TARGET_LINE_V1 - targets;
     let domain = &mut case.domain.world.domain;
     domain
@@ -139,21 +158,26 @@ fn a_set_reason_at_the_targets_line_is_never_refused() -> TestResult {
             rows: 0,
         },
     );
-    assert_eq!(held(&case)?.0, COMMUNITY_ERASURE_TARGET_LINE_V1);
-    every_member_commits(&mut case)?;
-    assert_eq!(held(&case)?.0, COMMUNITY_ERASURE_TARGET_LINE_V1);
-    Ok(())
+    assert_held_at(case, held_targets, COMMUNITY_ERASURE_TARGET_LINE_V1)
 }
 
-/// RN.5 rows case: rows of a class that costs no targets fill T's view
-/// list, so T's rows with its `F_q` rows are exactly at 4,096; a `SetReason`
-/// of each member still mints its CFO1, and `rows(T)` stays at 4,096.
+/// I136, targets: with T's actor exactly at the community line, a
+/// `SetReason` of each member mints its CFO1 (two targets) from its own
+/// `F_q` share (two targets), is never refused, and leaves the actor at the
+/// line.
 #[test]
-fn a_set_reason_at_the_rows_bound_is_never_refused() -> TestResult {
+fn a_set_reason_at_the_targets_line_is_never_refused() -> TestResult {
     let mut case = QuarantineCase::new(&SEAL, Revocation::Artifact)?;
-    let (_, rows) = held(&case)?;
-    // Three of the rows are a pending reservation's, so the held sum counts
-    // the pending side too.
+    fill_targets_line(&mut case)?;
+    every_member_commits(&mut case)?;
+    assert_held_at(&case, held_targets, COMMUNITY_ERASURE_TARGET_LINE_V1)
+}
+
+/// T's rows exactly at the bound: rows of a class that costs no targets fill
+/// T's view list; three of the rows are a pending reservation's, so the held
+/// sum counts the pending side too.
+fn fill_rows_bound(case: &mut QuarantineCase) -> TestResult {
+    let (_, rows) = held(case)?;
     let consented = (0..ROW_BOUND - rows - PENDING_ROWS)
         .map(|seed| erasure_row("budget", ArtifactDataClassV1::ConsentedSharedData, 0, seed))
         .collect::<Fallible<Vec<_>>>()?;
@@ -166,8 +190,16 @@ fn a_set_reason_at_the_rows_bound_is_never_refused() -> TestResult {
             rows: PENDING_ROWS,
         },
     );
-    assert_eq!(held(&case)?.1, ROW_BOUND);
+    assert_held_at(case, held_rows, ROW_BOUND)
+}
+
+/// RN.5 rows case: with T's rows and its `F_q` rows exactly at 4,096, a
+/// `SetReason` of each member still mints its CFO1, and `rows(T)` stays at
+/// 4,096.
+#[test]
+fn a_set_reason_at_the_rows_bound_is_never_refused() -> TestResult {
+    let mut case = QuarantineCase::new(&SEAL, Revocation::Artifact)?;
+    fill_rows_bound(&mut case)?;
     every_member_commits(&mut case)?;
-    assert_eq!(held(&case)?.1, ROW_BOUND);
-    Ok(())
+    assert_held_at(&case, held_rows, ROW_BOUND)
 }
