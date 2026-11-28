@@ -584,3 +584,22 @@ for list in 1-199 1-255; do
   exec_probe "exit203-${list}" "${list}" -- "${shell}" -c 'exit 203'
   exec_probe "exit0-${list}" "${list}" -- "${shell}" -c 'exit 0'
 done
+# A payload that forks a child that outlives it and exits 0: does the unit stay active (exited)
+# with the child alive in its cgroup (the E6 straggler behaviour)?
+straggler_probe() {
+  local dir=probes/straggler-1-199 status=0
+  mkdir -p "${dir}"
+  timeout 40 systemd-run --unit=probe-straggler --wait --collect \
+    -p Type=exec -p RemainAfterExit=yes -p SuccessExitStatus=1-199 \
+    -- "${shell}" -c 'sleep 300 </dev/null >/dev/null 2>&1 & exit 0' \
+    >"${dir}/run-out" 2>"${dir}/run-err" || status=$?
+  printf '%s\n' "${status}" >"${dir}/run-status"
+  systemctl show probe-straggler.service \
+    -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,ControlGroup >"${dir}/show" 2>&1 || true
+  cat /sys/fs/cgroup/system.slice/probe-straggler.service/cgroup.procs >"${dir}/procs" 2>&1 || true
+  journalctl --no-pager --output=short-monotonic -u probe-straggler.service >"${dir}/journal" 2>&1 || true
+  systemctl kill --kill-whom=all probe-straggler.service >/dev/null 2>&1 || true
+  systemctl stop probe-straggler.service >/dev/null 2>&1 || true
+  systemctl reset-failed probe-straggler.service >/dev/null 2>&1 || true
+}
+straggler_probe
