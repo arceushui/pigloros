@@ -31,29 +31,45 @@ const CSR1: [u8; 4] = *b"CSR1";
 /// The domain keeps one per initialized Timeline, beside its pass state.
 /// Initialization sets it and a Commit replaces it with the head it
 /// selects.
+///
+/// Invariant: `head_digest` is `pass_states[T].head`, the digest of the CSH1
+/// this view reads. [`MemoryCommunityDomainV1::head_view`] refuses a view
+/// whose digest differs, so a CAV1 never states a head other than the one
+/// the fences compare. A Commit MUST replace both in one transaction.
 #[derive(Clone, Copy)]
 pub(super) struct CommunitySelectedViewV1 {
+    pub(super) head_digest: Hash,
     pub(super) frontier: CommunityPassFrontierV1,
     pub(super) head_ref: CommunityMaterializationReferenceV1,
 }
 
 impl CommunitySelectedViewV1 {
-    /// The initialization head's view: the `Initial` frontier and the CMI1
-    /// reference of the first CSR1 among `materializations`, which are in
-    /// graph order (per roster slot: CSC1, CIS1, CSR1, two CPN1s).
+    /// The initialization head's view: `head_digest`, the `Initial` frontier
+    /// and the CMI1 reference of the first CSR1 among `materializations`.
+    /// They are in graph order, which is roster order (per slot: CSC1, CIS1,
+    /// CSR1, two CPN1s), so the first CSR1 is the first roster member's.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` when no CMI1 is a CSR1's.
-    pub(super) fn initial(materializations: &[Zeroizing<Vec<u8>>]) -> Result<Self, Error> {
+    /// Returns the CMI1 codec refusal of any record, and
+    /// `EvidenceUnavailable` when no CMI1 is a CSR1's.
+    pub(super) fn initial(
+        head_digest: Hash,
+        materializations: &[Zeroizing<Vec<u8>>],
+    ) -> Result<Self, Error> {
         materializations
             .iter()
-            .filter_map(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes).ok())
-            .find(|materialization| materialization.as_input().record_magic == CSR1)
-            .map(|materialization| Self {
-                frontier: CommunityPassFrontierV1::Initial,
-                head_ref: materialization.as_input().materialization,
+            .map(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes))
+            .collect::<Result<Vec<_>, Error>>()
+            .and_then(|all| {
+                all.into_iter()
+                    .find(|materialization| materialization.as_input().record_magic == CSR1)
+                    .map(|materialization| Self {
+                        head_digest,
+                        frontier: CommunityPassFrontierV1::Initial,
+                        head_ref: materialization.as_input().materialization,
+                    })
+                    .ok_or(Error::EvidenceUnavailable)
             })
-            .ok_or(Error::EvidenceUnavailable)
     }
 }
 
@@ -72,8 +88,9 @@ impl MemoryCommunityDomainV1 {
     /// (`metadata`: its leaf grant and request), read now.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` for a Timeline with no selected head
-    /// and for an unloadable metadata chain.
+    /// Returns `EvidenceUnavailable` for a Timeline with no selected head,
+    /// a selected view whose digest is not the pass state's head and an
+    /// unloadable metadata chain.
     pub(super) fn head_view(
         &self,
         timeline: TimelineId,
@@ -82,6 +99,9 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityHeadViewV1, Error> {
         self.selected_views
             .get(&timeline)
+            .zip(self.pass_states.get(&timeline))
+            .filter(|(selected, state)| selected.head_digest == state.head)
+            .map(|(selected, _)| selected)
             .ok_or(Error::EvidenceUnavailable)
             .and_then(|selected| {
                 CommunityStoreDomainV1::authority_row(self, metadata.0, metadata.1).map(|row| {

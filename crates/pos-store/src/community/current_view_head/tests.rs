@@ -38,6 +38,35 @@ pub(in crate::community) fn state_revisions(
         .collect())
 }
 
+/// What a Commit installs in one transaction (R16.5(4)): T's new head
+/// digest in the pass state and the selected view of that head, whose ref is
+/// a real CSR1 CMI1 reference. The Commit slice calls the same pair.
+pub(in crate::community) fn simulate_commit(
+    domain: &mut MemoryCommunityDomainV1,
+    timeline: TimelineId,
+    view: &CommunitySelectedViewV1,
+) -> Fallible<()> {
+    domain
+        .pass_states
+        .get_mut(&timeline)
+        .ok_or("no pass state")?
+        .head = view.head_digest;
+    domain.selected_views.insert(timeline, *view);
+    Ok(())
+}
+
+/// Whether T's selected view and pass state name one head.
+pub(in crate::community) fn views_agree(
+    domain: &MemoryCommunityDomainV1,
+    timeline: TimelineId,
+) -> bool {
+    domain
+        .selected_views
+        .get(&timeline)
+        .zip(domain.pass_states.get(&timeline))
+        .is_some_and(|(view, state)| view.head_digest == state.head)
+}
+
 fn row(timeline: u8, head: u64, epoch: u64, tag: u8) -> CommunityAuthorityViewRowV1 {
     CommunityAuthorityViewRowV1 {
         authority_timeline: TimelineId::from_ulid(Ulid::from_bytes([timeline; 16])),
@@ -84,11 +113,18 @@ fn a_metadata_row_stands_alone() {
     assert_eq!(tags(&rows), vec![hash(0x22)]);
 }
 
+/// An undecodable CMI1 is refused, not skipped.
+#[test]
+fn an_initial_view_refuses_an_undecodable_record() {
+    let records = [zeroize::Zeroizing::new(vec![0xff])];
+    assert!(CommunitySelectedViewV1::initial(hash(1), &records).is_err());
+}
+
 /// A graph with no `StateRevision` CMI1 gives no head ref.
 #[test]
 fn an_initial_view_needs_a_state_revision() {
     assert_eq!(
-        CommunitySelectedViewV1::initial(&[]).err(),
+        CommunitySelectedViewV1::initial(hash(1), &[]).err(),
         Some(Error::EvidenceUnavailable)
     );
 }

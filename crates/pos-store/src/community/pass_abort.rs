@@ -183,7 +183,8 @@ pub(super) struct FencedV1 {
 impl MemoryCommunityDomainV1 {
     /// The fences of a first Abort: the installed CDP1 must be the Reserve's
     /// (3), then the generation (5) and the head (6), then the metadata
-    /// horizon (13), as A5.5 step 4 and A4e-1 order them. `decision_bound_micros` is the call's decision bound.
+    /// horizon (13), as A5.5 step 4 and A4e-1 order them.
+    /// `decision_bound_micros` is the call's decision bound.
     ///
     /// A first Abort at or after the pass's `H_r` still commits its CAB1
     /// (R15.2(3a), N17).

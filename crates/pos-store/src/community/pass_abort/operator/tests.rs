@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 use super::{
     CommunityPassAbortCallV1, CommunityPassAbortReceiptV1, PreparedAbortV1, StagedPassAbortV1,
 };
-use crate::community::current_view_head::tests::state_revisions;
+use crate::community::current_view_head::tests::{simulate_commit, state_revisions, views_agree};
 use crate::community::current_view_head::CommunitySelectedViewV1;
 use crate::community::erasure_budget::CommunityPendingReservationV1;
 use crate::community::pass_record::{
@@ -567,12 +567,8 @@ fn an_abort_states_the_first_members_state_revision() -> TestResult {
         CommunityPassFrontierV1::Initial
     ));
     assert!(selected.head_ref == refs[0]);
-    let state = case
-        .domain()
-        .pass_states
-        .get(&target())
-        .ok_or("no pass state")?;
-    assert_eq!(state.head, case.head);
+    assert!(views_agree(case.domain(), target()));
+    assert_eq!(selected.head_digest, case.head);
     case.reserve(false)?;
     case.abort(Reason::AuthenticatedCancellation)??;
     let records = case.records()?;
@@ -595,27 +591,19 @@ fn an_abort_on_a_committed_head_succeeds() -> TestResult {
     let mut case = Case::new()?;
     let refs = state_revisions(case.domain())?;
     let key = pass_key()?;
-    let head = hash(0x77);
-    case.domain_mut()
-        .pass_states
-        .get_mut(&target())
-        .ok_or("no pass state")?
-        .head = head;
-    case.domain_mut().selected_views.insert(
+    simulate_commit(
+        case.domain_mut(),
         target(),
-        CommunitySelectedViewV1 {
+        &CommunitySelectedViewV1 {
+            head_digest: hash(0x77),
             frontier: CommunityPassFrontierV1::Committed(key),
             head_ref: refs[1],
         },
-    );
+    )?;
+    assert!(views_agree(case.domain(), target()));
     case.reserve(false)?;
     case.abort(Reason::AuthenticatedCancellation)??;
-    let state = case
-        .domain()
-        .pass_states
-        .get(&target())
-        .ok_or("no pass state")?;
-    assert_eq!(state.head, head);
+    assert!(views_agree(case.domain(), target()));
     let records = case.records()?;
     let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
     assert!(matches!(
@@ -626,12 +614,29 @@ fn an_abort_on_a_committed_head_succeeds() -> TestResult {
     Ok(())
 }
 
-/// A Timeline with no selected view has no head ref to state: the Abort
-/// stages nothing.
+/// A Timeline with no selected view, or one whose view reads another head
+/// than the pass state's, has no head ref to state: the Abort stages
+/// nothing.
 #[test]
-fn an_abort_without_a_selected_view_is_refused() -> TestResult {
+fn an_abort_without_an_agreeing_selected_view_is_refused() -> TestResult {
     let mut case = Case::new()?;
     case.reserve(false)?;
+    let view = *case
+        .domain()
+        .selected_views
+        .get(&target())
+        .ok_or("no selected view")?;
+    case.domain_mut().selected_views.insert(
+        target(),
+        CommunitySelectedViewV1 {
+            head_digest: hash(0x78),
+            ..view
+        },
+    );
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
     case.domain_mut().selected_views.clear();
     assert_eq!(
         case.abort(Reason::AuthenticatedCancellation)?.err(),

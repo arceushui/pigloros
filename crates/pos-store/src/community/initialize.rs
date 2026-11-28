@@ -833,8 +833,11 @@ impl MemoryCommunityDomainV1 {
                 .map(|receipt| (selection, receipt))
             })
             .and_then(|(selection, receipt)| {
-                CommunitySelectedViewV1::initial(&evidenced.materializations)
-                    .map(|selected_view| (selection, receipt, selected_view))
+                CommunitySelectedViewV1::initial(
+                    graph.selected_head_digest(),
+                    &evidenced.materializations,
+                )
+                .map(|selected_view| (selection, receipt, selected_view))
             })
             .map(|(selection, receipt, selected_view)| {
                 key.close();
@@ -987,6 +990,7 @@ impl MemoryCommunityDomainV1 {
         self.inventory_generation += 1;
         self.count_erasure_context(staged.key.0, staged.members);
         self.pass_states.insert(staged.key.0, staged.pass_state);
+        // A re-initialization replaces both, as it replaces `pass_states`.
         self.selected_views
             .insert(staged.key.0, staged.selected_view);
         self.initializations.insert(staged.key, staged.committed);
