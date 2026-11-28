@@ -71,8 +71,9 @@ pub use annotation_records::{
 };
 pub use authority_catalogue::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
-    CommunityActorRowV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
-    COMMUNITY_AUD_SCHEMA_V1, COMMUNITY_PRINCIPAL_SCHEMA_V1, MAX_COMMUNITY_ACTOR_ROWS_V1,
+    community_execution_authority_digest_v1, community_execution_nonce_v1, CommunityActorRowV1,
+    CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1, COMMUNITY_AUD_SCHEMA_V1,
+    COMMUNITY_PRINCIPAL_SCHEMA_V1, MAX_COMMUNITY_ACTOR_ROWS_V1,
     MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1,
 };
 pub use authority_evidence::{

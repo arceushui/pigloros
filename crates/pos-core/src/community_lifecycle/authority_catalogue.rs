@@ -12,7 +12,7 @@
 use super::{digest, is_valid_community_id_v1, record_prefix, CommunityLifecycleErrorV1 as Error};
 use crate::{
     encode_bytes, encode_hash, encode_head, AuthorityRegistrySnapshotV1, AuthorityTrustRootSealV1,
-    EntityId, Hash, MAX_AUTHORITY_TEXT_BYTES,
+    EntityId, Hash, TimelineId, MAX_AUTHORITY_TEXT_BYTES,
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -42,6 +42,12 @@ const ATTESTATION_PREIMAGE_BYTES: usize = 4_390;
 // The nonce preimage: array head 1, H(CAP1) 34 and three authority texts of
 // at most 128 bytes with a 2-byte head each.
 const NONCE_PREIMAGE_BYTES: usize = 425;
+// The execution nonce preimage (R8.1(4)): array head 1, H(CAP1) 34, T 17,
+// the text `execute` 8 and the 54-byte operation constraint with a 2-byte
+// head, 116 bytes in all.
+const EXECUTION_NONCE_PREIMAGE_BYTES: usize = 116;
+/// Rows of one `ExecutionAuthority` digest: one per roster member (R8.1(6)).
+const MAX_EXECUTION_AUTHORITY_ROWS: usize = 64;
 const _: () = assert!(MAX_COMMUNITY_ACTOR_ROWS_V1 == 64);
 const _: () = assert!(MAX_AUTHORITY_TEXT_BYTES == 128);
 const _: () = assert!(crate::MAX_AUTHORITY_REGISTRY_BINDINGS == 128);
@@ -202,6 +208,57 @@ pub fn community_capability_attestation_digest_v1(snapshot: &AuthorityRegistrySn
         encode_hash(&mut preimage, *binding);
     }
     digest(b"PiglorOS.Community.CapabilityAttestation.v1\0", &preimage)
+}
+
+/// The FAE1 `operation_nonce` one `run_pass` call requires (R8.1(4)).
+///
+/// It is `H("ExecutionNonce", preferred [H(CAP1), T, "execute",
+/// operation_constraint_text])`, with `operation_constraint_text` the
+/// `community.operation:r:<O32>` constraint of the call's reservation
+/// operation. It binds one catalogue, one Timeline and one reservation
+/// operation, never an administrative call (its domain differs from
+/// [`community_authentication_nonce_v1`]'s). The caller passes a well-formed
+/// `community.operation:r:<O32>` constraint: like the authentication nonce,
+/// this function does not validate it.
+#[must_use]
+pub fn community_execution_nonce_v1(
+    catalogue_digest: Hash,
+    timeline: TimelineId,
+    operation_constraint: &str,
+) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(EXECUTION_NONCE_PREIMAGE_BYTES);
+    encode_head(&mut preimage, 4, 4);
+    encode_hash(&mut preimage, catalogue_digest);
+    encode_bytes(&mut preimage, &timeline.inner().to_bytes(), 2);
+    encode_bytes(&mut preimage, b"execute", 3);
+    encode_bytes(&mut preimage, operation_constraint.as_bytes(), 3);
+    *digest(b"PiglorOS.Community.ExecutionNonce.v1\0", &preimage).as_bytes()
+}
+
+/// The CRI1 `authority_request_digest` of a `run_pass` call (R8.1(6)).
+///
+/// It is `H("ExecutionAuthority", preferred rows)`, one row
+/// `[CMB1_digest, request_digest]` per roster member in the generation's
+/// CGI1 `ordered_CMB1_digests` order. `request_digest` is
+/// `AuthorizationRequestV1::binding_digest` of that member's request.
+///
+/// # Errors
+/// Returns `InvalidBinding` for no row and for more than 64 rows.
+pub fn community_execution_authority_digest_v1(rows: &[(Hash, Hash)]) -> Result<Hash> {
+    if rows.is_empty() || rows.len() > MAX_EXECUTION_AUTHORITY_ROWS {
+        return Err(Error::InvalidBinding);
+    }
+    let mut preimage = Vec::new();
+    encode_head(&mut preimage, 4, rows.len() as u64);
+    for (member, request) in rows {
+        encode_head(&mut preimage, 4, 2);
+        encode_hash(&mut preimage, *member);
+        encode_hash(&mut preimage, *request);
+    }
+    Ok(digest(
+        b"PiglorOS.Community.ExecutionAuthority.v1\0",
+        &preimage,
+    ))
 }
 
 /// The FAE1 `operation_nonce` one administrative call requires (R6.2(3)(ii)):

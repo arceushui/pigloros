@@ -7,6 +7,7 @@
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
+    community_execution_authority_digest_v1, community_execution_nonce_v1,
     CommunityActorRowV1 as Row, CommunityAuthorityCatalogueInputV1 as Input,
     CommunityAuthorityCatalogueV1 as Catalogue, CommunityLifecycleErrorV1 as Error,
     CommunityMemberBindingInputV1 as MemberInput, CommunityMemberBindingV1 as Member,
@@ -541,5 +542,83 @@ fn capability_bindings_return_the_sorted_attested_set() -> TestResult {
     let empty =
         AuthorityRegistrySnapshotV1::try_new(&SEAL, REGISTRY, vec![hash(40)], vec![], vec![])?;
     assert!(empty.capability_bindings().is_empty());
+    Ok(())
+}
+
+/// R8.1(4): T = `000102…0f`, O = `101112…1f`, H(CAP1) = `33`×32. The preimage
+/// is written from the ADR field list, and the nonce is its BLAKE3 under the
+/// `ExecutionNonce` domain. Determinism holds by construction: the function
+/// is a pure hash of its three inputs.
+#[test]
+fn execution_nonce_reproduces_the_r8_1_4_vector() -> TestResult {
+    let timeline = TimelineId::from_ulid(Ulid::from_bytes([
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    ]));
+    let constraint = "community.operation:r:101112131415161718191a1b1c1d1e1f";
+    assert_eq!(constraint.len(), 54);
+    let mut preimage = unhex("845820")?;
+    preimage.extend_from_slice(&[0x33; 32]);
+    preimage.push(0x50);
+    preimage.extend_from_slice(&unhex("000102030405060708090a0b0c0d0e0f")?);
+    preimage.push(0x67);
+    preimage.extend_from_slice(b"execute");
+    preimage.extend_from_slice(&unhex("7836")?);
+    preimage.extend_from_slice(constraint.as_bytes());
+    assert_eq!(preimage.len(), 116);
+    let nonce = community_execution_nonce_v1(Hash::from_bytes([0x33; 32]), timeline, constraint);
+    assert_eq!(&nonce, adr_h("ExecutionNonce", &preimage).as_bytes());
+    // The domain separates it from the authentication nonce of the same
+    // fields, and every input moves it.
+    assert_ne!(&nonce, adr_h("AuthenticationNonce", &preimage).as_bytes());
+    let other_timeline = TimelineId::from_ulid(Ulid::from_bytes([9; 16]));
+    for changed in [
+        community_execution_nonce_v1(hash(1), timeline, constraint),
+        community_execution_nonce_v1(Hash::from_bytes([0x33; 32]), other_timeline, constraint),
+        community_execution_nonce_v1(
+            Hash::from_bytes([0x33; 32]),
+            timeline,
+            "community.operation:r:101112131415161718191a1b1c1d1e1e",
+        ),
+    ] {
+        assert_ne!(changed, nonce);
+    }
+    Ok(())
+}
+
+/// R8.1(6): the rows are `[CMB1_digest, request_digest]` pairs in the given
+/// order, 1 to 64 of them.
+#[test]
+fn execution_authority_digest_binds_its_rows_in_order() -> TestResult {
+    let row = |member: u8, request: u8| (hash(member), hash(request));
+    let rows = [row(1, 2), row(3, 4)];
+    let mut preimage = vec![0x82];
+    for (member, request) in rows {
+        preimage.push(0x82);
+        preimage.extend_from_slice(&unhex("5820")?);
+        preimage.extend_from_slice(member.as_bytes());
+        preimage.extend_from_slice(&unhex("5820")?);
+        preimage.extend_from_slice(request.as_bytes());
+    }
+    assert_eq!(preimage.len(), 1 + 2 * 69);
+    assert_eq!(
+        community_execution_authority_digest_v1(&rows)?,
+        adr_h("ExecutionAuthority", &preimage)
+    );
+    assert_ne!(
+        community_execution_authority_digest_v1(&[rows[1], rows[0]])?,
+        community_execution_authority_digest_v1(&rows)?
+    );
+    assert_ne!(
+        community_execution_authority_digest_v1(&[row(1, 2)])?,
+        community_execution_authority_digest_v1(&rows)?
+    );
+    let sixty_four = vec![row(1, 2); 64];
+    assert!(community_execution_authority_digest_v1(&sixty_four).is_ok());
+    for refused in [Vec::new(), vec![row(1, 2); 65]] {
+        assert_eq!(
+            community_execution_authority_digest_v1(&refused),
+            Err(Error::InvalidBinding)
+        );
+    }
     Ok(())
 }
