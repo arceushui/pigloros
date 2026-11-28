@@ -95,7 +95,8 @@ const fn expected_static_hardening_properties(
         ("StandardError", "s", SystemdHardeningValue::String("null")),
         // ADR-069 R17-E6: the cgroup outlives a successful main exit until the unit is stopped.
         ("RemainAfterExit", "b", SystemdHardeningValue::Bool(true)),
-        // Any main exit leaves the unit active (exited), so the cgroup stays for the broker.
+        // A payload exit (statuses 1..=199 and every signal) leaves the unit active (exited), so
+        // the cgroup stays for the broker.
         (
             "SuccessExitStatus",
             "(aiai)",
