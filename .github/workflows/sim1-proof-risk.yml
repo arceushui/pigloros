@@ -34,11 +34,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
-        with:
-          # Pull-request-only workflow: it never runs on main, so like the
-          # mutation workflow it keeps its own PR-scoped cache key.
-          shared-key: sim1-proof-risk
       - name: Install heap profiler
         run: |
           bash scripts/prepare-ubuntu-package-mirror.sh --no-install-recommends valgrind
@@ -78,9 +73,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
-        with:
-          shared-key: sim1-proof-risk-aarch64
       - name: Check all public admission cases on aarch64
         run: |
           test "$(uname -m)" = aarch64
