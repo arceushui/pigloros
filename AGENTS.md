@@ -89,5 +89,6 @@ when it can be, and drop a rule once its mistake can no longer happen.
 | Stale `Cargo.lock` after a merge: restore main's lock before `cargo generate-lockfile` | `.githooks/pre-commit` rejects a stale lock; the restore order is a judgment call |
 | Label `ready-to-merge` only with explicit maintainer authorization, a clean independent review, and green CI | Judgment call — nothing enforces it |
 | Root-cause the first failing job before a rerun | Judgment call — nothing enforces it |
+| Report PR verification complete only after required CI is green on the pushed head | Judgment call — no status-reporting gate enforces it |
 | No legacy or compatibility shims; replace directly | Judgment call — review finding |
 | A slow CI lane rebuilds only what its inputs changed: key a cached build by its input hash (signed when it enters a trust chain), store multi-GB results where they are not evicted (release assets, not the 10 GB Actions cache), and never cache by disabling a check | Per-lane workflow policy oracles pin the cache steps, for example `scripts/check_qemu_closure_workflow_policy.py` for the QEMU kernel cache; when to add a cache is a judgment call |
