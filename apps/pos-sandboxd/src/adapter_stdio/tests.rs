@@ -261,14 +261,21 @@ fn the_provider_only_writes_stdin_and_only_reads_stdout() {
     assert!(production.contains("capture(provider.output,"));
 }
 
-/// The launcher's source files, every directory below `directory` included; only a file named
-/// `tests.rs` is left out (it is test code).
+/// The entries of `directory`, without a file named `tests.rs` (it is test code).
+fn launcher_entries(directory: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut paths = std::fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.retain(|path| path.is_dir() || path.file_name().is_some_and(|name| name != "tests.rs"));
+    Ok(paths)
+}
+
+/// The launcher's source files, every directory below `directory` included.
 fn launcher_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> TestResult {
-    for entry in std::fs::read_dir(directory)? {
-        let path = entry?.path();
+    for path in launcher_entries(directory)? {
         if path.is_dir() {
             launcher_files(&path, files)?;
-        } else if path.file_name().is_some_and(|name| name != "tests.rs") {
+        } else {
             files.push(path);
         }
     }

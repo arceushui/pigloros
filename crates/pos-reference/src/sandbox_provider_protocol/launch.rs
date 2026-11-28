@@ -219,7 +219,16 @@ impl LaunchParameters {
         }
         let document = decode_document(bytes)?;
         let (fields, digest) = self_digested::<9>(&document, "LPV1")?;
-        let record = Self {
+        let record = Self::from_fields(fields, digest)?;
+        record.validate_fields()?;
+        verify_digest("LPV1", fields, digest).map(|()| record)
+    }
+
+    fn from_fields(
+        fields: &[Value; 9],
+        digest: [u8; 32],
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        Ok(Self {
             attempt_id: id16(&fields[2])?,
             nonce: fixed_bytes(&fields[3])?,
             sim1_digest: digest32(&fields[4])?,
@@ -228,29 +237,34 @@ impl LaunchParameters {
             expected_fdl1_digest: digest32(&fields[7])?,
             provider_identity: FdIdentity::decode(&fields[8])?,
             digest,
-        };
-        record.validate_fields()?;
-        verify_digest("LPV1", fields, digest).map(|()| record)
+        })
     }
 
     fn validate_fields(&self) -> Result<(), SandboxProviderProtocolError> {
-        let arguments_valid = self.arguments.len() <= MAX_ARGUMENTS
-            && self.arguments.iter().all(|argument| {
-                !argument.is_empty()
-                    && argument.len() <= MAX_ARGUMENT_BYTES
-                    && !argument.contains('\0')
-            });
         if self.attempt_id == [0; 16]
             || !nonzero(&[self.nonce, self.sim1_digest, self.expected_fdl1_digest])
             || !normalized_absolute_path(&self.adapter_path)
-            || !arguments_valid
-            || !self.provider_identity.valid()
-            || self.provider_identity.mount_id == 0
+            || !self.arguments_valid()
+            || !self.provider_identity_valid()
         {
             Err(SandboxProviderProtocolError::FieldOutOfBounds)
         } else {
             Ok(())
         }
+    }
+
+    fn arguments_valid(&self) -> bool {
+        self.arguments.len() <= MAX_ARGUMENTS
+            && self.arguments.iter().all(|argument| {
+                !argument.is_empty()
+                    && argument.len() <= MAX_ARGUMENT_BYTES
+                    && !argument.contains('\0')
+            })
+    }
+
+    /// The pidfd identity the launcher compares with its peer's: a nonzero mount ID and inode.
+    const fn provider_identity_valid(&self) -> bool {
+        self.provider_identity.valid() && self.provider_identity.mount_id != 0
     }
 
     fn unsigned_value(&self) -> [Value; 9] {

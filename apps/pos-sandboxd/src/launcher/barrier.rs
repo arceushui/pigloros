@@ -49,6 +49,19 @@ const MODES: [SandboxExecutionMode; 4] = [
     SandboxExecutionMode::Fork,
 ];
 
+/// Whether the peer of the release channel is the provider that LPV1 names, by pidfd identity, on
+/// a kernel whose pidfds tell processes apart.
+fn peer_is_provider(
+    host: &impl LaunchHost,
+    release: &OwnedFd,
+    parameters: &LaunchParameters,
+) -> bool {
+    host.peer_identity(release) == Some(parameters.provider_identity)
+        && host
+            .own_identity()
+            .is_some_and(|own| own != parameters.provider_identity)
+}
+
 /// Run the complete barrier. It returns only the reason the adapter was not
 /// executed; a released adapter replaces the process image instead.
 pub(super) fn run(
@@ -63,12 +76,9 @@ pub(super) fn run(
     // uid nor its pid is visible in the unit's namespaces. Any other outcome is a refusal.
     // The launcher's own identity must differ from the provider's: on a kernel without pidfs
     // inodes (before Linux 6.9) every pidfd has the same identity, which would name no process.
-    (host.peer_identity(&layout.release) == Some(parameters.provider_identity)
-        && host
-            .own_identity()
-            .is_some_and(|own| own != parameters.provider_identity))
-    .then_some(())
-    .ok_or(LauncherError::Peer)?;
+    peer_is_provider(host, &layout.release, parameters)
+        .then_some(())
+        .ok_or(LauncherError::Peer)?;
     let observed_fdl1_digest = observed_fdl1(parameters.expected_fdl1_digest, &layout.entries)?;
     let adapter = hold_adapter(
         host.open_adapter(&parameters.adapter_path)

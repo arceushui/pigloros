@@ -8,10 +8,10 @@
 //! **Kernel floor: Linux 6.9.** Before 6.9 every pidfd shares one anonymous inode, so the identity
 //! would be the same for all processes and the check would only prove that the peer has some
 //! pidfd. Both sides therefore refuse such a kernel: the provider records its identity only if it
-//! differs from the identity of pid 1 ([`provider_identity`]), and the launcher accepts the peer
+//! differs from the identity of pid 1 (`provider_identity`), and the launcher accepts the peer
 //! only if the identity of its own pidfd differs from the provider's (`launcher/barrier.rs`).
 //!
-//! **Launcher mode must never call [`provider_identity`]**: it opens a pidfd on pid 1, which in
+//! **Launcher mode must never call `provider_identity`**: it opens a pidfd on pid 1, which in
 //! the launcher's own pid namespace is the launcher itself (`tests/provider_process_creation_public.rs`
 //! checks that no launcher source calls it).
 //!
