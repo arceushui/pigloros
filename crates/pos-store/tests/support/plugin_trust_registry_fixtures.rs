@@ -497,6 +497,8 @@ pub fn tps1_signed_by(
 /// Verified evidence and the operator-signed TPS1 that maps it.
 pub struct Material {
     pub evidence: VerifiedPluginTrustEvidenceV1,
+    /// The raw PTR1 and PRV1 histories `evidence` was verified from.
+    pub chain: Chain,
     pub tps1: Vec<u8>,
     pub utc: i64,
     pub tick: u64,
@@ -507,6 +509,15 @@ impl Material {
     #[must_use]
     pub fn tps1_digest(&self) -> [u8; 32] {
         digest(&self.tps1)
+    }
+
+    /// The PTR1 and PRV1 histories as byte slices.
+    #[must_use]
+    pub fn histories(&self) -> (Vec<&[u8]>, Vec<&[u8]>) {
+        (
+            self.chain.roots.iter().map(Vec::as_slice).collect(),
+            self.chain.revocations.iter().map(Vec::as_slice).collect(),
+        )
     }
 
     /// A fixture value.
@@ -605,6 +616,7 @@ impl Env {
         let tps1 = tps1(&self.scope, &evidence, tps)?;
         Ok(Material {
             evidence,
+            chain: chain(&self.scope, spec)?,
             tps1,
             utc: spec.utc,
             tick: spec.tick,
