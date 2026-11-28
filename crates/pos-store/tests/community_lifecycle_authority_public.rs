@@ -241,6 +241,7 @@ fn operations() -> [Operation; 6] {
 struct Scope {
     resources: Vec<String>,
     actions: Vec<String>,
+    purposes: Vec<String>,
     audience: String,
     constraints: Vec<String>,
     consent_references: Vec<Hash>,
@@ -250,6 +251,7 @@ fn administrative(timeline: TimelineId, actions: &[&str]) -> Scope {
     Scope {
         resources: vec![lifecycle_resource(timeline)],
         actions: actions.iter().map(|action| (*action).to_owned()).collect(),
+        purposes: vec!["lifecycle-administration".to_owned()],
         audience: AUDIENCE.to_owned(),
         constraints: vec![],
         consent_references: vec![],
@@ -265,7 +267,7 @@ fn grant(id: u8, seq: u64, epoch: u64, scope: &Scope) -> Fallible<CapabilityGran
     let capability = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
         resources: sorted(scope.resources.clone()),
         actions: sorted(scope.actions.clone()),
-        purposes: vec!["lifecycle-administration".to_owned()],
+        purposes: scope.purposes.clone(),
         audiences: vec![scope.audience.clone()],
         actor_entity_ids: vec![actor()],
         subject_ids: vec![],
@@ -453,6 +455,56 @@ impl World {
 
     fn credential(&self, operation: &Operation) -> Fallible<Vec<u8>> {
         sign(self.record(operation)?, SEED)
+    }
+
+    /// The FAE1 of a `run_pass` call, with the execution nonce built from the
+    /// ADR field list (R8.1(4)).
+    fn execution_credential(
+        &self,
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+    ) -> Fallible<Vec<u8>> {
+        self.execution_credential_until(EXPIRES, timeline, reservation_operation_id)
+    }
+
+    /// An execution FAE1 that expires at `expires_at`.
+    fn execution_credential_until(
+        &self,
+        expires_at: u64,
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+    ) -> Fallible<Vec<u8>> {
+        let preimage = encode(&Value::Array(vec![
+            Value::Bytes(self.catalogue.as_bytes().to_vec()),
+            Value::Bytes(timeline.inner().to_bytes().to_vec()),
+            Value::Text("execute".to_owned()),
+            Value::Text(constraint('r', reservation_operation_id)),
+        ]))?;
+        sign(
+            AuthenticatedPrincipalRecordV1 {
+                principal: caller()?,
+                adapter_id: ADAPTER.to_owned(),
+                assurance: 2,
+                issued_at: ISSUED,
+                expires_at,
+                registry_binding: FAP_BINDING,
+                operation_nonce: *adr_h("ExecutionNonce", &preimage).as_bytes(),
+            },
+            SEED,
+        )
+    }
+
+    fn execution_call(
+        &mut self,
+        credential: &[u8],
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+    ) -> Result<CommunityAuthorityCallV1, Error> {
+        self.authority.authenticate(
+            credential,
+            Request::run_pass(timeline, reservation_operation_id)?,
+            &mut self.domain,
+        )
     }
 
     fn call(&mut self, operation: &Operation) -> Fallible<CommunityAuthorityCallV1> {
@@ -1257,6 +1309,7 @@ fn member_scope(timeline: TimelineId, implementation: &ImplementationKeyV1) -> F
     Ok(Scope {
         resources: vec![member_resource(timeline, implementation)?],
         actions: vec!["execute".to_owned(), "read".to_owned()],
+        purposes: vec!["lifecycle-administration".to_owned()],
         audience: RECIPIENT.to_owned(),
         constraints: vec![],
         consent_references: vec![],
@@ -1428,6 +1481,205 @@ fn a_refused_credential_consumes_no_wall_sample() -> TestResult {
         .authenticate(
             &world.credential(&initialize())?,
             request,
+            &mut world.domain
+        )
+        .is_ok());
+    Ok(())
+}
+
+/// The reservation operation of the `run_pass` calls below.
+const RESERVATION: [u8; 16] = [0x30; 16];
+
+/// The member scope of a `run_pass` grant: the execution purpose.
+fn execution_scope(timeline: TimelineId, implementation: &ImplementationKeyV1) -> Fallible<Scope> {
+    Ok(Scope {
+        purposes: vec!["community-execution".to_owned()],
+        ..member_scope(timeline, implementation)?
+    })
+}
+
+/// R8.1(2)-(4): a `run_pass` FAE1 carries the execution nonce, so it serves
+/// no administrative request and an administrative FAE1 serves no `run_pass`;
+/// the call's member `execute` request has the R8.1(3) fields; and a zero
+/// Timeline or reservation identity has no request.
+#[test]
+fn an_execution_credential_serves_only_its_run_pass_request() -> TestResult {
+    let release = implementation(3)?;
+    let member = CommunityMemberBindingV1::new(member_input(&release))?;
+    let member_grant = grant(1, 1, 0, &execution_scope(target(), &release)?)?;
+    let child_grant = grant(2, 2, 0, &execution_scope(other_timeline(), &release)?)?;
+    let admin_grant = grant(3, 3, 0, &administrative(target(), &ALL_ACTIONS))?;
+    let lifecycle_purpose = grant(4, 4, 0, &member_scope(target(), &release)?)?;
+    let mut world = World::new(&[
+        member_grant.clone(),
+        child_grant.clone(),
+        admin_grant.clone(),
+        lifecycle_purpose.clone(),
+    ])?;
+    let credential = world.execution_credential(target(), RESERVATION)?;
+    let call = world.execution_call(&credential, target(), RESERVATION)?;
+    let admission = world.authority.authorize_execution_member(
+        &call,
+        &member,
+        &world.domain,
+        member_grant.grant_id(),
+    )?;
+    let built = admission.request();
+    assert_eq!(built.resource(), member_resource(target(), &release)?);
+    assert_eq!(built.resource().len(), 114);
+    assert_eq!(built.data_category(), "community.execution-state");
+    assert_eq!(built.action(), "execute");
+    assert_eq!(built.purpose(), "community-execution");
+    assert_eq!(built.audience(), RECIPIENT);
+    assert_eq!(
+        built.environment_constraints().to_vec(),
+        vec![constraint('r', RESERVATION)]
+    );
+    assert_eq!(built.authenticated().principal(), &caller()?);
+    // A grant of another Timeline, an administrative grant and a grant of the
+    // in-operation purpose never match.
+    for leaf in [&child_grant, &admin_grant, &lifecycle_purpose] {
+        assert_eq!(
+            world
+                .authority
+                .authorize_execution_member(&call, &member, &world.domain, leaf.grant_id())
+                .err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    // An execution call has no administrative decision.
+    assert_eq!(
+        world
+            .authority
+            .authorize_administrative(&call, &world.domain, admin_grant.grant_id())
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // An execution call serves no other member request (`read`, nor `execute` under the
+    // in-operation purpose); the initializer read is refused in
+    // `community_initializer_public.rs`.
+    for action in [
+        CommunityMemberActionV1::Read,
+        CommunityMemberActionV1::Execute,
+    ] {
+        assert_eq!(
+            world
+                .authority
+                .authorize_member(
+                    &call,
+                    &member,
+                    action,
+                    &world.domain,
+                    member_grant.grant_id()
+                )
+                .err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    // An administrative call has no member `execute`, although its
+    // operation constraint is the same `r` constraint.
+    let abort = world.call(&pass_abort())?;
+    assert_eq!(
+        world
+            .authority
+            .authorize_execution_member(&abort, &member, &world.domain, member_grant.grant_id())
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// R8.1(4): the execution nonce separates the credentials by domain and
+/// binds the Timeline and the reservation operation; a zero Timeline or
+/// reservation identity has no request.
+#[test]
+fn the_execution_nonce_separates_domains_and_binds_its_fields() -> TestResult {
+    let release = implementation(3)?;
+    let member_grant = grant(1, 1, 0, &execution_scope(target(), &release)?)?;
+    let mut world = World::new(&[member_grant])?;
+    let credential = world.execution_credential(target(), RESERVATION)?;
+    assert!(world
+        .execution_call(&credential, target(), RESERVATION)
+        .is_ok());
+    let administrative = world.credential(&pass_abort())?;
+    assert_eq!(
+        world
+            .execution_call(&administrative, target(), RESERVATION)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        world
+            .authority
+            .authenticate(
+                &credential,
+                Request::derive(&pass_abort())?,
+                &mut world.domain
+            )
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // The nonce binds the Timeline and the reservation operation.
+    for (timeline, operation) in [(other_timeline(), RESERVATION), (target(), [0x31; 16])] {
+        assert_eq!(
+            world.execution_call(&credential, timeline, operation).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    for (timeline, operation) in [
+        (
+            TimelineId::from_ulid(Ulid::from_bytes([0; 16])),
+            RESERVATION,
+        ),
+        (target(), [0; 16]),
+    ] {
+        assert_eq!(
+            Request::run_pass(timeline, operation).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    Ok(())
+}
+
+/// R8.1(5), R8.1(8) step 3a: `authenticate` gives 12 for a `run_pass` call
+/// whose sample plus the 27 s decision deadline passes its decision bound, and
+/// accepts one that ends exactly at it. The bound is `B = min(t_r + 32 s,
+/// expires_at)`, so both sides of the minimum are checked.
+#[test]
+fn a_run_pass_call_must_fit_its_decision_deadline_by_its_bound() -> TestResult {
+    let release = implementation(3)?;
+    let member_grant = grant(1, 1, 0, &execution_scope(target(), &release)?)?;
+    let mut world = World::new(&[member_grant])?;
+    let deadline = 27_000_000;
+    // B = expires_at: exactly the deadline fits, a microsecond less does not.
+    let fits = world.execution_credential_until(NOW + deadline, target(), RESERVATION)?;
+    let call = world.execution_call(&fits, target(), RESERVATION)?;
+    assert_eq!(call.decision_bound(), WallTime::from_micros(NOW + deadline));
+    let short = world.execution_credential_until(NOW + deadline - 1, target(), RESERVATION)?;
+    assert_eq!(
+        world.execution_call(&short, target(), RESERVATION).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // B = D = t_r + 32 s, below the expiry: the call fits.
+    let long = world.execution_credential_until(NOW + 40_000_000, target(), RESERVATION)?;
+    let call = world.execution_call(&long, target(), RESERVATION)?;
+    assert_eq!(
+        call.decision_bound(),
+        WallTime::from_micros(NOW + 32_000_000)
+    );
+    // The check belongs to `run_pass`: a short administrative call is kept.
+    let short_admin = sign(
+        AuthenticatedPrincipalRecordV1 {
+            expires_at: NOW + 1_000,
+            ..world.record(&pass_abort())?
+        },
+        SEED,
+    )?;
+    assert!(world
+        .authority
+        .authenticate(
+            &short_admin,
+            Request::derive(&pass_abort())?,
             &mut world.domain
         )
         .is_ok());

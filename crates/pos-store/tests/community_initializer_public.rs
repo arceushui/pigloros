@@ -508,6 +508,26 @@ impl World {
                 Value::Text(request.operation_constraint()),
             ]))?,
         );
+        self.call_with(request, nonce)
+    }
+
+    /// A `run_pass` call (R8.1(4): the execution nonce over the Timeline,
+    /// `execute` and the reservation operation constraint).
+    fn execution_call(&mut self) -> Fallible<CommunityAuthorityCallV1> {
+        let request = Request::run_pass(target(), OPERATION)?;
+        let nonce = adr_h(
+            "ExecutionNonce",
+            &encode(&Value::Array(vec![
+                Value::Bytes(self.catalogue.as_bytes().to_vec()),
+                Value::Bytes(target().inner().to_bytes().to_vec()),
+                Value::Text("execute".to_owned()),
+                Value::Text(request.operation_constraint()),
+            ]))?,
+        );
+        self.call_with(request, nonce)
+    }
+
+    fn call_with(&mut self, request: Request, nonce: Hash) -> Fallible<CommunityAuthorityCallV1> {
         let credential = signing_key()?
             .sign_authenticated_principal(AuthenticatedPrincipalRecordV1 {
                 principal: caller()?,
@@ -716,6 +736,21 @@ fn initializer_requests_need_an_installed_state_and_catalogue() -> TestResult {
             Some(Error::EvidenceUnavailable)
         );
     }
+    // A `run_pass` call (R8.1) starts from no initializer.
+    let execution = world.execution_call()?;
+    assert_eq!(
+        world
+            .authority
+            .authorize_initializer(
+                &execution,
+                &owner,
+                initializer,
+                &world.domain,
+                exact.grant_id()
+            )
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
 

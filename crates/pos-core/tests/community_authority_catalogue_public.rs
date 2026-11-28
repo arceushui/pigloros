@@ -94,7 +94,7 @@ fn oracle(input: &Input) -> Fallible<Vec<u8>> {
     encode(&Value::Array(vec![
         bytes(b"CAP1"),
         uint(1),
-        Value::Array(vec![text("pos.community.authority-mapping"), uint(6)]),
+        Value::Array(vec![text("pos.community.authority-mapping"), uint(8)]),
         bytes(input.fap1_digest.as_bytes()),
         text(&input.audience),
         Value::Array(
