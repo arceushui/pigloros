@@ -220,6 +220,13 @@ def check_contract(workflow: dict, canary_script: str | None = None) -> None:
         or baseline.get("timeout-minutes") != 30
     ):
         raise AssertionError("baseline must run for every relevant change")
+    baseline_runs = [step for step in baseline["steps"] if "run" in step]
+    if baseline_runs != [{
+        "name": "Prove the mutation test harness",
+        "env": {"CARGO_INCREMENTAL": "1"},
+        "run": BASELINE_RUN,
+    }]:
+        raise AssertionError("baseline must execute the complete mutation harness")
     if baseline["steps"] != BASELINE_STEPS:
         raise AssertionError("baseline must retain its ordered, blocking steps and report")
     changes = jobs["mutation-changes"]

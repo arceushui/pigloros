@@ -226,6 +226,7 @@ jobs:
     steps:
       - name: Require every relevant mutation shard to pass
         run: |
+          set -euo pipefail
           test "${{ needs.mutation-changes.result }}" = success
           if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
             test "${{ needs.mutation-baseline.result }}" = success
