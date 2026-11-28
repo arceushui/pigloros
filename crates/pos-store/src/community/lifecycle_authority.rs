@@ -461,8 +461,9 @@ impl CommunityLifecycleAuthorityV1 {
     /// constraint; a `run_pass` request's is the execution nonce over its
     /// Timeline, `execute` and reservation operation constraint (R8.1(4)).
     /// A `run_pass` call must also fit: its sample plus the CDP1 decision
-    /// deadline must not pass its decision bound (R8.1(5)). Its principal must have a CAP1 actor row. The FAE1 is a bearer
-    /// credential: only its digest is kept, as the result's binding digest.
+    /// deadline must not pass its decision bound (R8.1(5)). Its principal
+    /// must have a CAP1 actor row. The FAE1 is a bearer credential: only its
+    /// digest is kept, as the result's binding digest.
     ///
     /// Only a verified credential reserves the trusted clock, on `domain`'s
     /// own clock authority. The reservation sample `t_r` is both `now` for
