@@ -296,6 +296,30 @@ fn probe_retained_events(events: &File) -> std::io::Result<()> {
     events.read_at(&mut [0_u8; 1], 0).map(|_| ())
 }
 
+/// Read the retained events file from its start, at most one byte past the limit.
+fn read_retained_events(events: &mut File) -> std::io::Result<Vec<u8>> {
+    events.seek(SeekFrom::Start(0))?;
+    let mut raw = Vec::new();
+    Read::take(&mut *events, MAX_EVENTS_BYTES + 1).read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
+/// Whether `error` is kernfs's answer for a node that was removed: `ENODEV`.
+fn removed_node(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(Errno::NODEV.raw_os_error())
+}
+
+/// A populated cgroup is refused; an empty one is observed through its raw events.
+fn events_basis(
+    raw: Vec<u8>,
+) -> Result<(AttemptCgroupEmptyBasis, Option<Vec<u8>>), AttemptCgroupError> {
+    if parse_populated(&raw)? {
+        Err(AttemptCgroupError::StillPopulated)
+    } else {
+        Ok((AttemptCgroupEmptyBasis::Events, Some(raw)))
+    }
+}
+
 impl BoundAttemptCgroup {
     pub(crate) fn open(
         root: CgroupRoot,
@@ -346,7 +370,7 @@ impl BoundAttemptCgroup {
                 inode: metadata.ino(),
             },
         };
-        let initial = bound.read_events()?;
+        let initial = bound.read_events(read_retained_events)?;
         parse_populated(&initial)?;
         Ok(bound)
     }
@@ -410,17 +434,19 @@ impl BoundAttemptCgroup {
     /// # Errors
     /// Rejects a populated, malformed, unreadable, or identity-replaced cgroup.
     pub fn observe_empty(&mut self) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        self.observe_empty_with(File::metadata, probe_retained_events)
+        self.observe_empty_with(File::metadata, probe_retained_events, read_retained_events)
     }
 
     /// `probe_events` reads the retained `cgroup.events` descriptor once the
     /// path is missing. kernfs keeps a removed directory's link count, so
     /// only `ENODEV` from that descriptor proves removal there; a renamed
-    /// live cgroup still reads, and every other outcome stays unproven.
+    /// live cgroup still reads, and every other outcome stays unproven. A cgroup that was removed
+    /// between the path check and the events read answers `ENODEV` to `read_events` the same way.
     fn observe_empty_with(
         &mut self,
         read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
         probe_events: impl FnOnce(&File) -> std::io::Result<()>,
+        read_events: impl FnOnce(&mut File) -> std::io::Result<Vec<u8>>,
     ) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
         let basis_and_raw = match self.inspect_path_with_metadata(read_metadata)? {
             BoundCgroupPath::Missing {
@@ -429,18 +455,10 @@ impl BoundAttemptCgroup {
             BoundCgroupPath::Missing {
                 retained_unlinked: false,
             } => match probe_events(&self.events) {
-                Err(error) if error.raw_os_error() == Some(Errno::NODEV.raw_os_error()) => {
-                    (AttemptCgroupEmptyBasis::Deleted, None)
-                }
+                Err(error) if removed_node(&error) => (AttemptCgroupEmptyBasis::Deleted, None),
                 _ => return Err(AttemptCgroupError::DeletionUnproven),
             },
-            BoundCgroupPath::Present => {
-                let raw = self.read_events()?;
-                if parse_populated(&raw)? {
-                    return Err(AttemptCgroupError::StillPopulated);
-                }
-                (AttemptCgroupEmptyBasis::Events, Some(raw))
-            }
+            BoundCgroupPath::Present => self.present_basis(read_events)?,
         };
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptCgroupEmptyObservation {
@@ -452,15 +470,25 @@ impl BoundAttemptCgroup {
         })
     }
 
-    fn read_events(&mut self) -> Result<Vec<u8>, AttemptCgroupError> {
-        self.events
-            .seek(SeekFrom::Start(0))
-            .map_err(AttemptCgroupError::EventsRead)?;
-        let mut raw = Vec::new();
-        (&mut self.events)
-            .take(MAX_EVENTS_BYTES + 1)
-            .read_to_end(&mut raw)
-            .map_err(AttemptCgroupError::EventsRead)?;
+    /// The basis of a cgroup whose path is still present: the events file says it is empty, or the
+    /// read finds the cgroup removed meanwhile (`ENODEV`).
+    fn present_basis(
+        &mut self,
+        read_events: impl FnOnce(&mut File) -> std::io::Result<Vec<u8>>,
+    ) -> Result<(AttemptCgroupEmptyBasis, Option<Vec<u8>>), AttemptCgroupError> {
+        match self.read_events(read_events) {
+            Err(AttemptCgroupError::EventsRead(error)) if removed_node(&error) => {
+                Ok((AttemptCgroupEmptyBasis::Deleted, None))
+            }
+            read => events_basis(read?),
+        }
+    }
+
+    fn read_events(
+        &mut self,
+        read: impl FnOnce(&mut File) -> std::io::Result<Vec<u8>>,
+    ) -> Result<Vec<u8>, AttemptCgroupError> {
+        let raw = read(&mut self.events).map_err(AttemptCgroupError::EventsRead)?;
         if raw.len() as u64 > MAX_EVENTS_BYTES {
             return Err(AttemptCgroupError::EventsTooLong);
         }
@@ -847,26 +875,73 @@ mod tests {
             Err(AttemptCgroupError::DeletionUnproven)
         ));
         // kernfs answers ENODEV for a removed node whose link count is kept.
-        let removed = bound.observe_empty_with(File::metadata, |_| {
-            Err(std::io::Error::from_raw_os_error(
-                Errno::NODEV.raw_os_error(),
-            ))
-        })?;
+        let removed = bound.observe_empty_with(
+            File::metadata,
+            |_| {
+                Err(std::io::Error::from_raw_os_error(
+                    Errno::NODEV.raw_os_error(),
+                ))
+            },
+            read_retained_events,
+        )?;
         assert_eq!(removed.basis(), AttemptCgroupEmptyBasis::Deleted);
         assert_eq!(removed.raw_events(), None);
         // Any other errno, or a non-OS error, fails closed.
         for errno in [Errno::IO, Errno::ACCESS, Errno::NOENT, Errno::BADF] {
             assert!(matches!(
-                bound.observe_empty_with(File::metadata, |_| {
-                    Err(std::io::Error::from_raw_os_error(errno.raw_os_error()))
-                }),
+                bound.observe_empty_with(
+                    File::metadata,
+                    |_| Err(std::io::Error::from_raw_os_error(errno.raw_os_error())),
+                    read_retained_events,
+                ),
                 Err(AttemptCgroupError::DeletionUnproven)
             ));
         }
         assert!(matches!(
-            bound.observe_empty_with(File::metadata, |_| Err(std::io::Error::other("no errno"))),
+            bound.observe_empty_with(
+                File::metadata,
+                |_| Err(std::io::Error::other("no errno")),
+                read_retained_events,
+            ),
             Err(AttemptCgroupError::DeletionUnproven)
         ));
+        Ok(())
+    }
+
+    /// A cgroup removed between the path check and the events read answers `ENODEV` to the read.
+    #[test]
+    fn a_cgroup_removed_during_the_events_read_is_deleted() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let directory = temporary.path().join("system.slice/test.service");
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("cgroup.events"), b"populated 1\n")?;
+        let mut bound = BoundAttemptCgroup::open(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([10; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+        )?;
+        let nodev = || std::io::Error::from_raw_os_error(Errno::NODEV.raw_os_error());
+        let removed =
+            bound.observe_empty_with(File::metadata, probe_retained_events, |_| Err(nodev()))?;
+        assert_eq!(removed.basis(), AttemptCgroupEmptyBasis::Deleted);
+        assert_eq!(removed.raw_events(), None);
+        // Any other failure of the read is the read's own error, and a populated cgroup stays so.
+        let other = bound.observe_empty_with(File::metadata, probe_retained_events, |_| {
+            Err(std::io::Error::from_raw_os_error(Errno::IO.raw_os_error()))
+        });
+        assert!(matches!(other, Err(AttemptCgroupError::EventsRead(_))));
+        let populated =
+            bound.observe_empty_with(File::metadata, probe_retained_events, read_retained_events);
+        assert!(matches!(populated, Err(AttemptCgroupError::StillPopulated)));
+        let empty = bound.observe_empty_with(File::metadata, probe_retained_events, |_| {
+            Ok(b"populated 0\n".to_vec())
+        })?;
+        assert_eq!(empty.basis(), AttemptCgroupEmptyBasis::Events);
+        let long = bound.observe_empty_with(File::metadata, probe_retained_events, |_| {
+            Ok(vec![b'x'; 4097])
+        });
+        assert!(matches!(long, Err(AttemptCgroupError::EventsTooLong)));
         Ok(())
     }
 
@@ -886,6 +961,7 @@ mod tests {
             .observe_empty_with(
                 |_| Err(std::io::Error::other("injected retained metadata failure")),
                 probe_retained_events,
+                read_retained_events,
             )
             .err();
         assert!(matches!(
@@ -904,6 +980,7 @@ mod tests {
                     }
                 },
                 probe_retained_events,
+                read_retained_events,
             )
             .err();
         assert!(matches!(
