@@ -12,8 +12,9 @@ const UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
 const SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
 /// The `ActiveState` values in which systemd has finished with a unit run.
 const SETTLED_STATES: [&str; 2] = ["inactive", "failed"];
-/// A unit with `RemainAfterExit=yes` whose main process exited successfully stays `active` with
-/// this `SubState` until it is stopped (ADR-069 R17-E6): its run is finished.
+/// A unit with `RemainAfterExit=yes` whose main process exited stays `active` with this
+/// `SubState` until it is stopped (ADR-069 R17-E6), for every payload exit the unit lists as a
+/// success: its run is finished.
 const ACTIVE: &str = "active";
 const EXITED: &str = "exited";
 
@@ -211,8 +212,9 @@ impl SystemdUnitOutcome {
 
 /// The `Result` systemd would have reported for `main` without `SuccessExitStatus=`.
 ///
-/// The attempt unit lists every exit status and signal as a success (ADR-069 R17-E6), so that a
-/// failed main exit leaves the unit `active (exited)` with its cgroup, and systemd reports
+/// The attempt unit lists the exit statuses `1..=199` and every signal as a success (ADR-069
+/// R17-E6), so that a failed main exit leaves the unit `active (exited)` with its cgroup, and
+/// systemd reports
 /// `success` whatever the main process did. The broker records the result of its own rule instead,
 /// which is systemd's `is_clean_exit` for a non-oneshot service: a nonzero exit status is
 /// `exit-code`, a signal other than the clean ones is `signal`, and a dump is `core-dump`. Every
@@ -921,9 +923,11 @@ mod tests {
         Ok(())
     }
 
-    /// The attempt unit lists every exit status and signal as a success (ADR-069 R17-E6), so
-    /// systemd reports `success` for a main process that failed, was killed or dumped core: the
-    /// result is derived from the main exit by the rule systemd applies without the list.
+    /// The attempt unit lists the exit statuses `1..=199` and every signal as a success (ADR-069
+    /// R17-E6), so systemd reports `success` for a main process that failed, was killed or
+    /// dumped core: the result is derived from the main exit by the rule systemd applies without
+    /// the list. A status in `200..=255` is systemd's own: it reports `exit-code` itself, which
+    /// passes through unchanged.
     #[tokio::test]
     async fn a_success_with_a_failed_main_exit_is_reported_as_its_derived_result() -> TestResult {
         let exit_code = |status| SystemdUnitOutcome::ExitCode { status };
@@ -931,7 +935,7 @@ mod tests {
         for (code, status, result, outcome) in [
             // A failed exit.
             (CLD_EXITED, 1, "exit-code", exit_code(1)),
-            (CLD_EXITED, 255, "exit-code", exit_code(255)),
+            (CLD_EXITED, 199, "exit-code", exit_code(199)),
             // A signal, a signal systemd treats as clean, and the file-size ceiling.
             (CLD_KILLED, 9, "signal", signaled(9, false)),
             (CLD_KILLED, 3, "signal", signaled(3, false)),
@@ -951,6 +955,9 @@ mod tests {
             assert_eq!(observed.outcome(), outcome, "{code} {status}");
             assert_eq!(observed.main_exit(), main_of(code, u8::try_from(status)?));
         }
+        let observed = read("exit-code", CLD_EXITED, 203).await??;
+        assert_eq!(observed.result().as_str(), "exit-code");
+        assert_eq!(observed.outcome(), exit_code(203));
         // No main exit recorded is still a contradiction for a success.
         assert!(matches!(
             read("success", CLD_NONE, 0).await?,
