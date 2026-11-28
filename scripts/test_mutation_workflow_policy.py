@@ -22,17 +22,22 @@ bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-basel
 """
 MUTATION_IF = (
     "needs.mutation-changes.outputs.relevant == 'true' && "
-    "needs.mutation-baseline.result == 'success'"
+    "needs.mutation-baseline.result == 'success' && "
+    "needs.mutation-canary.result == 'success'"
 )
 GATE_RUN = """test "${{ needs.mutation-changes.result }}" = success
 if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
   test "${{ needs.mutation-baseline.result }}" = success
+  test "${{ needs.mutation-canary.result }}" = success
   test "${{ needs.mutation.result }}" = success
 else
   test "${{ needs.mutation-baseline.result }}" = skipped
+  test "${{ needs.mutation-canary.result }}" = skipped
   test "${{ needs.mutation.result }}" = skipped
 fi
 """
+CANARY_RUN = "bash scripts/run_mutation_canary.sh"
+CANARY_SCRIPT_SHA256 = "3c9625dc976dcadef7b0676d39f7d9cb6c1f68ed834eb0aa54509cb44169b0b7"
 # Pin the complete reviewed parsed program, including comments and heredoc data.
 # This policy snapshot is not a shell-semantics oracle; digest changes need review.
 MUTATION_RUN_SHA256 = (
@@ -94,9 +99,58 @@ def check_contract(workflow: dict) -> None:
         "run": BASELINE_RUN,
     }]:
         raise AssertionError("baseline must execute the complete mutation harness")
+    changes = next(
+        step for step in jobs["mutation-changes"]["steps"]
+        if step.get("name") == "Classify changed paths"
+    )
+    if "scripts/run_mutation_canary.sh" not in changes["run"]:
+        raise AssertionError("canary changes must trigger the mutation workflow")
+    canary = jobs["mutation-canary"]
+    if (
+        canary.get("needs") != "mutation-changes"
+        or canary.get("if") != "needs.mutation-changes.outputs.relevant == 'true'"
+        or canary.get("timeout-minutes") != 10
+        or canary.get("env") is not None
+        or "continue-on-error" in canary
+    ):
+        raise AssertionError("run the canary for every relevant mutation change")
+    canary_toolchains = [
+        step for step in canary["steps"]
+        if step.get("uses", "").startswith("dtolnay/rust-toolchain@")
+    ]
+    if len(canary_toolchains) != 1 or canary_toolchains[0].get("with") != {
+        "toolchain": "${{ env.RUSTUP_TOOLCHAIN }}"
+    }:
+        raise AssertionError("the canary must use the mutation workflow's pinned nightly")
+    canary_installers = [
+        step for step in canary["steps"]
+        if step.get("uses", "").startswith("taiki-e/install-action@")
+    ]
+    if len(canary_installers) != 1 or canary_installers[0].get("with") != {
+        "tool": "cargo-mutants@27.1.0"
+    }:
+        raise AssertionError("the canary must use the pinned cargo-mutants release")
+    canary_runs = [step for step in canary["steps"] if "run" in step]
+    if canary_runs != [{
+        "name": "Run the deliberately weakened-test canary",
+        "run": CANARY_RUN,
+    }]:
+        raise AssertionError("the hosted canary must execute its reviewed script")
+    if hashlib.sha256(
+        (ROOT / "scripts/run_mutation_canary.sh").read_bytes()
+    ).hexdigest() != CANARY_SCRIPT_SHA256:
+        raise AssertionError("preserve the reviewed mutation-canary program")
+    canary_artifacts = [
+        step for step in canary["steps"]
+        if step.get("name") == "Upload mutation canary report"
+    ]
+    if len(canary_artifacts) != 1 or canary_artifacts[0].get("if") != "always()":
+        raise AssertionError("retain the hosted canary report on both success and failure")
     mutation = jobs["mutation"]
     if (
-        mutation.get("needs") != ["mutation-changes", "mutation-baseline"]
+        mutation.get("needs") != [
+            "mutation-changes", "mutation-baseline", "mutation-canary"
+        ]
         or mutation.get("if") != MUTATION_IF
     ):
         raise AssertionError("mutants require a successful same-harness baseline")
@@ -138,7 +192,9 @@ def check_contract(workflow: dict) -> None:
         raise AssertionError("preserve the reviewed mutation program, not inert command text")
     gate = jobs["mutation-gate"]
     if (
-        gate.get("needs") != ["mutation-changes", "mutation-baseline", "mutation"]
+        gate.get("needs") != [
+            "mutation-changes", "mutation-baseline", "mutation-canary", "mutation"
+        ]
         or gate.get("if") != "always()"
         or "continue-on-error" in gate
         or gate["steps"] != [{
@@ -347,12 +403,15 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
     def test_real_fan_in_rejects_unsuccessful_baseline_and_shards(self) -> None:
         run = self.workflow["jobs"]["mutation-gate"]["steps"][0]["run"]
 
-        def verdict(relevant: bool, changes: str, baseline: str, shards: str) -> int:
+        def verdict(
+            relevant: bool, changes: str, baseline: str, canary: str, shards: str
+        ) -> int:
             script = run
             for key, value in {
                 "mutation-changes.result": changes,
                 "mutation-changes.outputs.relevant": str(relevant).lower(),
                 "mutation-baseline.result": baseline,
+                "mutation-canary.result": canary,
                 "mutation.result": shards,
             }.items():
                 script = script.replace("${{ needs." + key + " }}", value)
@@ -361,15 +420,25 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
                 capture_output=True, check=False,
             ).returncode
 
-        self.assertEqual(verdict(True, "success", "success", "success"), 0)
-        self.assertEqual(verdict(False, "success", "skipped", "skipped"), 0)
+        self.assertEqual(verdict(True, "success", "success", "success", "success"), 0)
+        self.assertEqual(verdict(False, "success", "skipped", "skipped", "skipped"), 0)
         for state in ("failure", "cancelled", "skipped", ""):
             with self.subTest(state=state):
-                self.assertNotEqual(verdict(True, state, "success", "success"), 0)
-                self.assertNotEqual(verdict(True, "success", state, "success"), 0)
-                self.assertNotEqual(verdict(True, "success", "success", state), 0)
-        self.assertNotEqual(verdict(False, "success", "success", "skipped"), 0)
-        self.assertNotEqual(verdict(False, "success", "skipped", "failure"), 0)
+                self.assertNotEqual(
+                    verdict(True, state, "success", "success", "success"), 0
+                )
+                self.assertNotEqual(
+                    verdict(True, "success", state, "success", "success"), 0
+                )
+                self.assertNotEqual(
+                    verdict(True, "success", "success", state, "success"), 0
+                )
+                self.assertNotEqual(
+                    verdict(True, "success", "success", "success", state), 0
+                )
+        self.assertNotEqual(verdict(False, "success", "success", "skipped", "skipped"), 0)
+        self.assertNotEqual(verdict(False, "success", "skipped", "success", "skipped"), 0)
+        self.assertNotEqual(verdict(False, "success", "skipped", "skipped", "failure"), 0)
 
     def test_timeout_log_selector_preserves_the_timeout_status(self) -> None:
         run = next(
