@@ -1199,10 +1199,22 @@ impl Bootstrapped {
 pub fn metadata_registry(
     seal: &'static AuthorityTrustRootSealV1,
 ) -> Fallible<AuthorityRegistrySnapshotV1> {
+    metadata_registry_until(seal, EXPIRES)
+}
+
+/// [`metadata_registry`] of the owner whose authentication expires at
+/// `expires`: the principal's registry binding covers its expiry.
+///
+/// # Errors
+/// Returns the construction refusal.
+pub fn metadata_registry_until(
+    seal: &'static AuthorityTrustRootSealV1,
+    expires: u64,
+) -> Fallible<AuthorityRegistrySnapshotV1> {
     Ok(AuthorityRegistrySnapshotV1::try_new(
         seal,
         REGISTRY,
-        vec![metadata_principal(seal)?.registry_binding_digest()],
+        vec![metadata_principal_until(seal, expires)?.registry_binding_digest()],
         vec![metadata_grant(seal, METADATA_LEAF, 4)?.binding_digest()?],
         vec![],
     )?)

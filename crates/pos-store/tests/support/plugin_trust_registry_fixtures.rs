@@ -259,10 +259,12 @@ fn prv1(record: &RevocationRecord<'_>) -> TestResult<Vec<u8>> {
     let spec = record.spec;
     // Only the terminal record carries the spec's revocation Tick, so a later record that adds
     // a revocation keeps the digest of every earlier record: the earlier floors stay ancestors.
+    // A spec whose revocations are effective before TICK lowers every earlier record to that
+    // Tick too, as the chain's Ticks never decrease.
     let record_tick = if record.terminal {
         spec.revocation_tick
     } else {
-        TICK
+        TICK.min(spec.revocation_tick)
     };
     let (keys, artifacts) = if record.terminal {
         let mut epochs = spec.revoked_publisher_epochs.clone();

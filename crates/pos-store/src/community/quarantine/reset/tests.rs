@@ -33,14 +33,14 @@ use crate::community::{
     CommunityQuarantineContextV1, MemoryCommunityDomainV1,
 };
 use crate::community_initialization_fixture::{
-    hash, metadata_authority_until, metadata_registry, profile_until, target, Fallible,
+    hash, metadata_authority_until, metadata_registry_until, profile_until, target, Fallible,
     QuarantineCase, Revocation, DATA_LEAF, ENTRIES, EXPIRES, GENERATION, HORIZON,
     INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
 };
 use crate::erasure_budget_rows::{community_rows, erasure_row};
 #[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::PluginTrustPolicyRegistryV1;
-use crate::plugin_trust_registry_fixtures::{release_one, spec, tps_after};
+use crate::plugin_trust_registry_fixtures::{release_one, spec, tps_after, Spec};
 
 /// The trust-root seal of the test composition.
 const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
@@ -712,16 +712,18 @@ fn the_writer_refuses_at_and_after_the_deadline() -> TestResult {
     for (offset, refused) in [(bound - 1, false), (bound, true), (bound + 1_000, true)] {
         let mut case = seeded(Revocation::None)?;
         let zero = Duration::ZERO;
+        let marks = |case: &QuarantineCase| {
+            case.domain
+                .mono
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .samples_taken()
+        };
+        let setup = marks(&case);
         case.domain
             .script_mono(&[zero, zero, zero, zero, Duration::from_micros(offset), zero]);
         let result = reset(&mut case, &Claim::of_seeded())?;
-        let read = case
-            .domain
-            .mono
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .samples_taken();
-        assert_eq!(read, 6);
+        assert_eq!(marks(&case) - setup, 6);
         if refused {
             assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
             assert_eq!(ledger(&case)?.head, HEAD);
@@ -738,8 +740,11 @@ fn the_writer_refuses_at_and_after_the_deadline() -> TestResult {
 #[test]
 fn the_metadata_owners_expiry_lowers_the_deadline() -> TestResult {
     let mut case = seeded(Revocation::None)?;
-    case.domain.metadata =
-        metadata_authority_until(&SEAL, metadata_registry(&SEAL)?, (64, 20_000_000))?;
+    case.domain.metadata = metadata_authority_until(
+        &SEAL,
+        metadata_registry_until(&SEAL, 20_000_000)?,
+        (64, 20_000_000),
+    )?;
     assert_eq!(
         staged(&mut case, &Setup::standard())?
             .authority
@@ -815,11 +820,13 @@ fn a_late_writer_with_a_changed_decision_refuses() -> TestResult {
 #[test]
 fn a_changed_trust_snapshot_refuses_the_writer() -> TestResult {
     let mut case = seeded(Revocation::None)?;
-    let newer = case
-        .domain
-        .harness
-        .env
-        .material(&spec(2, 2).at(0, 0), &tps_after(&case.material))?;
+    let newer = case.domain.harness.env.material(
+        &Spec {
+            revocation_tick: 0,
+            ..spec(2, 2).at(0, 0)
+        },
+        &tps_after(&case.material),
+    )?;
     let anchor = case.domain.harness.env.anchor.clone();
     let trusted = newer.trusted()?;
     let before = untouched(&case)?;
