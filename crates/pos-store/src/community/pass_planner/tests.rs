@@ -1218,7 +1218,7 @@ fn a_used_control_identity_gives_4_before_every_other_5f_check() -> TestResult {
             let owner = if under_root { root } else { timeline() };
             domain.quarantine_controls.insert(
                 (owner, identity),
-                CommittedQuarantineControlV1::reset_at(identity),
+                CommittedQuarantineControlV1::reset_at(owner, identity),
             );
         }
         let mut input = observation_input(root, &stored);

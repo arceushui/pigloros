@@ -331,6 +331,7 @@ impl MemoryCommunityDomainV1 {
         // ordinal in its own transaction (annex §4). Nothing is burned here.
         let outcome = horizons.horizons.outcome_micros;
         let allocated = self.reservation_for(&input, &cri1, state, outcome)?;
+        self.check_control_namespace(input.timeline, allocated.materialization_id)?;
         let (reservation, ordinals) = (allocated.reservation, allocated.ordinals);
         let facts = input.pass;
         // The materialization's rows bind in the Reserve transaction; the
@@ -693,7 +694,25 @@ impl MemoryCommunityDomainV1 {
         staged: &CommunityStagedReserveV1,
     ) -> Result<(), Error> {
         self.check_apply_identity(staged.key)?;
+        self.check_control_namespace(staged.key.0, staged.materialization_id)?;
         self.check_ordinals(staged)
+    }
+
+    /// R16.9(4) at the writer: the materialization's `M_id` is not a
+    /// committed control identity of T (`Conflict`, 4). The planner checked
+    /// it on a read of the domain; a control committed since is caught here,
+    /// at the stage and again at the apply, which hold the domain.
+    fn check_control_namespace(
+        &self,
+        timeline: TimelineId,
+        identity: Option<[u8; 16]>,
+    ) -> Result<(), Error> {
+        match identity {
+            Some(identity) if self.quarantine_controls.contains_key(&(timeline, identity)) => {
+                Err(Error::Conflict)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The identity is not recorded (`Conflict`), T has no other pending

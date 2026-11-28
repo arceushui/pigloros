@@ -339,9 +339,9 @@ pub(super) struct CommittedQuarantineControlV1 {
 
 #[cfg(test)]
 impl CommittedQuarantineControlV1 {
-    /// A retained reset under `identity`, standing for any committed
-    /// control of T's Control namespace.
-    pub(super) fn reset_at(identity: [u8; 16]) -> Self {
+    /// A retained reset of `timeline` under `identity`, standing for any
+    /// committed control of T's Control namespace.
+    pub(super) fn reset_at(timeline: TimelineId, identity: [u8; 16]) -> Self {
         let reference = ArtifactRefV1 {
             schema_id: 1,
             byte_length: 1,
@@ -360,7 +360,7 @@ impl CommittedQuarantineControlV1 {
                 authorization_not_after_micros: 1,
             }),
             receipt: CommunityQuarantineReceiptV1 {
-                timeline: TimelineId::from_ulid(ulid::Ulid::from_bytes([1; 16])),
+                timeline,
                 control_operation_id: identity,
                 request_digest: Hash::from_bytes([4; 32]),
                 selected_ledger_digest: Hash::from_bytes([5; 32]),

@@ -94,9 +94,11 @@ pub trait CommunityStoreDomainV1 {
     ) -> Result<(), Error>;
 
     /// Whether `identity` is already a committed control identity of
-    /// `timeline` (a CQC1 or CGC1 `control_operation_id`): T's Control
-    /// namespace, which an observation materialization's `M_id` joins
-    /// (ADR-129 R9.7).
+    /// `timeline`: T's Control namespace, which an observation
+    /// materialization's `M_id` joins (ADR-129 R9.7). It covers the CQC1
+    /// controls of `quarantine_controls`, failure-abort controls included;
+    /// CGC1 controls are not retained yet and are not covered. The non-Linux
+    /// Memory domain has no controls, so it answers false.
     fn control_identity_used(&self, timeline: TimelineId, identity: [u8; 16]) -> bool;
 
     /// The domain's own Event history and the pinned Hasher its chains are
