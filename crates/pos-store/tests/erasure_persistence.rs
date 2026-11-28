@@ -44,6 +44,10 @@ use erasure_support::{
 use pos_store::sqlite::{SqliteStore, SqliteStoreOpenOptionsV1};
 
 #[cfg(all(target_os = "linux", feature = "test-support"))]
+#[path = "erasure_persistence/fence_reconcile.rs"]
+mod fence_reconcile;
+
+#[cfg(all(target_os = "linux", feature = "test-support"))]
 #[path = "erasure_persistence/fence_writers.rs"]
 mod fence_writers;
 
