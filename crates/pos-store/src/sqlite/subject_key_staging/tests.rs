@@ -828,9 +828,9 @@ fn no_pending_owner_signing_request_lists_nothing() -> TestResult {
 #[test]
 fn every_epoch_of_the_owner_signing_identity_is_listed() -> TestResult {
     let mut store = registry_store()?;
-    pend(&mut store, owner_signing(3)?, 53)?;
     pend(&mut store, owner_signing(1)?, 51)?;
     pend(&mut store, owner_signing(2)?, 52)?;
+    pend(&mut store, owner_signing(3)?, 53)?;
     assert_eq!(
         sorted_signing(&store)?,
         vec![
