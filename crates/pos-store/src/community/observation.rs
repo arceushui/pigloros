@@ -251,7 +251,8 @@ pub fn prepare_community_observation_v1<D: CommunityStoreDomainV1>(
     materialization: &CommunityObservationMaterializationV1,
 ) -> Result<CommunityObservationSourcesV1, Error> {
     let input = &materialization.0;
-    check_consumers(input)
+    check_materialization_id(domain, input.timeline, pass.reservation_operation_id)
+        .and_then(|()| check_consumers(input))
         .and_then(|()| check_capacity(input))
         .and_then(|()| check_installation(installation, input))
         .and_then(|()| {
@@ -259,6 +260,26 @@ pub fn prepare_community_observation_v1<D: CommunityStoreDomainV1>(
             recheck_history(events, hasher, EVENT_READ_BOUNDS, input)
         })
         .and_then(|history| mint_sources(installation, pass, input, &history))
+}
+
+/// R10.7 5f, first: the materialization's `M_id` must not equal a committed
+/// control identity of T (R9.7, I251). It gives 4 before any history read,
+/// fold-cost check or store re-check, and the caller retries under a new
+/// `reservation_operation_id`.
+fn check_materialization_id<D: CommunityStoreDomainV1>(
+    domain: &D,
+    timeline: TimelineId,
+    reservation_operation_id: [u8; 16],
+) -> Result<(), Error> {
+    community_observation_materialization_id_v1(timeline, reservation_operation_id).and_then(
+        |identity| {
+            if domain.control_identity_used(timeline, identity) {
+                Err(Error::Conflict)
+            } else {
+                Ok(())
+            }
+        },
+    )
 }
 
 /// The history read bounds (owner 2026-11-21, #560): at most 4,096 Events

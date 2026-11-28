@@ -6,6 +6,8 @@
 //! lost identity.
 
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 
 use pos_core::community_lifecycle::{
     CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
@@ -221,6 +223,11 @@ pub struct MemoryCommunityDomainV1 {
     /// retry key (ADR-129 R15.3(2) step 4).
     #[cfg(target_os = "linux")]
     pub(super) pass_aborts: BTreeMap<(TimelineId, [u8; 16]), CommittedPassAbortV1>,
+    /// The `(T, M_id)` entries of every committed observation
+    /// materialization: its control identity in T's Control namespace, which
+    /// the CGC1 and CQC1 `control_operation_id`s share (R9.7, R16.9(4)).
+    #[cfg(target_os = "linux")]
+    pub(super) materialization_ids: BTreeSet<(TimelineId, [u8; 16])>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -281,6 +288,8 @@ impl MemoryCommunityDomainV1 {
                 burned_materialization: None,
                 #[cfg(target_os = "linux")]
                 pass_aborts: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                materialization_ids: BTreeSet::new(),
             })
         }
     }

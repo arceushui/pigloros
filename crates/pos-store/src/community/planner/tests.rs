@@ -91,6 +91,10 @@ impl CommunityStoreDomainV1 for Fake<'_> {
         self.inner.event_history()
     }
 
+    fn control_identity_used(&self, timeline: pos_core::TimelineId, identity: [u8; 16]) -> bool {
+        self.inner.control_identity_used(timeline, identity)
+    }
+
     fn inventory_generation(&self) -> u64 {
         self.inventory_generation
     }

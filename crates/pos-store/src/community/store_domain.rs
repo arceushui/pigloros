@@ -32,7 +32,7 @@ use pos_core::trusted_clock::{
 use pos_core::WallTime;
 use pos_core::{
     AuthorityPersistencePortV1, AuthorizationRequestV1, CapabilityGrantV1, Hash,
-    PersistedAuthorityV1,
+    PersistedAuthorityV1, TimelineId,
 };
 
 #[cfg(target_os = "linux")]
@@ -92,6 +92,14 @@ pub trait CommunityStoreDomainV1 {
         mono: &mut dyn GuardMonotonicSourceV1,
         bound: WallTime,
     ) -> Result<(), Error>;
+
+    /// Whether `identity` is already a committed control identity of
+    /// `timeline`: T's Control namespace, which an observation
+    /// materialization's `M_id` joins (ADR-129 R9.7). It covers the CQC1
+    /// controls of `quarantine_controls`, failure-abort controls included;
+    /// CGC1 controls are not retained yet and are not covered. The non-Linux
+    /// Memory domain has no controls, so it answers false.
+    fn control_identity_used(&self, timeline: TimelineId, identity: [u8; 16]) -> bool;
 
     /// The domain's own Event history and the pinned Hasher its chains are
     /// built with: the store-side re-check of an observation (ADR-129
@@ -239,6 +247,18 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
             .filter(|now| *now < bound.as_micros())
             .map(drop)
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn control_identity_used(&self, timeline: TimelineId, identity: [u8; 16]) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.quarantine_controls.contains_key(&(timeline, identity))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (timeline, identity);
+            false
+        }
     }
 
     fn event_history(&self) -> (&dyn EventStore, &dyn Hasher) {

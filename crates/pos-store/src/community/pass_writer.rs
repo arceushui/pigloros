@@ -59,12 +59,12 @@
 //! discard.
 
 use pos_core::community_lifecycle::{
-    community_prepared_input_set_digest_v1, CommunityGraphCountsV1,
-    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1, CommunityPassGraphTermsV1,
-    CommunityPassKeyV1, CommunityReservationInputV1, CommunityReservationRequestInputV1,
-    CommunityReservationRequestV1, CommunityReservationV1, CommunityScopeMemberV1,
-    CommunitySelectionInputV1, CommunitySelectionV1, CommunitySharedCountsV1,
-    CommunityTimelineFloorsV1,
+    community_observation_materialization_id_v1, community_prepared_input_set_digest_v1,
+    CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
+    CommunityPassGraphTermsV1, CommunityPassKeyV1, CommunityReservationInputV1,
+    CommunityReservationRequestInputV1, CommunityReservationRequestV1, CommunityReservationV1,
+    CommunityScopeMemberV1, CommunitySelectionInputV1, CommunitySelectionV1,
+    CommunitySharedCountsV1, CommunityTimelineFloorsV1,
 };
 use pos_core::store::EventStore;
 use pos_core::{AuthorityTrustRootSealV1, Hash, Seq, TimelineId};
@@ -211,6 +211,33 @@ pub struct CommunityStagedReserveV1 {
     pub(super) request: CommunityReservationRequestInputV1,
     /// The failure cohort key's scope set digest.
     pub(super) failure_scope: Hash,
+    /// The minted materialization's control identity `M_id`, derived once at
+    /// the stage from T and the reservation operation (R9.7), which the
+    /// commit adds to T's Control namespace index (R16.9(4)).
+    pub(super) materialization_id: Option<[u8; 16]>,
+}
+
+/// What a Reserve allocated at the stage: its CPR1, its ordinals and the
+/// control identity of the materialization it mints.
+struct AllocatedV1 {
+    reservation: CommunityReservationInputV1,
+    ordinals: (u64, u64),
+    materialization_id: Option<[u8; 16]>,
+}
+
+/// The control identity `M_id` of the materialization a Reserve mints, none
+/// for a reused observation (R9.7).
+fn materialization_id(input: &CommunityReserveInputV1) -> Result<Option<[u8; 16]>, Error> {
+    input
+        .minted
+        .as_ref()
+        .map(|_| {
+            community_observation_materialization_id_v1(
+                input.timeline,
+                input.reservation_operation_id,
+            )
+        })
+        .transpose()
 }
 
 /// One Commit's writer inputs (R10.3(6), R11.3, R13.1(4)).
@@ -303,7 +330,8 @@ impl MemoryCommunityDomainV1 {
         // The Reserve allocates its native producer ordinal and its pass
         // ordinal in its own transaction (annex §4). Nothing is burned here.
         let outcome = horizons.horizons.outcome_micros;
-        let (reservation, ordinals) = self.reservation_for(&input, &cri1, state, outcome)?;
+        let allocated = self.allocate_reservation(&input, &cri1, state, outcome)?;
+        let (reservation, ordinals) = (allocated.reservation, allocated.ordinals);
         let facts = input.pass;
         // The materialization's rows bind in the Reserve transaction; the
         // entry holds only the rest and `F_p` (R13.1(4)).
@@ -336,6 +364,7 @@ impl MemoryCommunityDomainV1 {
             pass_ordinal: ordinals.1,
             request: input.request,
             failure_scope: facts.scope_set_digest,
+            materialization_id: allocated.materialization_id,
         })
     }
 
@@ -360,6 +389,20 @@ impl MemoryCommunityDomainV1 {
         }
     }
 
+    /// [`Self::reservation_for`], once the materialization's control identity
+    /// is known not to be a committed control of T (R16.9(4)).
+    fn allocate_reservation(
+        &self,
+        input: &CommunityReserveInputV1,
+        cri1: &CommunityReservationRequestV1,
+        state: &CommunityPassStateV1,
+        outcome: u64,
+    ) -> Result<AllocatedV1, Error> {
+        let allocated = self.reservation_for(input, cri1, state, outcome)?;
+        self.check_control_namespace(input.timeline, allocated.materialization_id)?;
+        Ok(allocated)
+    }
+
     /// The CPR1 of a Reserve and the ordinals it allocated: the next native
     /// producer ordinal and the next pass ordinal of T.
     fn reservation_for(
@@ -368,9 +411,15 @@ impl MemoryCommunityDomainV1 {
         cri1: &CommunityReservationRequestV1,
         state: &CommunityPassStateV1,
         outcome: u64,
-    ) -> Result<(CommunityReservationInputV1, (u64, u64)), Error> {
+    ) -> Result<AllocatedV1, Error> {
         let ordinals = self.next_ordinals(state)?;
-        mint_reservation(input, cri1, ordinals, outcome).map(|reservation| (reservation, ordinals))
+        mint_reservation(input, cri1, ordinals, outcome).and_then(|reservation| {
+            materialization_id(input).map(|materialization_id| AllocatedV1 {
+                reservation,
+                ordinals,
+                materialization_id,
+            })
+        })
     }
 
     /// The next native producer ordinal (the burned counter's) and the next
@@ -637,9 +686,11 @@ impl MemoryCommunityDomainV1 {
     pub(super) fn publish_reserve(&mut self, staged: CommunityStagedReserveV1) {
         let (timeline, _) = staged.key;
         self.native_producer_ordinal = staged.native_ordinal;
-        if staged.minted.is_some() {
-            // The burned ordinal is consumed by the materialization.
+        if let Some(identity) = staged.materialization_id {
+            // The burned ordinal is consumed by the materialization, whose
+            // control identity joins T's Control namespace.
             self.burned_materialization = None;
+            self.materialization_ids.insert((timeline, identity));
         }
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
@@ -655,8 +706,32 @@ impl MemoryCommunityDomainV1 {
         &self,
         staged: &CommunityStagedReserveV1,
     ) -> Result<(), Error> {
-        self.check_apply_identity(staged.key)?;
+        self.check_apply_slot(staged)?;
         self.check_ordinals(staged)
+    }
+
+    /// The apply's identity checks, then the materialization's control
+    /// identity against T's committed controls (R16.9(4)).
+    fn check_apply_slot(&self, staged: &CommunityStagedReserveV1) -> Result<(), Error> {
+        self.check_apply_identity(staged.key)?;
+        self.check_control_namespace(staged.key.0, staged.materialization_id)
+    }
+
+    /// R16.9(4) at the writer: the materialization's `M_id` is not a
+    /// committed control identity of T (`Conflict`, 4). The planner checked
+    /// it on a read of the domain; a control committed since is caught here,
+    /// at the stage and again at the apply, which hold the domain.
+    fn check_control_namespace(
+        &self,
+        timeline: TimelineId,
+        identity: Option<[u8; 16]>,
+    ) -> Result<(), Error> {
+        match identity {
+            Some(identity) if self.quarantine_controls.contains_key(&(timeline, identity)) => {
+                Err(Error::Conflict)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The identity is not recorded (`Conflict`), T has no other pending
