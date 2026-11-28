@@ -37,6 +37,10 @@
 //! It re-arms only the `F_q` shares a pre-execution `SetReason` spent
 //! (R15.3(6)).
 //!
+//! This domain has no context-wide operation guard (17, or 15): neither the
+//! `SetReason` nor the authenticated Abort has one, and the pass's own live
+//! call is judged by the pass planner. A reset's guard lands with A5.
+//!
 //! The commit advances the inventory generation once, as every committed
 //! control does. The reset's CAV1, CAU1, metadata key and sealed records are
 //! slice R15-6b's.
@@ -141,6 +145,11 @@ fn decision_key(decision: &AuthorizationDecisionV1) -> DecisionKeyV1 {
         decision.grant_chain_bindings().to_vec(),
     )
 }
+
+/// What the writer compares: the administrative decision's leaf and
+/// authorization ref, the metadata decision's key and the registry's TPS1
+/// digest.
+type ResetDecisionsV1 = (Hash, ArtifactRefV1, DecisionKeyV1, Hash);
 
 /// What the authority steps of a reset found: the host-derived CQC1 fields
 /// and the decisions the writer re-checks.
@@ -265,6 +274,7 @@ impl MemoryCommunityDomainV1 {
                 control_operation_id: call.control_operation_id,
             },
         )?;
+        CommunityQuarantineReasonsV1::from_reasons(call.expected_reasons).validate()?;
         let authenticated = lifecycle.authenticate(call.credential, request, self)?;
         let administrative =
             lifecycle.authorize_administrative(&authenticated, self, call.administrative_leaf)?;
@@ -354,7 +364,8 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// Whether the decision's principal is the grantee of `leaf_grant_id`'s
-    /// leaf grant.
+    /// leaf grant. A leaf grant that no longer loads has no grantee, so it is
+    /// not the decision's principal and the retry gives 4 (A5.3(6)).
     fn is_grantee(
         &self,
         leaf_grant_id: Hash,
@@ -431,8 +442,10 @@ impl MemoryCommunityDomainV1 {
     /// Evaluate the member's release on this domain's own registry under the
     /// scope's retained anchor and TPS1 (R16.6): the PTR1 and PRV1 histories
     /// are verified at the host's UTC second and Tick. A release the registry
-    /// does not currently admit, a revoked one included, gives 12. Returns
-    /// the TPS1 digest the evaluation read, the CQC1 trust snapshot.
+    /// does not currently admit, a revoked one included, gives 12, and so
+    /// does any registry error, a storage fault or a poisoned handle included
+    /// (R6.5(4): the store's registry reads answer 12 for any registry error).
+    /// Returns the TPS1 digest the evaluation read, the CQC1 trust snapshot.
     fn evaluate_reset_trust(
         &self,
         scope: &str,
@@ -453,9 +466,13 @@ impl MemoryCommunityDomainV1 {
             .or(Err(Error::EvidenceUnavailable))
     }
 
-    /// The writer (A5.4, R16.7 step 7): the decisions and the registry TPS1
-    /// digest still equal the evaluated ones, the writer is before `B`, and
-    /// the inventory generation and CSI1 are unmoved; then the commit.
+    /// The writer (A5.4, R16.7 step 7), refusing in the spec's order: the
+    /// writer is before `B`, then the decisions and the registry TPS1 digest
+    /// still equal the evaluated ones, then the inventory generation and CSI1
+    /// are unmoved (all 12); then the commit.
+    ///
+    /// The decisions are read before the call is consumed by the bound check
+    /// and judged after it, so the bound is the first refusal.
     fn commit_reset(
         &mut self,
         context: CommunityQuarantineContextV1<'_>,
@@ -463,8 +480,23 @@ impl MemoryCommunityDomainV1 {
         metadata: &mut CommunityMetadataAuthorityV1,
         (staged, authenticated): (StagedResetV1, CommunityAuthorityCallV1),
     ) -> Result<CommunityQuarantineReceiptV1, Error> {
-        self.reset_authority_unchanged(context, lifecycle, metadata, (&staged, &authenticated))?;
+        let authority = &staged.authority;
+        let found = self.reset_decisions_now(
+            context,
+            lifecycle,
+            metadata,
+            (authority.leaf_grant_id, &authenticated),
+        );
         lifecycle.check_writer_bound(authenticated, self)?;
+        let evaluated = (
+            authority.leaf_grant_id,
+            authority.authorization_ref,
+            authority.metadata.clone(),
+            staged.premises.trust_snapshot_digest,
+        );
+        if found? != evaluated {
+            return Err(Error::EvidenceUnavailable);
+        }
         self.selection_unmoved(
             staged.inventory_generation,
             staged.premises.selection_address,
@@ -472,37 +504,26 @@ impl MemoryCommunityDomainV1 {
         Ok(self.retain_reset(staged))
     }
 
-    /// The administrative and metadata decisions, evaluated again, and the
-    /// registry's TPS1 digest equal what the premises evaluated (12).
-    fn reset_authority_unchanged(
+    /// The administrative and metadata decisions of the call evaluated again,
+    /// and the registry's TPS1 digest: what the writer compares with the
+    /// premises' (12 when any cannot be read).
+    fn reset_decisions_now(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         lifecycle: &CommunityLifecycleAuthorityV1,
         metadata: &mut CommunityMetadataAuthorityV1,
-        (staged, authenticated): (&StagedResetV1, &CommunityAuthorityCallV1),
-    ) -> Result<(), Error> {
-        let authority = &staged.authority;
+        (leaf_grant_id, authenticated): (Hash, &CommunityAuthorityCallV1),
+    ) -> Result<ResetDecisionsV1, Error> {
         let administrative =
-            lifecycle.authorize_administrative(authenticated, self, authority.leaf_grant_id)?;
+            lifecycle.authorize_administrative(authenticated, self, leaf_grant_id)?;
         let write = self.reset_metadata_write(context, metadata)?;
         let policy = CommunityStoreDomainV1::plugin_trust_policy(self, lifecycle.trust_scope())?;
-        let found = (
+        Ok((
             administrative.leaf_grant_id(),
             administrative.authorization_ref(),
             write,
             Hash::from_bytes(policy.tps1_digest()),
-        );
-        let evaluated = (
-            authority.leaf_grant_id,
-            authority.authorization_ref,
-            authority.metadata.clone(),
-            staged.premises.trust_snapshot_digest,
-        );
-        if found == evaluated {
-            Ok(())
-        } else {
-            Err(Error::EvidenceUnavailable)
-        }
+        ))
     }
 
     /// Retain the reset: the successor ledger, the retry index entry, the

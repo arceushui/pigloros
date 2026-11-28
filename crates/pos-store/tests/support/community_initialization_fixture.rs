@@ -940,6 +940,17 @@ pub fn data_grant(
 pub fn metadata_principal(
     seal: &'static AuthorityTrustRootSealV1,
 ) -> Fallible<AuthenticatedPrincipalResultV1> {
+    metadata_principal_until(seal, EXPIRES)
+}
+
+/// [`metadata_principal`] whose authentication expires at `expires`.
+///
+/// # Errors
+/// Returns the construction refusal.
+pub fn metadata_principal_until(
+    seal: &'static AuthorityTrustRootSealV1,
+    expires: u64,
+) -> Fallible<AuthenticatedPrincipalResultV1> {
     Ok(AuthenticatedPrincipalResultV1::try_from_draft(
         seal,
         AuthenticatedPrincipalDraftV1 {
@@ -947,7 +958,7 @@ pub fn metadata_principal(
             adapter_id: "metadata-adapter".to_owned(),
             assurance: AssuranceLevelV1::try_new(1)?,
             issued_at: WallTime::from_micros(1),
-            expires_at: WallTime::from_micros(EXPIRES),
+            expires_at: WallTime::from_micros(expires),
             binding_digest: hash(39),
         },
     )?)
@@ -1207,11 +1218,24 @@ pub fn metadata_authority(
     registry: AuthorityRegistrySnapshotV1,
     samples: usize,
 ) -> Fallible<CommunityMetadataAuthorityV1> {
+    metadata_authority_until(seal, registry, (samples, EXPIRES))
+}
+
+/// [`metadata_authority`] whose owner's authentication expires at the second
+/// value of `(samples, expires)`.
+///
+/// # Errors
+/// Returns the construction refusal.
+pub fn metadata_authority_until(
+    seal: &'static AuthorityTrustRootSealV1,
+    registry: AuthorityRegistrySnapshotV1,
+    (samples, expires): (usize, u64),
+) -> Fallible<CommunityMetadataAuthorityV1> {
     Ok(CommunityMetadataAuthorityV1::new(
         seal,
         CommunityMetadataAuthorityInputV1 {
             registry,
-            principal: metadata_principal(seal)?,
+            principal: metadata_principal_until(seal, expires)?,
             actor_entity_id: actor(),
             principal_role: AuthorityRoleV1::Actor,
             audience: METADATA_AUDIENCE.to_owned(),

@@ -33,8 +33,9 @@ use crate::community::{
     CommunityQuarantineContextV1, MemoryCommunityDomainV1,
 };
 use crate::community_initialization_fixture::{
-    hash, profile_until, target, Fallible, QuarantineCase, Revocation, DATA_LEAF, ENTRIES, EXPIRES,
-    GENERATION, HORIZON, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
+    hash, metadata_authority_until, metadata_registry, profile_until, target, Fallible,
+    QuarantineCase, Revocation, DATA_LEAF, ENTRIES, EXPIRES, GENERATION, HORIZON,
+    INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
 };
 use crate::erasure_budget_rows::{community_rows, erasure_row};
 use crate::plugin_trust_registry::PluginTrustPolicyRegistryV1;
@@ -68,6 +69,9 @@ struct Setup {
     leaf: Hash,
     expires: u64,
     histories: bool,
+    /// The metadata authority's leaf grant the policy names, if not the
+    /// installed one.
+    metadata_leaf: Option<Hash>,
 }
 
 impl Setup {
@@ -77,6 +81,7 @@ impl Setup {
             leaf: DATA_LEAF,
             expires: EXPIRES,
             histories: true,
+            metadata_leaf: None,
         }
     }
 
@@ -195,7 +200,11 @@ fn with_call<T>(
 ) -> Fallible<T> {
     let rows = case.roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
-    let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
+    let mut input = *case.domain.policy.as_input();
+    if let Some(leaf) = setup.metadata_leaf {
+        input.metadata_authority_leaf_grant = leaf;
+    }
+    let policy = CommunityMetadataPolicyV1::new(input)?;
     let projection = release_one().projection()?;
     let credential = credential(case, claim, setup)?;
     let (ptr1, prv1) = if setup.histories {
@@ -278,11 +287,11 @@ fn staged(case: &mut QuarantineCase, setup: &Setup) -> Fallible<StagedResetV1> {
     .map_err(Into::into)
 }
 
-/// The reset of the seeded claim, with `seam` run on the domain between its
-/// last step before the writer and the writer.
+/// The reset of the seeded claim, with `seam` run on the domain and the
+/// staged reset between its last step before the writer and the writer.
 fn reset_between(
     case: &mut QuarantineCase,
-    seam: impl FnOnce(&mut MemoryCommunityDomainV1),
+    seam: impl FnOnce(&mut MemoryCommunityDomainV1, &mut StagedResetV1),
 ) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
     with_call(
         case,
@@ -291,8 +300,8 @@ fn reset_between(
         |domain, context, authority, metadata, call| match domain
             .prepare_reset(context, authority, metadata, call)?
         {
-            ResetPreparedV1::Staged(staged, authenticated) => {
-                seam(domain);
+            ResetPreparedV1::Staged(mut staged, authenticated) => {
+                seam(domain, &mut staged);
                 domain.commit_reset(context, authority, metadata, (*staged, authenticated))
             }
             ResetPreparedV1::Original(receipt) => Ok(receipt),
@@ -494,8 +503,8 @@ fn a_materialization_identity_conflicts() -> TestResult {
 }
 
 /// The premises, each refused with its code and nothing changed: another
-/// ledger digest or reason set (4), another generation (5) and head (6),
-/// no index row (12).
+/// ledger digest or reason set (4), a reason set that is not valid (3),
+/// another generation (5) and head (6), no index row (12).
 #[test]
 fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
     let mut case = seeded(Revocation::None)?;
@@ -516,11 +525,11 @@ fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
         ),
         (
             Claim::of_seeded().with(|c| c.reasons[0].reason = Reason::Unavailable),
-            Error::Conflict,
+            Error::InvalidBinding,
         ),
         (
             Claim::of_seeded().with(|c| c.reasons.push(c.reasons[1])),
-            Error::Conflict,
+            Error::InvalidBinding,
         ),
         (
             Claim::of_seeded().with(|c| c.generation = [0x21; 16]),
@@ -649,10 +658,10 @@ fn histories_that_do_not_verify_refuse_the_reset() -> TestResult {
 fn a_moved_inventory_generation_or_selection_refuses_the_writer() -> TestResult {
     let mut case = seeded(Revocation::None)?;
     let before = untouched(&case)?;
-    let result = reset_between(&mut case, |domain| domain.inventory_generation += 1)?;
+    let result = reset_between(&mut case, |domain, _| domain.inventory_generation += 1)?;
     assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
     assert_eq!(untouched(&case)?.0, before.0);
-    let result = reset_between(&mut case, |domain| {
+    let result = reset_between(&mut case, |domain, _| {
         if let Some((_, sealed)) = domain.selection.as_mut() {
             sealed.address = hash(0x99);
         } else if let Some(record) = domain.bootstrap.as_mut() {
@@ -689,6 +698,60 @@ fn the_writer_refuses_at_the_deadline() -> TestResult {
     Ok(())
 }
 
+/// I238: the metadata owner's expiry lowers `B` when it is the earliest.
+#[test]
+fn the_metadata_owners_expiry_lowers_the_deadline() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    case.domain.metadata =
+        metadata_authority_until(&SEAL, metadata_registry(&SEAL)?, (64, 20_000_000))?;
+    assert_eq!(
+        staged(&mut case, &Setup::standard())?
+            .authority
+            .bound_micros,
+        20_000_000
+    );
+    Ok(())
+}
+
+/// A denied metadata `write` decision gives 12 before the retry lookup,
+/// even for a retry the original receipt would answer.
+#[test]
+fn a_denied_metadata_write_refuses_every_reset() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    reset(&mut case, &Claim::of_seeded())??;
+    let denied = Setup::standard().with(|s| s.metadata_leaf = Some(hash(0x7e)));
+    for claim in [
+        Claim::of_seeded(),
+        Claim::of_seeded().with(|c| c.control = [0x51; 16]),
+    ] {
+        assert_eq!(
+            reset_with(&mut case, &claim, &denied)?.err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    Ok(())
+}
+
+/// I241b: any of the evaluated decisions or the TPS1 digest that differs at
+/// the writer gives 12 and writes nothing.
+#[test]
+fn a_decision_that_differs_at_the_writer_refuses_it() -> TestResult {
+    type Tamper = fn(&mut StagedResetV1);
+    let tampers: [Tamper; 3] = [
+        |staged| staged.authority.authorization_ref.digest[0] ^= 1,
+        |staged| staged.authority.metadata.2.push(hash(1)),
+        |staged| staged.premises.trust_snapshot_digest = hash(0x55),
+    ];
+    for tamper in tampers {
+        let mut case = seeded(Revocation::None)?;
+        let before = untouched(&case)?;
+        let result = reset_between(&mut case, |_, staged| tamper(staged))?;
+        assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
+        assert_eq!(untouched(&case)?, before);
+    }
+    Ok(())
+}
+
 /// I241b: a TPS1 the registry adopts between the evaluation and the writer
 /// gives 12 and writes nothing.
 #[test]
@@ -702,7 +765,7 @@ fn a_changed_trust_snapshot_refuses_the_writer() -> TestResult {
     let anchor = case.domain.harness.env.anchor.clone();
     let trusted = newer.trusted()?;
     let before = untouched(&case)?;
-    let result = reset_between(&mut case, |domain| {
+    let result = reset_between(&mut case, |domain, _| {
         let advanced = PluginTrustPolicyRegistryV1::advance_policy(
             &mut domain.store,
             &anchor,
