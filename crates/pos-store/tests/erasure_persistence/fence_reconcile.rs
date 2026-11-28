@@ -56,6 +56,19 @@ fn fence_rows(path: &str) -> rusqlite::Result<Vec<FenceRow>> {
     rows.collect()
 }
 
+/// Every stored row as SQL text, so type-corrupt columns can still be compared.
+fn raw_rows(path: &str) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let connection = rusqlite::Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT timeline_id, hex(erasure_request_id), quote(lifecycle_code)
+         FROM erasure_fence_rows ORDER BY 1, 2",
+    )?;
+    let rows = statement.query_map([], |stored| {
+        Ok((stored.get(0)?, stored.get(1)?, stored.get(2)?))
+    })?;
+    rows.collect()
+}
+
 fn exec(path: &str, sql: &str) -> rusqlite::Result<()> {
     rusqlite::Connection::open(path)?.execute_batch(sql)
 }
@@ -292,9 +305,9 @@ impl Fixture {
 
     /// Reconcile, expect `refusal`, and expect the rows exactly as they were.
     fn assert_refused(&self, refusal: Result<(), ErasureFenceReconcileErrorV1>) -> TestResult {
-        let before = self.rows()?;
+        let before = raw_rows(&self.path)?;
         assert_eq!(reconcile(&self.shared)?, refusal);
-        assert_eq!(self.rows()?, before);
+        assert_eq!(raw_rows(&self.path)?, before);
         Ok(())
     }
 }
