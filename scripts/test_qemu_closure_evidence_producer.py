@@ -1437,6 +1437,7 @@ HARDENING_MOUNT_POINTS = {
     "RestrictNamespaces": (), "RestrictSuidSgid": (), "RestrictRealtime": (),
     "LockPersonality": (), "SystemCallArchitectures": (), "UMask": (), "KillMode": (),
     "SendSigKill": (), "StandardInput": (), "StandardOutput": (), "StandardError": (),
+    "RemainAfterExit": (), "SuccessExitStatus": (),
 }
 # The mount points that transient_unit.rs names as constants, by constant, as image paths.
 TRANSIENT_UNIT_MOUNT_POINTS = {"LAUNCHER_DESTINATION": ".pigloros/release-launcher", "WORK_MOUNT_PATH": "work"}

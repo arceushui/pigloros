@@ -218,19 +218,23 @@ impl SystemdUnitOutcome {
 /// `exit-code`, a signal other than the clean ones is `signal`, and a dump is `core-dump`. Every
 /// other result, and `success` for a clean exit, is systemd's own.
 fn derived(result: SystemdServiceResult, main: SystemdMainExit) -> SystemdServiceResult {
-    match (result, main) {
-        (SystemdServiceResult::Success, SystemdMainExit::Exited { status }) if status != 0 => {
-            SystemdServiceResult::ExitCode
+    match result {
+        SystemdServiceResult::Success => failed_exit_result(main).unwrap_or(result),
+        other => other,
+    }
+}
+
+/// The result of a main exit that is not a clean one, if it is not.
+fn failed_exit_result(main: SystemdMainExit) -> Option<SystemdServiceResult> {
+    match main {
+        SystemdMainExit::Exited { status } => {
+            (status != 0).then_some(SystemdServiceResult::ExitCode)
         }
-        (SystemdServiceResult::Success, SystemdMainExit::Killed { signal })
-            if !is_daemon_clean_signal(signal) =>
-        {
-            SystemdServiceResult::Signal
+        SystemdMainExit::Killed { signal } => {
+            (!is_daemon_clean_signal(signal)).then_some(SystemdServiceResult::Signal)
         }
-        (SystemdServiceResult::Success, SystemdMainExit::Dumped { .. }) => {
-            SystemdServiceResult::CoreDump
-        }
-        _ => result,
+        SystemdMainExit::Dumped { .. } => Some(SystemdServiceResult::CoreDump),
+        SystemdMainExit::NotRecorded => None,
     }
 }
 

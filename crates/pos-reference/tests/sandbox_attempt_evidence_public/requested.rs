@@ -437,6 +437,8 @@ fn rqe1_code_11_lists_exit_statuses_and_signals() -> TestResult {
             false,
         ),
         (pair(empty(), Value::Array(vec![integer(300)])), false),
+        (pair(Value::Array(vec![integer(256)]), empty()), false),
+        (pair(Value::Array(vec![integer(255)]), empty()), true),
         (dbus(11, Value::Array(vec![empty()])), false),
         (dbus(11, integer(0)), false),
     ] {

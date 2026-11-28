@@ -163,6 +163,13 @@ fn readback_value(value: &SystemdTransientUnitReadbackValue) -> DbusValue {
     }
 }
 
+fn bytes(values: &[i32]) -> Vec<u8> {
+    values
+        .iter()
+        .filter_map(|value| u8::try_from(*value).ok())
+        .collect()
+}
+
 fn hardening_value(value: &SystemdHardeningReadbackValue) -> DbusValue {
     match value {
         SystemdHardeningReadbackValue::Bool(value) => DbusValue::Bool(*value),
@@ -172,8 +179,10 @@ fn hardening_value(value: &SystemdHardeningReadbackValue) -> DbusValue {
         SystemdHardeningReadbackValue::StringArray(values) => {
             DbusValue::StringArray(values.clone())
         }
+        // A value outside `0..=255` cannot be a status or a signal, and is not representable in
+        // the record: a read-back with one differs from the requested list and is a mismatch.
         SystemdHardeningReadbackValue::ExitStatuses(statuses, signals) => {
-            DbusValue::ExitStatusSet(statuses.clone(), signals.clone())
+            DbusValue::ExitStatusSet(bytes(statuses), bytes(signals))
         }
     }
 }

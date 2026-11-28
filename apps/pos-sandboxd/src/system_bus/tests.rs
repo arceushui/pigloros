@@ -734,7 +734,7 @@ impl RecordingService {
 
     #[zbus(property, name = "SuccessExitStatus")]
     fn success_exit_status(&self) -> (Vec<i32>, Vec<i32>) {
-        self.fixed(((1..=255).collect(), (1..=64).collect()))
+        self.fixed(((1..=199).collect(), (1..=64).collect()))
     }
 
     #[zbus(property, name = "StandardInput")]
