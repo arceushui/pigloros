@@ -1,4 +1,4 @@
-//! The ADR-041 bundled-plugin catalogue of one registry (Redmine #1397).
+//! Plugin registrations available for use in a Scenario Room.
 
 use pos_core::Plugin;
 
@@ -9,13 +9,13 @@ use crate::error::RuntimeError;
 use crate::scenario_room::{capability_set_hash_v1, ScenarioRoomCatalogueV1};
 
 impl PluginRegistry {
-    /// The Plugins a Scenario Room may name: every entry registered from a
-    /// Plugin and available (an unpinned registration, or a pinned one whose
-    /// availability is `Available`), by name and version, with its
-    /// `capability_set_hash` (the Proposed ADR-041 amendment of #303, A2 and
-    /// A3). Entries that `register_driver` added carry no Plugin and are
-    /// left out, as are disabled, unavailable, revoked, trapped and
-    /// exhausted registrations.
+    /// Return Plugin registrations available for use in a Scenario Room.
+    ///
+    /// Includes unpinned registrations and pinned registrations whose
+    /// availability is `Available`. Entries added by `register_driver` and
+    /// disabled, unavailable, revoked, trapped, or exhausted registrations
+    /// are omitted. Each entry includes its name, version, and hash of owned
+    /// event types.
     #[must_use]
     pub fn scenario_room_catalogue_v1(&self) -> ScenarioRoomCatalogueV1 {
         ScenarioRoomCatalogueV1::from_registered(
@@ -39,24 +39,16 @@ impl PluginRegistry {
 }
 
 impl<F: InstalledPluginFactoryV1> HostCatalogueEntryV1<F> {
-    /// The Scenario Room catalogue of this reviewed host catalogue entry
-    /// (#303 owner decision of 2026-11-15): the one Plugin its factory
-    /// builds from `frozen_configuration`, by name and version, with its
-    /// `capability_set_hash`. It builds the reviewed product only to read
-    /// its descriptor, after the same Plugin and approver link checks as
-    /// registration. It never registers, admits or runs the product, so it
-    /// needs no installed EPF1.
+    /// Build a Scenario Room catalogue from the reviewed factory's Plugin
+    /// product. This checks the Plugin and approver links before reading its
+    /// name, version, and capability-set hash. It does not register, admit, or
+    /// run the product.
     ///
-    /// Like registration, it builds the factory's product before the link
-    /// checks, so a foreign factory's `build` runs and is then refused.
+    /// The factory builds its product before the link checks.
     ///
     /// # Errors
-    /// Returns the registration's link error when the built Plugin or
-    /// approver is not the entry's reviewed product. Only the Gateway entry
-    /// has a reviewed spec today, and its Plugin and approver types live in
-    /// the Gateway crate, so an accepted Plugin with a refused approver
-    /// (`CallbackMismatch`) cannot be built in this crate's tests; the
-    /// Gateway exercises the accepted pair.
+    /// Returns a link error when the built Plugin or approver does not match
+    /// the reviewed entry.
     pub fn scenario_room_catalogue_v1(
         &self,
         frozen_configuration: &F::Configuration,

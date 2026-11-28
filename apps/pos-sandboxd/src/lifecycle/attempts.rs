@@ -49,13 +49,13 @@
 //! lifecycle was quarantined, so no grant can use the freed reservation. An
 //! attempt that ended before it started releases its input at once.
 //!
-//! The ownership table and its tombstones live in memory, for this runtime
-//! only (owner decision, 2026-11-11). A restarted provider forgets them; that
-//! is safe because the selector issues a fresh, nonzero `AttemptId` for every
-//! attempt and fences the previous runtime with SIR1 before a new one opens
-//! (ADR-069 §4.1), so a stale grant of a reconciled attempt cannot be replayed
-//! into the new runtime. Restart reconciliation removes every attempt the
-//! previous runtime left behind.
+//! The ownership table and its tombstones live in memory for this runtime
+//! only. A restarted provider forgets them. This is safe because the selector
+//! issues a fresh, nonzero `AttemptId` for every attempt and fences the
+//! previous runtime with SIR1 before opening a new one. A stale grant of a
+//! reconciled attempt cannot then be replayed into the new runtime, and
+//! restart reconciliation removes every attempt the previous runtime left
+//! behind.
 //!
 //! The attempt steps are ports, so the composition is exercised without
 //! systemd, mountfsd or a kernel mount; production composes
@@ -1379,9 +1379,6 @@ impl<I> AttemptLifecycle<I> {
         Ok(EndedAttempt {
             attempt_id,
             admission,
-            // The first cancellation source wins (owner decision 2026-11-15,
-            // #443 journal 22319), and outranks every other outcome (ADR-069
-            // §8), even when the input fails afterwards.
             cancel_source,
             progress: AttemptProgress::InputFailed,
             cleanup: Ok(None),

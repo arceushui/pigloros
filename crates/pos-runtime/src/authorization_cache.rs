@@ -7,10 +7,6 @@ use pos_core::{
 };
 use std::collections::{BTreeSet, HashMap};
 
-// ---------------------------------------------------------------------------
-// AuthorizationCacheV1
-// ---------------------------------------------------------------------------
-
 /// Exact invalidation identity for one cached active authorization decision.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AuthorizationCacheKeyV1 {

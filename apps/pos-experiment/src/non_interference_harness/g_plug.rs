@@ -1,8 +1,6 @@
-//! The G-PLUG capture adapters of the non-interference harness (ADR-062
-//! Revision 8 slice N2, #1230; owner note `ADR-062_R8_NonInterference_Plugin`,
-//! scoping `ADR-059_R9_State_Migration_Scoping`).
+//! G-PLUG capture adapters for the non-interference harness.
 //!
-//! Four ADR-059 rows are captured here, over one subject:
+//! Four Plugin observations are captured here over one subject:
 //! - `NI-TOOL-001`: host tools and imported services;
 //! - `NI-STATE-003`: Plugin state, on its state members;
 //! - `NI-NET-010`: the network and tool-call sequence;
@@ -252,10 +250,6 @@ pub fn execute_g_plug_migration_canary_v1(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rows
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RowV1 {
     Tool,
@@ -402,10 +396,6 @@ fn host_record(row: RowV1, run: &GPlugRunV1<'_>, state: &[u8]) -> Value {
         ]),
     }
 }
-
-// ---------------------------------------------------------------------------
-// The public Plugin protocol
-// ---------------------------------------------------------------------------
 
 /// The endpoint the host sends one PWQ1 request to; it returns one PWR1
 /// response, or nothing for a refused request.
@@ -600,10 +590,6 @@ pub fn g_plug_invocation_v1(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The fixture guest
-// ---------------------------------------------------------------------------
-
 /// The in-process deterministic fixture guest.
 ///
 /// It decodes one PWQ1 request with the protocol codec and answers `describe`, `reduce` or `drive` with
@@ -723,10 +709,6 @@ fn reduce_output(invocation: &PluginInvocationV1) -> GuestReturnV1<PluginOutputV
             },
         )
 }
-
-// ---------------------------------------------------------------------------
-// Subject
-// ---------------------------------------------------------------------------
 
 struct GPlugPlugin;
 
@@ -947,10 +929,6 @@ impl NonInterferenceSessionSubjectV1 for GPlugSessionSubjectV1 {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Capture
-// ---------------------------------------------------------------------------
 
 /// Capture one run from the Events the mode produced, with the host's files
 /// in `directory`.

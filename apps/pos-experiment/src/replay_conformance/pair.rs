@@ -7,9 +7,8 @@
 //! each against the same expected-result record. Air-Gapped means the
 //! `deterministic-air-gapped-v1` semantics (no network, the bundled trust
 //! snapshot) run by this host, not a kernel-audited execution under the
-//! Sandbox Provider (Q6, as #194 D7): the report labels the Air-Gapped
-//! results [`AIR_GAPPED_EVIDENCE`] (owner decision 1 on the wiki page
-//! `ADR-062_R8_Paired_Executions`).
+//! Sandbox Provider: the report labels the Air-Gapped results
+//! [`AIR_GAPPED_EVIDENCE`].
 
 use pos_conformance::{DivergenceReportV1, ExecutionModeV1, ReproManifestV1, VerificationResultV1};
 use pos_reference::evaluator::{CaseAttempt, SubjectObservation};

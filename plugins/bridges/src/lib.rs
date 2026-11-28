@@ -41,10 +41,6 @@ mod reducer;
 
 pub use reducer::BridgeReducer;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 /// Entity kind string for bridge sources.
 pub const ENTITY_KIND: &str = "bridge-source";
 
@@ -65,10 +61,6 @@ pub const OWNTRACKS_SOURCE_TIME_BUCKET_SECONDS: i64 = 15 * 60;
 
 /// The largest `OwnTracks` JSON body accepted by this pure decoder.
 pub const MAX_OWNTRACKS_BODY_BYTES: usize = 64 * 1024;
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
 
 /// Errors from the bridges plugin.
 #[derive(Debug, thiserror::Error)]
@@ -172,10 +164,6 @@ pub fn decode_owntracks_location(body: &[u8]) -> Result<OwnTracksDecoded, OwnTra
     Ok(OwnTracksDecoded::Location(compact))
 }
 
-// ---------------------------------------------------------------------------
-// Payload type (CBOR-serialized)
-// ---------------------------------------------------------------------------
-
 /// Payload for a bridge observation event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeObservation {
@@ -186,10 +174,6 @@ pub struct BridgeObservation {
     /// Timestamp in microseconds since Unix epoch.
     pub timestamp_micros: u64,
 }
-
-// ---------------------------------------------------------------------------
-// BridgePlugin descriptor
-// ---------------------------------------------------------------------------
 
 /// Digital-twin bridge plugin.
 pub struct BridgePlugin {

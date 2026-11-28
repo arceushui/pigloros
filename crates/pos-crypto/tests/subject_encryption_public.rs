@@ -108,10 +108,6 @@ const CONSENT_PLAINTEXT: &[u8] = b"\x64demo";
 /// The subject field value: the CBOR byte string `h'0102'`.
 const FIELD_PLAINTEXT: &[u8] = b"\x42\x01\x02";
 
-// ---------------------------------------------------------------------------
-// Test-side helpers: hex, byte ranges, an independent CBOR builder, fixtures.
-// ---------------------------------------------------------------------------
-
 fn hex(text: &str) -> Vec<u8> {
     let nibble = |digit: u8| {
         if digit.is_ascii_digit() {
@@ -389,10 +385,6 @@ fn reference_seal(key: &str, nonce: &[u8], aad: &str, plaintext: &[u8]) -> Optio
         cipher.encrypt_inout_detached((&nonce).into(), &hex(aad), buffer.as_mut_slice().into());
     tag.ok().map(|tag| [buffer, tag.to_vec()].concat())
 }
-
-// ---------------------------------------------------------------------------
-// SubjectKeyWrapV1 (ADR-091, ADR-097 section 1)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn golden_wrap_reproduces_every_published_byte() -> TestResult {
@@ -881,10 +873,6 @@ fn two_subjects_under_one_human_decrypt_only_their_own_fields() -> TestResult {
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// SubjectCiphertextV1 (ADR-097 sections 2 and 6)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn consent_vector_reproduces_every_published_byte() -> TestResult {

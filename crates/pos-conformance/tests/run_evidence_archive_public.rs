@@ -125,10 +125,6 @@ fn members_of(export: &TimelineExport) -> TestResult<Vec<(String, Vec<u8>)>> {
         .collect())
 }
 
-// ---------------------------------------------------------------------------
-// Projection
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_projection_is_position_relative_and_byte_exact() -> TestResult {
     let owner = EntityId::new();
@@ -289,10 +285,6 @@ fn the_projection_refuses_forks_gaps_duplicates_and_dangling_causes() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
 
 /// The members of a small valid export with an owner.
 fn sample() -> TestResult<Vec<(String, Vec<u8>)>> {

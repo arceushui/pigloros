@@ -20,9 +20,8 @@ use crate::control_framing;
 use crate::sandbox_provider_protocol::AuthenticatedRevocationAcknowledgement;
 use crate::selector::runtime_lifecycle::{CgroupPath, ProviderLifecyclePort};
 
-/// The peer's start-to-readiness bound (owner decision O2).
-const PEER_START_BOUND: Duration = Duration::from_secs(5);
-/// The recovery control exchange's absolute bound.
+/// The peer's start-to-readiness bound.
+const PEER_START_TO_READINESS_BOUND: Duration = Duration::from_secs(5);
 const EXCHANGE_BOUND: Duration = Duration::from_millis(100);
 /// The forced cleanup's absolute bound, from the end of the exchange.
 const CLEANUP_BOUND: Duration = Duration::from_secs(5);
@@ -173,7 +172,7 @@ impl<P: ProviderLifecyclePort + ?Sized> RecoveryPeerSession<'_, P> {
         let endpoint = target.endpoint_id();
         fresh_challenge()
             .and_then(|challenge| {
-                host.deadline_after(PEER_START_BOUND)
+                host.deadline_after(PEER_START_TO_READINESS_BOUND)
                     .map(|deadline| (challenge, deadline))
             })
             .and_then(|(challenge, deadline)| {

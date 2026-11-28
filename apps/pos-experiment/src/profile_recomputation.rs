@@ -71,9 +71,7 @@
 //!
 //! # EPF1 enforcement
 //!
-//! The owner decisions are recorded on the wiki page
-//! `ADR-062_R8_Profile_Recomputation_Enforcement` (2026-11-07). The host
-//! enforces, independently of the subject:
+//! The host enforces, independently of the subject:
 //!
 //! - the network gate on the request inputs (step 4). It is an input check:
 //!   the subject's native Plugins run in the host process, and the host
@@ -93,10 +91,8 @@
 //!
 //! # Recomputed stream
 //!
-//! The owner decisions for this slice are recorded on the wiki page
-//! `ADR-062_R8_Recorded_Replay_Digests`, section 6 (2026-10-30), and its
-//! section 2 digest table. The stream uses that accepted `RecordedReplay`
-//! digest scheme, documented in [`crate::verification_execution`], with
+//! The stream uses the `RecordedReplay` digest scheme, documented in
+//! [`crate::verification_execution`], with
 //! tick 0. A recomputed run mints a fresh Timeline id and fresh Event ids
 //! (ULIDs that carry the wall clock), so those identifiers are operational:
 //! the stream is addressed by [`RECOMPUTED_TIMELINE_ID_V1`] and every Event

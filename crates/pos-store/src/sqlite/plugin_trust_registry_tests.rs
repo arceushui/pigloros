@@ -95,10 +95,6 @@ fn gated_harness() -> TestResult<(H, Arc<ErasureContainmentGateV1>)> {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// T1: durability level
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_entry_level_is_recorded_and_restored_on_every_exit_path() -> TestResult {
     for forced in [None, Some(0), Some(1), Some(2), Some(3)] {
@@ -313,10 +309,6 @@ fn a_failed_probe_of_the_journal_or_the_entry_level_changes_nothing() -> TestRes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// T2 and F3: indeterminate outcomes, poison, and recovery
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_failed_set_or_read_back_of_full_is_indeterminate_and_restores() -> TestResult {
     let mut h = Harness::<SqliteStore>::open()?;
@@ -490,10 +482,6 @@ fn a_lost_acknowledgement_commits_and_the_retry_replays_the_original() -> TestRe
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// T3: trigger faults at each write
-// ---------------------------------------------------------------------------
-
 fn inject(h: &H, timing: &str, table: &str) -> TestResult {
     raw(
         h,
@@ -616,10 +604,6 @@ fn the_ledger_is_append_only() -> TestResult {
     assert_eq!(h.ledger()?.len(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// T4: schema and stored-invariant corruption
-// ---------------------------------------------------------------------------
 
 fn assert_reads_corrupt(h: &H) {
     let store = &h.store;
@@ -755,13 +739,11 @@ fn decision_and_pointer_rows_with_a_bad_event_are_corrupt() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // E2 (SQLite clauses) and E5: guards and lock order
 //
 // The Memory adapter's fork and hidden-Timeline guard tests (unit tests in its own module) and
 // the SQLite tests below exercise the same shared `guarded_generic_append` chain through
 // adapter-specific setup (private maps there, raw rows here), so they are not a shared vector.
-// ---------------------------------------------------------------------------
 
 fn assert_activation_refused(h: &mut H) -> TestResult {
     let genesis = h.env.genesis()?;
@@ -970,9 +952,7 @@ fn a_reviewed_object_without_its_tables_is_not_an_unprovisioned_store() -> TestR
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Statement failures: SQLite limits make each class of statement fail for real
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_failing_read_statement_is_storage_failed() -> TestResult {
@@ -1055,10 +1035,6 @@ fn a_failing_schema_creation_is_storage_failed_and_leaves_no_tables() -> TestRes
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// ADR-103 revision 5: the read-only current-release evaluation
-// ---------------------------------------------------------------------------
 
 /// A harness with `release_one` active under the genesis policy at UTC second 50 and Tick 5.
 fn admitted() -> TestResult<H> {

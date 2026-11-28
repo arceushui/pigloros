@@ -3,15 +3,13 @@
 #![cfg(unix)]
 
 //! Public-interface tests for the G-PUB non-interference capture adapters
-//! (ADR-062 Revision 8 slice N1, #1229; owner note
-//! `ADR-062_R8_NonInterference_Executions`).
 //!
 //! The matrix test runs every G-PUB coordinate once:
 //! - Local spawns `pos-ni-g-pub-subject` as a fresh process.
 //! - Replay and Fork drive the subject through the Experiment host.
 //! - Air-Gapped stays the typed non-executed `Unavailable`.
 //! - `NI-ARCHIVE-009` shares the subject; its RVA1 capture is exercised by
-//!   `non_interference_g_archive.rs` (slice N1b, #1284).
+//!   `non_interference_g_archive.rs`.
 //!
 //! Every executed case must:
 //! - be equal at every surface;
@@ -222,10 +220,6 @@ fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     Ok(events)
 }
 
-// ---------------------------------------------------------------------------
-// Matrix
-// ---------------------------------------------------------------------------
-
 /// Run every G-PUB coordinate once and return the executed cases. Every
 /// non-executed case must carry its typed cause and no claim.
 fn execute_every_coordinate(
@@ -321,10 +315,6 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures: the one-delta proof
-// ---------------------------------------------------------------------------
-
 #[test]
 fn every_g_pub_pair_differs_only_in_its_declared_unauthorized_value() -> TestResult {
     for fixture_id in G_PUB_FIXTURE_IDS_V1 {
@@ -401,10 +391,6 @@ fn every_g_pub_pair_differs_only_in_its_declared_unauthorized_value() -> TestRes
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Capture adapters through their public seam
-// ---------------------------------------------------------------------------
 
 fn capture(
     fixture_id: &str,

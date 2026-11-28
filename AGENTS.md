@@ -1,6 +1,8 @@
 ## Agent instructions
 
-Before starting any task, read `CONTEXT.md` for domain vocabulary and `README.md` for the project overview. ADRs live on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`).
+Before starting any task, read `CONTEXT.md` for domain vocabulary and `README.md` for the project overview.
+
+For a current-behavior audit or documentation update, use the checked-in implementation source as evidence. Decision records, tickets, and plans describe intent or history; they do not prove current implementation behavior. Do not consult external project records for a source-only behavior audit.
 
 Before writing code, read the `lessons-learned` skill — it documents every mistake made in prior sessions so you don't repeat them.
 
@@ -8,10 +10,9 @@ Before writing code, read the `lessons-learned` skill — it documents every mis
 
 Every task MUST run in its own `git worktree` — never work directly on `main`. Name the worktree after the task or ticket (e.g. `#83-hasher-port`). Commit from the worktree, then remove it when done.
 
-See `using-git-worktrees` skill for the full workflow.
-
 ```bash
-git worktree add ../pigloros-<task-name> main
+git fetch origin main
+git worktree add ../pigloros-<task-name> -b <branch-name> origin/main
 cd ../pigloros-<task-name>
 # ... work ...
 git worktree remove ../pigloros-<task-name>
@@ -32,7 +33,7 @@ Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, 
 ### Domain knowledge
 
 - **CONTEXT.md** — domain glossary (use exact terms, don't drift to synonyms)
-- **Redmine wiki** — canonical ADRs
+- **Architecture decisions** — project history and intent, not proof of current behavior
 - **Notion** — design docs and Wave specs (MCP configured)
 - See `.agents/domain.md` for consumer rules
 
@@ -59,9 +60,9 @@ Merge only through the Trunk merge queue, which enqueues pull requests labelled
 standing authorization covers the PR, its independent review is clean
 (re-reviewed after every later change), and required CI is green. Green checks
 alone are not merge authority. `/trunk merge` comments are disabled. Never press
-Merge or call the GitHub merge API. Never rebase, amend, or force-push a pushed
-branch. Update it against `main` or a parent branch only to resolve actual
-conflicts, not merely because the base advanced. A real fix may be pushed while
+Merge or call the GitHub merge API. Before each push, fetch and merge the latest
+`origin/main` and, for a stacked PR, its updated parent branch. Never rebase,
+amend, or force-push a pushed branch. A real fix may be pushed while
 the PR is queued; it ejects the PR, so review and verify the new head before
 relabeling within the same explicit authorization. See
 [`docs/merge-queue.md`](docs/merge-queue.md).
@@ -82,10 +83,12 @@ when it can be, and drop a rule once its mistake can no longer happen.
 | --- | --- |
 | No local Cargo except `cargo generate-lockfile` | `scripts/agent_command_guard.py` (Claude Code `PreToolUse` hook in `.claude/settings.json`) denies it; tested by `scripts/test_agent_command_guard.py` in CI |
 | Never skip git hooks (`--no-verify`, `commit -n`, overriding `core.hooksPath`) without the owner's approval for that commit | Same guard asks the owner |
-| Never rebase, amend or force-push a pushed branch; merge a base only to resolve actual conflicts | Same guard asks the owner |
+| Never rebase, amend or force-push a pushed branch | Same guard asks the owner |
+| Fetch and merge the latest `origin/main` and updated parent branch before each push | Judgment call — nothing enforces it |
 | Merge only through the Trunk queue | Branch protection and the queue (`docs/merge-queue.md`) |
 | Stale `Cargo.lock` after a merge: restore main's lock before `cargo generate-lockfile` | `.githooks/pre-commit` rejects a stale lock; the restore order is a judgment call |
 | Label `ready-to-merge` only with explicit maintainer authorization, a clean independent review, and green CI | Judgment call — nothing enforces it |
 | Root-cause the first failing job before a rerun | Judgment call — nothing enforces it |
+| Report PR verification complete only after required CI is green on the pushed head | Judgment call — no status-reporting gate enforces it |
 | No legacy or compatibility shims; replace directly | Judgment call — review finding |
 | A slow CI lane rebuilds only what its inputs changed: key a cached build by its input hash (signed when it enters a trust chain), store multi-GB results where they are not evicted (release assets, not the 10 GB Actions cache), and never cache by disabling a check | Per-lane workflow policy oracles pin the cache steps, for example `scripts/check_qemu_closure_workflow_policy.py` for the QEMU kernel cache; when to add a cache is a judgment call |

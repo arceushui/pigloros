@@ -1519,10 +1519,8 @@ fn the_target_and_fork_values_are_domain_tagged_digests_of_their_inputs() -> Tes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §4a owner-effect records: ELAD1, ELCG1, ELNEG1 and ELRP1 (owner
 // decision Q3 on #1412).
-// ---------------------------------------------------------------------------
 
 const ARTIFACT_CLASSES: [ErasureArtifactClassV1; 7] = [
     ErasureArtifactClassV1::TimelineReplay,
@@ -2007,8 +2005,8 @@ fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
     Ok(())
 }
 
-/// ELADM1 (owner decision D5 on #1413): round trip, golden bytes and
-/// address, and an epoch of zero refused on both encode and decode.
+/// The ELADM1 binding round-trips, preserves its golden bytes and address,
+/// and rejects an epoch of zero on both encode and decode.
 #[test]
 fn the_submission_binding_record_round_trips_and_needs_an_epoch() -> TestResult {
     let admission = LocalErasureAdmissionV1 {

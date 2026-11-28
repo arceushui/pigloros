@@ -358,10 +358,6 @@ const WGS84_LATITUDE_HALF_SPAN_DEGREES: f64 = 90.0;
 const GRID_ALIGNMENT_TOLERANCE: f64 = 1e-9;
 const COMPACT_LOCATION_V1_RESOLUTION_DEGREES: f64 = 0.1;
 
-// ---------------------------------------------------------------------------
-// Payload types
-// ---------------------------------------------------------------------------
-
 /// CBOR payload shape for legacy `geo.location` evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeoLocationPayload {
@@ -372,10 +368,6 @@ pub struct GeoLocationPayload {
     /// Grid resolution in degrees.
     pub resolution: f64,
 }
-
-// ---------------------------------------------------------------------------
-// Spatial cloaking
-// ---------------------------------------------------------------------------
 
 /// Spatial cloaker that discretizes lat/lng to a grid.
 #[derive(Debug, Clone, Copy)]
@@ -430,10 +422,6 @@ impl SpatialCloaker {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plugin descriptor
-// ---------------------------------------------------------------------------
-
 /// Legacy descriptor for V1 geographic payload tooling.
 ///
 /// It cannot be registered: `geo.location` is reserved to the core-owned
@@ -476,10 +464,6 @@ impl Plugin for GeoPlugin {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Reducer
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 struct GeoReducer;

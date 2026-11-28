@@ -1,5 +1,5 @@
-//! ADR-064 Revision 3 factual Tick dependency contract, with the Revision 4
-//! fold checkpoint nodes behind the snapshot node.
+//! Factual Tick dependency contracts, with fold checkpoint nodes behind the
+//! snapshot node.
 //!
 //! One admitted pipeline batch is one factual Tick. This module is the
 //! `pos-core` half of the factual producer: the declaration that travels in
@@ -9,21 +9,18 @@
 //! constants, the host-local errors, and the read port the host uses to
 //! resolve a Timeline's recorded prefix ([`FactualPrefixReadPortV1`]).
 //!
-//! It names no backend type, reads no store, and changes no store behaviour: the
-//! registry builder and the adapters that consume it land in later slices.
+//! It names no backend type and reads no store. The store adapters consume its
+//! declarations during pipeline admission.
 //!
-//! The two `PipelineOutcomeV1` outcomes `InvalidDependencyDeclaration` and
-//! `DependencySetExhausted` are produced by the store in a later slice (ADR-064
-//! R3.4 and R3.6). Here they are covered by direct tests of the outcome mappers.
+//! The store adapters return `InvalidDependencyDeclaration` and
+//! `DependencySetExhausted`; this module maps them to host-local errors.
 //!
 //! # Derivations
 //!
 //! Every domain-tagged preimage is a domain tag, a zero byte, and fixed-width
 //! big-endian fields. Variable-length fields (owners, rule IDs) carry a
-//! big-endian `u64` length prefix; the ADR amendment of R3.3.3 records this
-//! prefix width. [`factual_step_content_digest`] and
-//! [`factual_ingress_content_digest`] are deliberately untagged: the ADR
-//! (R3.3.2) defines them as a plain digest of their fields.
+//! big-endian `u64` length prefix. [`factual_step_content_digest`] and
+//! [`factual_ingress_content_digest`] are untagged digests of their fields.
 //!
 //! - Owner IDs ([`factual_owner_id`]) are `plugin:` and the lowercase hex of a
 //!   BLAKE3 digest; a slotted and a slotless entry use different preimage tags

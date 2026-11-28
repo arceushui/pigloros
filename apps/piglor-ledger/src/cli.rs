@@ -1037,7 +1037,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn keygen_missing_out_flag_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L176: `?` on require(args, "--out") in cmd_keygen.
         let err = run(&["piglor-ledger".into(), "keygen".into()]).test_err()?;
         assert!(err.to_string().contains("--out"));
 
@@ -1056,8 +1055,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_store_source_without_key_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L211: `?` on open_store in cmd_predict for the store tier
-        // when --key is absent.
         let tmp = tempfile::TempDir::new().test_ok()?;
         let err = run(&[
             "piglor-ledger".into(),
@@ -1306,7 +1303,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_source_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L205:57: `?` on require(args, "--source") in cmd_predict.
         let err = run(&["piglor-ledger".into(), "predict".into()]).test_err()?;
         assert!(err.to_string().contains("--source"), "{err}");
 
@@ -1317,8 +1313,6 @@ mod tests {
     #[test]
     fn predict_invalid_confidence_in_store_register_errors(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L228: `?` on store.register(new) when confidence is out of range.
-        // Confidence 2.0 parses as a valid float but fails NewPrediction::validate().
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1351,7 +1345,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_bad_id_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L248: `?` on LedgerOutcome::try_new when id is not a ULID.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1376,7 +1369,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_store_open_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L249: `?` on open_store in cmd_resolve when key is missing.
         let tmp = TempDir::new().test_ok()?;
         let err = run(&[
             "piglor-ledger".into(),
@@ -1400,7 +1392,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_store_resolve_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L250: `?` on store.resolve when prediction doesn't exist.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1425,8 +1416,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_build_error_propagates() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L260: `?` on export::build when source has invalid date.
-        // Uses the cmd_export path which calls build() with an invalid today.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1447,7 +1436,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_write_error_propagates() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L264: `?` on std::fs::write(&path, &json) in cmd_export.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1468,11 +1456,9 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_open_store_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L277: `?` on open_store in cmd_build when source is invalid.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
-        // Use invalid today to make store.load fail at L278.
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -1492,8 +1478,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_create_dir_fails() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L283: `?` on std::fs::create_dir_all in cmd_build.
-        // Use a file as the site parent to make create_dir_all fail.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1518,7 +1502,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_run_error_propagates() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L299: `?` on verify::run in cmd_verify when pubkey is bad.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
@@ -1543,7 +1526,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_bad_source_prefix_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L234:59: `?` on Source::parse in cmd_resolve when prefix is bad.
         let err = run(&[
             "piglor-ledger".into(),
             "resolve".into(),
@@ -1565,7 +1547,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_bad_source_prefix_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L256:59: `?` on Source::parse in cmd_export when prefix is bad.
         let err = run(&[
             "piglor-ledger".into(),
             "export".into(),
@@ -1581,7 +1562,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_bad_source_prefix_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L273:59: `?` on Source::parse in cmd_build when prefix is bad.
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -1599,7 +1579,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_bad_source_prefix_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L296:59: `?` on Source::parse in cmd_verify when prefix is bad.
         let err = run(&[
             "piglor-ledger".into(),
             "verify".into(),
@@ -1641,7 +1620,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_write_html_fails() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L284-L285: `?` on std::fs::write(index.html) in cmd_build.
         use std::os::unix::fs::PermissionsExt;
         if running_as_root() {
             return Ok(());
@@ -1672,7 +1650,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_write_ledger_json_fails() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L286: `?` on std::fs::write(ledger.json) in cmd_build.
         use std::os::unix::fs::PermissionsExt;
         if running_as_root() {
             return Ok(());
@@ -1705,7 +1682,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_write_root_index_fails() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L287: `?` on std::fs::write(site/index.html) in cmd_build.
         use std::os::unix::fs::PermissionsExt;
         if running_as_root() {
             return Ok(());
@@ -1739,8 +1715,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_rejects_non_numeric_confidence() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L213: the `format!("--confidence: {e}")` closure in cmd_predict
-        // when confidence fails to parse as f64.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         let err = run(&[
@@ -1838,8 +1812,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_store_with_bad_key_returns_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L99: the `?` on `load_signing_key(key_path)?` in open_store
-        // when the key file exists but contains invalid hex content.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("l.db");
         let bad_key = tmp.path().join("bad.key");
@@ -1854,8 +1826,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_sqlite_fails_on_invalid_path() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L103: `format!("open sqlite: {e}")` when the SQLite path is
-        // invalid (parent directory does not exist).
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
@@ -1877,8 +1847,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_sqlite_with_corrupted_db_fails() -> Result<(), Box<dyn std::error::Error>> {
-        // Targets L130: the `?` on list_timelines when the DB is corrupt.
-        // Also covers L135: `?` on create_timeline when DB is corrupt.
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
@@ -1896,7 +1864,6 @@ mod tests {
         content.extend_from_slice(&[0u8; 4078]);
         std::fs::write(&bad_db, content).test_ok()?;
         let err = open_store(&Source::Store(bad_db), Some(&key_path));
-        // Either open (L103) or list_timelines (L130) fails.
         assert!(err.is_err(), "expected error for corrupted DB");
 
         Ok(())
@@ -2006,8 +1973,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn load_signing_key_fails_when_file_missing() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L53: the `e.to_string()` closure and `?` in load_signing_key
-        // when the file does not exist.
         let tmp = TempDir::new().test_ok()?;
         let missing = tmp.path().join("nonexistent.key");
         let err = load_signing_key(&missing);
@@ -2124,8 +2089,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L71: `nib(l)?` — the second nibble error sub-region.
-        // "0g" has a valid first nibble ('0') and an invalid second nibble ('g').
         let err = hex_decode("0g");
         assert!(err.is_err());
         assert!(err.test_err()?.contains("bad hex"));
@@ -2136,7 +2099,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn cmd_resolve_false_outcome_sets_false() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L241: the "false" arm in cmd_resolve.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -2243,7 +2205,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_without_out_flag_prints_to_stdout() -> Result<(), Box<dyn std::error::Error>> {
-        // Exercises the `None => output_stdout!("{json}")` branch (line 268).
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -2395,7 +2356,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_statement_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L208: `?` on require("--statement")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_predict(dir);
@@ -2410,7 +2370,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_predicted_outcome_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L209: `?` on require("--predicted-outcome")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_predict(dir);
@@ -2427,7 +2386,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_confidence_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L210: `?` on require("--confidence")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_predict(dir);
@@ -2441,7 +2399,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_made_at_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L214: `?` on require("--made-at")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_predict(dir);
@@ -2455,7 +2412,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn predict_missing_resolve_by_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L215: `?` on require("--resolve-by")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_predict(dir);
@@ -2484,7 +2440,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_source_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L234: `?` on Source::parse(require("--source")?)
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_resolve(dir);
@@ -2498,7 +2453,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_id_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L236: `?` on require("--id")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_resolve(dir);
@@ -2512,7 +2466,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_outcome_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L237: `?` on require("--outcome")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_resolve(dir);
@@ -2526,7 +2479,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolve_missing_resolved_at_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L247: `?` on require("--resolved-at")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         let mut args = base_resolve(dir);
@@ -2540,21 +2492,18 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn export_missing_source_errors() {
-        // Covers L256: `?` in cmd_export Source::parse(require("--source")?)
         assert!(run(&["piglor-ledger".into(), "export".into()]).is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_missing_source_errors() {
-        // Covers L273: `?` in cmd_build Source::parse(require("--source")?)
         assert!(run(&["piglor-ledger".into(), "build".into()]).is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_missing_site_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L274: `?` on require("--site")
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path();
         assert!(run(&[
@@ -2572,7 +2521,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_missing_source_errors() {
-        // Covers L296: `?` in cmd_verify Source::parse(require("--source")?)
         assert!(run(&["piglor-ledger".into(), "verify".into()]).is_err());
     }
 
@@ -2581,8 +2529,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_invalid_path_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L321: `.map_err(|e| CliError::BadSource(e.to_string()))?`
-        // in cmd_build when pos_store::open_store fails for the store source.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
         let err = run(&[

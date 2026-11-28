@@ -1,133 +1,69 @@
-# PiglorOS — Domain Context & Glossary
+# PiglorOS domain glossary
 
-A shared language for humans and agents working on PiglorOS. Use these terms exactly — don't drift to synonyms.
+Use the names in this glossary consistently. Describe current behavior from the checked-in
+implementation source. Decisions and plans explain intent or history; they do not prove what the
+code currently does.
 
----
+## Timeline model
 
-## What PiglorOS Is
-
-**PiglorOS** is a deterministic, event-sourced simulation world engine written in Rust. It allows users and AI agents to **preview decisions** — scoring two options against preference weights, simulating dual-future timeline forks, and evaluating prediction accuracy via calibration metrics — before committing to a choice in the real world.
-
----
-
-## Core Concepts
-
-| Term | Crate / Module | Meaning |
+| Term | Code | Meaning |
 |---|---|---|
-| **Timeline** | `pos-core`, `pos-store` | An append-only, ULID-identified event log. The atomic unit of shared state. |
-| **Timeline Order** | `pos-core`, `pos-store` | The authoritative logical order of a Timeline's stitched Event history. Public Timeline APIs expose this order through `Event.seq`; fork adapters may persist child-segment-local sequence numbers internally. |
-| **Logical Head** | `pos-core`, `pos-store` | The last logical `seq` visible in a stitched Timeline, including inherited fork history and the Timeline's own segment. Distinct from `Timeline.head`, which is the local segment head. |
-| **Event** | `pos-core` | An immutable record appended to a Timeline. Has `entity_id`, `event_type`, `seq`, and a canonical CBOR payload. |
-| **EntityId** | `pos-core` | A ULID identifying a simulation entity (persona, agent, society aggregate, etc.). |
-| **EventStore** | `pos-store` | The `EventStore` trait abstraction over storage backends (SQLite WAL or in-memory). |
-| **Projection** | `pos-state` | A fold over a Timeline's events that produces current state. Managed by `ProjectionRegistry`. |
-| **Fork** | `pos-time` | A Copy-on-Write branch of a Timeline used to simulate a hypothetical future without mutating the original. |
-| **Fork Cut** | `pos-time`, `apps/pos-experiment` | For an ordinary Fork (ADR-041 §3, ADR-033 §2), the parent's Logical Head at the post-fold Tick Boundary where the Fork is admitted. An ADR-064 counterfactual Fork may cut earlier (CFP1 parent cut); its effective composition is derived at that earlier position (ADR-119). |
-| **Merge** | `pos-time` | Rejoining a forked Timeline back into the main branch after comparison. |
-| **Replay** | `pos-time` | Re-running events from a Timeline from a given sequence number to rebuild state. |
-| **Snapshot** | `pos-time` | A point-in-time capture of projected state, used to accelerate Replay. |
-| **Tick Boundary** | `pos-experiment` | The host-owned coordination point that folds one complete contiguous Timeline range before or after an atomic driver step. Events are never folded while `step_all` is active. |
-| **Fold Cursor** | `pos-experiment` | The last logical Timeline sequence incorporated into live projections. It advances only after a complete validated range is folded and is independent of the local Timeline head. |
-| **Projection Cut** | `pos-core`, `pos-experiment` | One completed fold of a Timeline, named by its Fold Cursor at a Tick Boundary (ADR-021 §5). State-dependent evaluation waits for, and records, the first cut that contains a committed Event range. A commit receipt alone never names a cut. |
-| **ObservationSnapshot** | `pos-runtime` | Immutable projection state captured after a tick's pre-step fold and shared by every due Driver for that atomic step. |
-| **Simulation Time** | `pos-runtime`, `pos-experiment` | Monotonic host-supplied nanoseconds used only to decide Driver cadence eligibility. Distinct from Event `wall_time` and optional wall-clock demo pacing. |
+| **Timeline** | `pos-core`, `pos-store` | An append-only sequence of Events. |
+| **Timeline Order** | `pos-core`, `pos-store` | The logical order of Events in a Timeline, including inherited Fork history. |
+| **Logical Head** | `pos-core`, `pos-store` | The last Event visible in Timeline Order. It can differ from a Fork's local segment head. |
+| **Event** | `pos-core` | An immutable record appended to a Timeline. |
+| **EntityId** | `pos-core` | A ULID that identifies a simulation entity. |
+| **EventStore** | `pos-store` | The storage interface used by the memory and SQLite adapters. |
+| **Projection** | `pos-state` | State derived by folding Events in Timeline Order. |
+| **Fork** | `pos-time`, `pos-experiment` | A copy-on-write Timeline derived from a parent Timeline to evaluate a counterfactual history. |
+| **Tick Boundary** | `pos-experiment` | A host-owned boundary around folding and an atomic Driver step. |
+| **ObservationSnapshot** | `pos-runtime` | The projection state shared by Drivers during one scheduled step. |
+| **Simulation Time** | `pos-runtime`, `pos-experiment` | Monotonic host-supplied time used to decide Driver cadence. It is separate from Event wall time. |
 
----
+## Gateway and decisions
 
-## Decision Preview Pipeline
-
-| Term | Module | Meaning |
+| Term | Code | Meaning |
 |---|---|---|
-| **Decision Preview** | Gateway `createDecisionPreview` / `getDecisionPreview` (#305) over `pos-runtime` | The user-facing loop: client-supplied preferences and options → scoring → recommendation → calibration, served by `createDecisionPreview` and `getDecisionPreview` (#305, ADR-140) over the `pos-runtime` Match Score. It is not a bundled scenario or demo binary. |
-| **Scenario Room** | Gateway `POST /v1/scenario-rooms` (#303), `pos-runtime` | A user-configured simulation context with explicit inputs and reproducible Fork identity, served as immutable revisions by the Scenario Room routes (#303, ADR-041 amendment). It is never a hard-coded product scenario. |
-| **OptionSpec** | Gateway `POST /v1/option-specs` (#304) | One user- or client-supplied side of a decision: a label, tags, lean hint, and optional coordinates, served as immutable revisions by the OptionSpec routes (#304). |
-| **Preference** | external client, `pos-plugin-persona` | A named dimension weight in `[-1.0, 1.0]` expressing affinity (e.g. `nature=0.8`). |
-| **PersonaModel** | `plugins/persona` | In-process validation primitive: scores an option string by averaging matching preference dimensions and normalizing the result. It is no longer the public Match Score, which is `pigloros.match-score.v1` in `pos-runtime` (ADR-140). |
-| **Match Score** | `pos-runtime` | The `pigloros.match-score.v1` score of one OptionSpec option against one Preference (ADR-140): an integer in [-10^6, 10^6] micro-units, the mean of the weights of the option's tags that match a Preference dimension exactly, rounded half away from zero, or 0 when none matches. |
-| **Recommendation** | `pos-runtime` | The winning option determined by comparing Match Scores; "Toss-up" when `margin_micro` < 20,000 (0.02 on the signed scale), and `insufficient-evidence` when no option matches. |
-| **Fork Compare** | external client, `pos-time` | CoW Timelines, one per user-supplied option, showing diverged state side-by-side. |
+| **Gateway** | `apps/piglor-gateway` | The local HTTP service for Timeline, decision, consent, erasure, action, signal, and Prediction Ledger operations. Protected routes require the host's Local Principal and a matching grant. |
+| **Local Principal** | `apps/piglor-gateway` | The host-provisioned identity and grants used to authorize protected Gateway operations. |
+| **Scenario Room** | `apps/piglor-gateway`, `pos-runtime` | A user-configured simulation context with explicit inputs and immutable revisions. |
+| **Preference** | `apps/piglor-gateway`, `pos-plugin-persona` | A set of weighted dimensions used to score options. |
+| **OptionSpec** | `apps/piglor-gateway` | A user-authored option with a label, tags, lean hint, and optional coordinates. |
+| **Decision Preview** | `apps/piglor-gateway`, `pos-runtime` | A Gateway resource that scores OptionSpec revisions against a Preference and Scenario Room. The release composition currently has no installed execution profile, so fresh preview creation fails closed. |
+| **Match Score** | `pos-runtime` | An integer micro-unit score from matching an option's tags to Preference dimensions. |
+| **Recommendation** | `pos-runtime` | The option with the strongest Match Score. The Gateway reports a toss-up when the score margin is below 20,000 micro-units and insufficient evidence when no dimension matches. |
+| **Society Signal** | `plugins/society` | A `society.signal` Event that records a value for a social dimension. |
+| **Consent Timeline** | `apps/piglor-gateway` | The host-owned Timeline that records a Local Principal's consent grants and revocations. |
+| **Erasure Host Timeline** | `apps/piglor-gateway`, `pos-runtime` | The host-owned Timeline used by the local erasure authority. Clients cannot read or write it through Gateway routes. |
+| **Prediction Ledger** | `plugins/ledger`, `apps/piglor-ledger`, `apps/piglor-gateway` | A public log of registered predictions and their evaluation results. |
 
----
+## Simulation and plugins
 
-## Shared World Layer
-
-| Term | Module | Meaning |
+| Term | Code | Meaning |
 |---|---|---|
-| **Gateway** | `apps/piglor-gateway` | The local-first HTTP gateway (ADR-014). Manages Timelines and event append/poll over HTTP. |
-| **Society Signal** | `plugins/society` | A `society.signal` event encoding a value for one social dimension (`trust`, `opinion`, `culture`, `economy`, `polarization`). |
-| **Society Reducer** | `plugins/society` | Folds Society Signals into running means per dimension. |
-| **Context Nudge** | future client composition | Adjusts Preferences using Society Signal means before scoring. Formula: `adjusted = clamp(pref + avg(nudges), -1, 1)` where `nudge = (mean - 0.5) × 0.25`. |
-| **AI Influence Index** | future client projection | Fraction of Timeline events from AI agents (`agent.*`), broken down by archetype (`goal-seeking`, `rule-bound`). It is not a current MVP claim. |
-| **Consent Timeline** | `apps/piglor-gateway` | The Local Principal's one root Timeline of ADR-039 `consent.granted.v1` and `consent.revoked.v1` Events (#309), under a fixed identity no client can create, read, append, act on or Fork, and outside the client root-Timeline ceiling. All of one Principal's consents share its one subject and one grantee; each governs the granted operations of its ADR-059 purpose and data categories, and is revoked at the sequence of its first revocation (its fence). |
-| **Erasure Host Timeline** | `pos-core`, `apps/piglor-gateway` | The host-owned root Timeline of one store's Local erasure authority (ADR-136 §3, #1429), opened by `provision-local-erasure` at the identity ELHT1: the 128-bit prefix of `CA("ELHT1", [store_identity])` read as a ULID whose time bits carry no time. Every ELB1 of the store lists it in `host_timelines`, so it is never affected by an erasure; it is the fence of key destruction for erasure. No client can create it, because client Timelines take fresh identities; like the Consent Timeline it is hidden from every client route and Fork admission, and outside the client root-Timeline ceiling. |
-| **Filesystem interlock** | `pos-store` | The per-operation exclusive nonblocking `flock` on the coordination child's `store-namespace.v1.<dev016x>.<ino016x>.lock`, which every participant of a protected store holds across each native SQLite entry (ADR-123 §3). Synchronization only, never key, consent or registry authority. |
-| **Coordination child** | `pos-store` | The `.pigloros-store-namespace-v1` directory inside a protected database directory. It holds the ADR-123 §3b reserved lock files and marks the protected subtree, which ordinary openers refuse. Participants only open it; Quiescent installation alone creates it (ADR-123 §3, §3a). |
-| **Coordination key** | `pos-store` | The `<dev016x>.<ino016x>` of the screened main-file candidate that names the reserved lock files. A Linux-only lock name, not identity authority (ADR-123 §3). |
-| **Quiescent installation** | `pos-store` | The one explicit offline step that creates the Coordination child and its reserved entries while no store process runs; its caller holds the exclusive sibling Gateway mode lock. A rerun completes an interrupted installation and never replaces an entry. Test support only in Wave 9 (ADR-123 §3a, G13). |
-| **Installed store** | `pos-store` | A store whose Coordination child and reserved entries Quiescent installation created. Only profile-composed processes open it; a missing child or entry makes them unavailable, never ordinary and never V1 (ADR-123 §3a, §3b). |
-| **Prediction Ledger** | `plugins/ledger`, `apps/piglor-ledger`, `apps/piglor-gateway` | Public pre-registered prediction log with Brier Scores, verification hashes, and OSF workflow. Curated TOML tier + signed EventStore tier (ADR-017). |
+| **Plugin** | `pos-runtime` | A named domain extension that provides a Reducer and may provide a Driver. |
+| **PluginRegistry** | `pos-runtime` | The runtime registry that hosts Plugins and routes Events to their Reducers and Drivers. |
+| **Reducer** | `pos-runtime` | A component that folds Events into state without writing to the EventStore. |
+| **Driver** | `pos-runtime` | A component that produces Event drafts from state or external input. |
+| **Sandbox Provider** | `pos-reference`, `apps/pos-sandboxd` | The privileged boundary for isolated adapter execution. `pos-reference` defines the protocol; `pos-sandboxd` implements the Linux systemd provider. |
+| **Tenure** | `pos-core`, `pos-runtime` | The Timeline Order range in which one implementation is effective for a required composition entry. |
+| **Effective Composition** | `pos-core`, `pos-runtime` | The composition selected at a Timeline position after applying its declarations and activation Events. |
 
----
+## Evaluation
 
-## Calibration & Evaluation
-
-| Term | Module | Meaning |
+| Term | Code | Meaning |
 |---|---|---|
-| **Brier Score** | `plugins/eval` | Mean squared error of probabilistic predictions. Lower = better; 0 = perfect; 0.25 ≈ coin-flip. |
-| **ECE** | `plugins/eval` | Expected Calibration Error across 10 equal-width probability bins. |
-| **Lift** | `plugins/eval` | Brier improvement over a naive baseline predictor. Positive = model beats base rate. |
-| **Lift vs Personal Base Rate** | `plugins/eval` | Per-entity Brier improvement. Each entity's predictions are scored against its own historical outcome rate (leave-one-out). |
-| **CRPS** | `plugins/eval` | Continuous Ranked Probability Score. For binary outcomes equals Brier; for continuous distributions it may diverge in future. |
-| **Calibration Report** | `plugins/eval` | Output of `compute_report_from_events`: Brier + CRPS + ECE + Lift + Personal Base Rate + reliability bins, in integer micro-units (10^-6) from the ADR-062 Revision 7 `MTR1` result, or `InsufficientSamples` below the declared minimum. |
-| **Reliability Bin** | `plugins/eval` | One of 10 equal-width buckets mapping predicted probability to observed frequency. |
-| **Backtest** | `apps/pos-experiment` | Running a `BacktestRunner` over train + eval ticks to produce a `CalibrationReport`. |
+| **Brier Score** | `plugins/eval` | Mean squared error for probabilistic predictions. Lower is better; zero is perfect. |
+| **ECE** | `plugins/eval` | Expected Calibration Error across ten probability bins. |
+| **Lift** | `plugins/eval` | Improvement in Brier Score over a baseline predictor. |
+| **Calibration Report** | `plugins/eval` | A report containing prediction calibration metrics and reliability bins. |
+| **Backtest** | `apps/pos-experiment` | A run over training and evaluation ticks that produces a Calibration Report. |
 
----
+## Terms to avoid
 
-## Plugin System
-
-| Term | Module | Meaning |
-|---|---|---|
-| **Plugin** | `pos-runtime` | A named, schema-registered domain extension. Must implement `Plugin` trait. |
-| **PluginRegistry** | `pos-runtime` | Hosts plugins and routes events to their `Reducer` and `Driver`. |
-| **Sandbox Provider Plugin** | planned `pos-reference` security seam | An administrator-installed, independently replaceable, out-of-process provider of kernel-enforced public-adapter isolation. It is privileged and part of the trusted computing base, not an untrusted domain Plugin. |
-| **Sandbox Provider Adapter** | planned `pos-reference` security seam | A concrete implementation of the Sandbox Provider interface. It exposes only `describe`, `execute`, `cancel`, and `reconcile`; provider-specific systemd, VM, container, or kernel mechanisms remain behind this seam. |
-| **Reducer** | `pos-runtime` | Folds events into `State`. Read-only w.r.t. the event store. |
-| **Driver** | `pos-runtime` | Produces `EventDraft`s in response to state or external stimuli. |
-| **Staged Reducer** (reviewed staged factory) | `pos-runtime` | A Plugin's zero-sized Reducer in its `src/reducer.rs` effect-free boundary, built fresh by a reviewed staged factory: an `InstalledPluginFactoryV1` listed in the reviewed catalogue under a stable identifier. Admission also requires recorded conformance evidence; without it the factory is refused (ADR-113 §7). |
-| **Recorded Consumer** | `pos-state` | The exact identity of one protected Reducer consumer: its Plugin identity plus the admitted reducer identity digest (ADR-113). A stale or substituted entry is rejected, never reinterpreted. |
-| **Detached Projection Candidate** | `pos-state` | A private projection opened for an exact Recorded Consumer set: freshly built reducer instances with their own State maps and no reference to any visible registry. It folds with the same step as the live registry (ADR-094, ADR-113). |
-| **Protected Projection Provider** | `pos-state` | The host-installed source of Detached Projection Candidates, selected from the installed host composition and never from a caller. |
-| **Host Projection Provider** | `pos-runtime` | The runtime Protected Projection Provider: it holds the reviewed staged Reducer admissions and builds every candidate's reducers fresh from their catalogue factories. |
-| **Hasher** | `pos-core` | Trait decoupling BLAKE3 from store adapters (`genesis_hash`, `hash_payload`, `hash_event`). Default: `Blake3Hasher`. |
-| **Tenure** | ADR-119, later slices | A maximal Timeline Order range in which one implementation is effective for one required entry. Tenure 0 is the composer's base implementation; each ADR-119 activation starts a new tenure. |
-| **Effective Composition** | ADR-119, later slices | The composer's base composition at a Timeline position, folded with the ADR-119 declaration and activation Events at or before that position. |
-| **Composition Boundary Transaction** (CBT) | ADR-119, later slices | The host-only transaction that commits an ADR-119 activation and swaps one community entry at a Tick Boundary. It is not a pass and not a tick. |
-| **IMK1** | `pos-core` | The ADR-119 implementation key: the cross-run identity of one community implementation (PMF1 Plugin ID, host-supplied version label, admitted release digest). It is never a run-local `PluginId`. |
-| **PPN1** | `pos-core` | `CompositionPinV1`, the ADR-119 pin of one community implementation: an IMK1 plus 1 to 16 unique roles. A pin whose roles exceed these bounds has no PPN1. |
-| **DFP1** | `pos-core` | `DomainFallbackPolicyV1`, the owner-declared ADR-119 fallback policy: per required entry, a primary pin, one or two candidate pins, triggers and an activation mode. Zero entries is a withdrawal. |
-
----
-
-## Delivery Vocabulary
-
-| Term | Meaning |
+| Avoid | Use |
 |---|---|
-| **Wave** | A named delivery increment. Waves 1–6 shipped foundation increments on `main`; Wave 7's hard-coded demo was retired; Wave 8+ remain planned or in progress. |
-| **ADR** | Architecture Decision Record. Canonical on Redmine wiki (`redmine.piglor.com/projects/pigloros/wiki`). |
-| **MVP** | The first usable product boundary: an independently built third-party client can submit user-supplied preferences/options, receive a decision preview, operate a Timeline/Scenario Room through documented public contracts, observe committed Events/state, and use Replay/Fork. A hard-coded scenario, generic fixture shell, curl-only smoke test, or embedded demo does not qualify. This is the Wave 9 product target; ADR-018 remains the narrower accepted engineering design for the fixture-backed 3D shell, and any live Gateway/action/authentication contract requires a separate accepted design before implementation. |
-| **Retired demo** | Removed code or documentation that is preserved only as historical context; it is not part of the product or roadmap status. |
-| **Deferred** | Explicitly out-of-scope for the current wave; tracked in Redmine or ADR non-goals. |
-
----
-
-## Terms to Avoid
-
-| Don't say | Say instead |
-|---|---|
-| "event log" | **Timeline** |
-| "user profile" | **Persona** or **PersonaModel** |
-| "prediction accuracy" | **Brier Score** or **Calibration Report** |
-| "branch" (for simulation) | **Fork** |
-| "social data" | **Society Signal** |
-| "AI share" | **AI Influence Index** |
+| “event log” for the persisted model | **Timeline** |
+| “branch” for a simulation alternative | **Fork** |
+| “user profile” for weighted scoring input | **Preference** |
+| “prediction accuracy” for a calibration measure | **Brier Score** or **Calibration Report** |

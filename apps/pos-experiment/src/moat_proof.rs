@@ -1,9 +1,8 @@
-//! Wave 8 parameterized proof kernel.
+//! Parameterized conformance proof kernel.
 //!
 //! The kernel composes the existing Tick Boundary host with the versioned
 //! World plugin and two deliberately small, swappable proof Plugins. It is an
-//! engineering evaluator for the user-parameterized Wave 8 fixture contract;
-//! the public Gateway/client Scenario Room contract remains a Wave 9 concern.
+//! engineering evaluator for the user-parameterized fixture contract.
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
@@ -34,8 +33,6 @@ use pos_runtime::{HostWorldProfileV1, RuntimeError, WorldInstallationErrorV1};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-// Proof callbacks run only through generated fixture registration until
-// installed registration returns with Wave 9 (#467/#462).
 #[cfg(test)]
 use pos_conformance::PluginFailureClassV1;
 #[cfg(test)]
@@ -79,12 +76,8 @@ const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/s
 
 /// Selects how the proof admits its Plugins.
 ///
-/// Release builds have only [`Self::Installed`], which fails closed until
-/// installed registration returns with Wave 9 (#467/#462). The enum is still
-/// threaded through the proof signatures so that the fixture proof and the
-/// installed proof share one code path: tests run every stage with the
-/// generated fixture and differ from the installed path only at the
-/// admission step, instead of maintaining a parallel fixture-only pipeline.
+/// Tests use `GeneratedFixture` to exercise the same pipeline stages as
+/// installed registration, differing only at admission.
 #[derive(Clone, Copy)]
 enum ProofAdmission {
     Installed,
@@ -107,10 +100,7 @@ fn reviewed_output_binding<P: Plugin>(
     .map_err(Into::into)
 }
 
-/// Wave 8 has no installed EPF1, so installed registration fails closed even
-/// if an installed binding were resolved. #467/#462 restore installed proof
-/// registration together with a real installed EPF1.
-fn installed_registration_closed() -> RuntimeError {
+fn missing_installed_execution_profile() -> RuntimeError {
     pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
 }
 
@@ -595,8 +585,6 @@ impl ProofTopology {
     }
 }
 
-// Proof Plugin registration targets. Installed registration has no sink
-// until Wave 9 (#467/#462) supplies an installed EPF1.
 trait ProofRegistrationSink: Sized {
     /// Register the proof Plugins under one admission mode.
     ///
@@ -697,9 +685,6 @@ impl ProofRegistrationSink for pos_runtime::PluginRegistry {
 }
 
 /// Resolve the proof's installed World, agent and Society bindings.
-///
-/// Wave 8 has no installed EPF1, so resolution fails closed before any
-/// registration can mutate a target.
 fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> RuntimeError {
     let agent_binding = proof_agent_output_binding(
         &topology.agent_plugin,
@@ -719,7 +704,7 @@ fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> Runt
         .and(agent_binding)
         .and(society_binding)
         .err()
-        .unwrap_or_else(installed_registration_closed)
+        .unwrap_or_else(missing_installed_execution_profile)
 }
 
 #[cfg(test)]
@@ -1899,9 +1884,6 @@ impl ProofAdmission {
 }
 
 /// Resolve the installed sibling and failure-probe bindings.
-///
-/// Wave 8 has no installed EPF1, so the probe fails closed before any
-/// Experiment or registration exists.
 fn installed_failure_probe_admission(
     class: &str,
     resource_limit: u64,
@@ -1930,7 +1912,7 @@ fn installed_failure_probe_admission(
     )
     .and(probe_binding)
     .err()
-    .unwrap_or_else(installed_registration_closed)
+    .unwrap_or_else(missing_installed_execution_profile)
 }
 
 #[cfg(test)]
@@ -2666,7 +2648,7 @@ mod tests {
             3,
             "deterministic-local-v1",
         )));
-        assert!(closed_epf1(&installed_registration_closed()));
+        assert!(closed_epf1(&missing_installed_execution_profile()));
     }
 
     #[test]

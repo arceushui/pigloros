@@ -639,8 +639,7 @@ fn check_erofs_root(
 ///
 /// The root-verity partition (SIM1 ordinal 1) must start with a format-1
 /// superblock whose hash algorithm, 4096-byte data and hash block sizes and
-/// exact 32-byte salt equal SIM1. The live dm-verity table salt is checked
-/// again after activation.
+/// exact 32-byte salt equal SIM1.
 fn check_verity_superblock(
     root_image: &File,
     verity: &PartitionDescriptor,

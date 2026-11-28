@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rejection tests of `check_gateway_contract.py`: drift in each input fails (#1312-#1314)."""
+"""Rejection tests of `check_gateway_contract.py`: drift in each input fails."""
 
 from __future__ import annotations
 
@@ -52,12 +52,12 @@ def problem_code(baseline: dict) -> dict:
 UNROUTED_PATHS = Path(__file__).resolve().parent / "data/gateway_unrouted_paths.json"
 TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
-# A Draft creation that answers `201`, of a family that stays Draft (#306): its tests keep a
-# Draft subject now that the Decision Preview routes are served (#305, ADR-140 section 9).
+# A Draft creation that answers `201`, in a family that remains Draft.
+# Keep its Draft subject now that Decision Preview routes are served.
 PREVIEW_ACTIONS = "/v1/decision-previews/{preview_id}/actions"
-# A Draft admission that answers `202` (#307).
+# A Draft admission that answers `202`.
 ENSEMBLES = "/v1/decision-previews/{preview_id}/ensembles"
-# A Draft read that answers an enveloped resource (#308).
+# A Draft read that answers an enveloped resource.
 PREVIEW_EVIDENCE = "/v1/decision-previews/{preview_id}/evidence"
 
 
@@ -70,15 +70,18 @@ DATA_KEYWORDS = {"enum", "const", "default"}
 
 
 def without_annotations(value: object) -> object:
-    """`value` without its annotation keywords (`checker.ANNOTATIONS`). The compatibility
-    comparison ignores them, and a description may be updated within v1 (ADR-135 §6), while
-    `--append-only` keeps the baseline's frozen text: a fresh freeze then equals the baseline
-    in everything but those annotations. A schema map keyed by a property name is kept."""
+    """`value` without schema annotations and limit-source provenance. The compatibility
+    comparison ignores schema annotations, and a description may be updated within v1, while
+    `--append-only` keeps the baseline's frozen text. Limit source text does not change a
+    frozen limit's meaning. A schema map keyed by a property name is kept."""
     if isinstance(value, dict):
+        is_limit = set(value) == checker.LIMIT_MEMBERS
         return {
             key: item if key in DATA_KEYWORDS else without_annotations(item)
             for key, item in value.items()
-            if key not in checker.ANNOTATIONS or isinstance(item, dict)
+            if isinstance(item, dict) or (
+                key not in checker.ANNOTATIONS and not (is_limit and key == "source")
+            )
         }
     if isinstance(value, list):
         return [without_annotations(item) for item in value]
@@ -289,8 +292,8 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_operation_must_be_structurally_draft(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["paths"][PREVIEW_ACTIONS]["post"]["x-pigloros-owner"]
-        with self.assertRaisesRegex(checker.ContractError, "owner ticket"):
+        document["paths"][PREVIEW_ACTIONS]["post"]["x-pigloros-owner"] = "internal-ticket"
+        with self.assertRaisesRegex(checker.ContractError, "exposes internal ticket ownership"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
         document["paths"][PREVIEW_ACTIONS]["post"]["description"] = "Submit an action."
@@ -299,12 +302,6 @@ class CheckGatewayContractTest(unittest.TestCase):
         document = copy.deepcopy(DOCUMENT)
         document["paths"][PREVIEW_ACTIONS]["post"]["tags"] = []
         with self.assertRaisesRegex(checker.ContractError, "one family tag"):
-            checker.check_description(contract(document=document))
-
-    def test_a_served_operation_has_no_draft_owner(self) -> None:
-        document = copy.deepcopy(DOCUMENT)
-        document["paths"]["/health"]["get"]["x-pigloros-owner"] = "#302"
-        with self.assertRaisesRegex(checker.ContractError, "no Draft owner"):
             checker.check_description(contract(document=document))
 
     def test_a_draft_read_answers_an_enveloped_resource(self) -> None:
@@ -417,10 +414,8 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertTrue(subject.schema_errors(invalid, schema), invalid)
 
     def test_profile_identifiers_are_open_but_namespaced(self) -> None:
-        """The servable sets of README rule 3 are a server invariant, not a schema rule: the
-        identifiers are open so a later family (`live-air-gapped-v1`) stays within v1, but the
-        Gateway mode and ADR-058 namespaces stay disjoint and a known mode profile keeps its
-        mode."""
+        """The identifiers are open, but the Gateway mode and execution-profile namespaces
+        stay disjoint, and a known mode profile keeps its mode."""
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
         body = example("preference-get")["response"]["body"]
@@ -628,7 +623,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         rejected(lambda d: d["profiles"][0].update(registration_profile_id="live-local-v1"))
         rejected(lambda d: d["profiles"][1].update(registration_profile_id=None))
         rejected(lambda d: d["profiles"][1].update(startup_predicates=["linux"]))
-        # ADR-135 §7.5: field 9 is required in both modes, and tag 6 is Air-Gapped only.
+        # Registration identity is required in both modes. The no-route predicate is Air-Gapped only.
         rejected(lambda d: d["profiles"][0].update(registration_profile_id=None))
         rejected(lambda d: d["profiles"][0].update(
             startup_predicates=d["profiles"][0]["startup_predicates"][:5]))
@@ -725,7 +720,7 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertTrue(subject.schema_errors({**committed, "state": state}, schema))
         for state in ("committed", "projected", "complete", "exported", "degraded"):
             self.assertTrue(subject.schema_errors({**admitted, "state": state}, schema))
-        # `failure` is an object exactly when the preview failed (ADR-140 P27).
+        # `failure` is an object exactly when the preview failed.
         code = {"code": "input-deleted"}
         self.assertTrue(subject.schema_errors({**failed, "failure": None}, schema))
         self.assertTrue(subject.schema_errors({**admitted, "failure": code}, schema))
@@ -1424,7 +1419,7 @@ class CheckGatewayContractTest(unittest.TestCase):
             checker.check_compatibility(contract(), baseline=baseline)
 
     def test_every_response_is_declared_no_store(self) -> None:
-        # #1407: every operation response, and the shared problem response, requires the one
+        # Every operation response and the shared problem response require the same
         # `Cache-Control: no-store` header, and the baseline freezes it.
         subject = contract()
         header = subject.resolve({"$ref": "#/components/headers/CacheControl"})
@@ -1447,7 +1442,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         self.assert_breaking(document, "a required response header became optional")
 
     def test_the_redaction_generation_is_an_optional_erasure_member(self) -> None:
-        # #1407: an `Erasure` may carry it as a non-negative integer, and need not.
+        # An `Erasure` may carry this member as a non-negative integer.
         subject = contract()
         operation = self.operation(subject, "GET", "/v1/me/erasures/x")
         body = example("client-cache-erasure-redacted")["response"]["body"]

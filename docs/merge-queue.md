@@ -2,10 +2,12 @@
 
 Every change reaches `main` through [Trunk Merge Queue](https://docs.trunk.io/merge-queue).
 The queue tests each pull request on top of the latest `main` **plus every
-pull request queued ahead of it**, and merges exactly what it tested. Authors
-never update branches to "catch up" with `main`, and parallel streams of work
-no longer re-run each other's CI. The decision record is ADR-111 on the Redmine
-wiki ([#476](https://redmine.piglor.com/issues/476)).
+pull request queued ahead of it**, and merges exactly what it tested. Start each
+task branch from the latest `origin/main`. Before each push, fetch and merge
+the latest `origin/main` (and the updated parent branch for a stacked pull
+request). Do not rebase, amend or force-push a branch that has been pushed.
+The queue still runs its own integration test against the current base and
+queued pull requests.
 
 ```mermaid
 flowchart LR
@@ -39,9 +41,9 @@ Do **not**:
 - press GitHub's Merge button or call the merge API — the `main -> queue only`
   ruleset rejects it, and any merge outside the queue resets every queued
   test;
-- rebase, amend or force-push a pushed branch. Update a branch against `main`
-  or its parent only to resolve an actual **merge conflict**, which the queue
-  cannot resolve for you. Advancing `main` alone does not require an update;
+- rebase, amend or force-push a pushed branch. Before each push, fetch and
+  merge `origin/main` and, for a stacked pull request, its updated parent
+  branch. The merge queue does not replace this update requirement;
 - cancel and re-submit a pull request whose test was reset — Trunk restarts it
   automatically and re-submitting moves it to the back of the queue.
 
@@ -90,7 +92,7 @@ linked job log before changing anything.
 
 | Symptom | Usual cause | Action |
 |---|---|---|
-| "Waiting to enter queue" / **Not Ready** | The pull request's own required checks are red or pending, or it has merge conflicts | Fix or re-run the failing check; resolve conflicts by merging `main` into the branch |
+| "Waiting to enter queue" / **Not Ready** | The pull request's own required checks are red or pending, or it has merge conflicts | Fix or re-run the failing check; resolve conflicts by merging the latest `origin/main` into the branch |
 | Labelled pull request never enters the queue | Label enqueueing is off in Trunk, or the label name does not match | Check Trunk's label setting (see [Repository configuration](#repository-configuration)), then remove and re-add the label |
 | "target branch (`main`) was updated outside of the merge queue" | Something merged without the queue | Nothing; Trunk restarts the affected tests |
 | `cargo-crap` fails at "Resolve trusted cargo-crap baseline" | Neither the base commit (after waiting up to 30 minutes for an unfinished `main` run) nor any of the 30 `main` commits before it has a trusted baseline; Rust changes fail closed rather than self-baseline | Wait for `main`'s `ci` run to publish one; Trunk re-tests, or remove and re-add the label afterwards |

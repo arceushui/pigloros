@@ -1,10 +1,5 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-//! Staged Reducer admission and fresh per-candidate builds (ADR-113 §1;
-//! acceptance cases 1, 14 and 25).
-//!
-//! The provider under test is standalone: it is not yet bound to the live
-//! `PluginRegistry`, so case 14 compares two independent folds of the same
-//! Event range rather than a candidate opened from the live registry.
+//! Staged Reducer admission and fresh per-candidate builds.
 
 use pos_core::community_lifecycle::MAX_STAGED_CALLBACK_BOUND_V1;
 use pos_core::staged_install::ProjectionSourceV1;
@@ -416,13 +411,6 @@ fn effectful_reducer_registered_outside_the_catalogue_is_not_admitted() {
     assert_eq!(registry.len(), 1);
 }
 
-/// Acceptance case 25: `EntityStateProjection` is never admitted.
-///
-/// `HostProjectionProviderV1` is standalone in this change: it is not yet
-/// linked to the live `PluginRegistry`, so registering the bare projection
-/// there cannot admit it. The evidence is the provider's own reviewed
-/// admission list, which refuses the factory carrying the projection, and
-/// the resulting `NotAdmitted` when a plan names its Plugin.
 #[test]
 fn entity_state_projection_is_not_admitted() {
     let bare = EntityStatePlugin {

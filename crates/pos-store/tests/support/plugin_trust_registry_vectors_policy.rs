@@ -32,10 +32,6 @@ const fn fork_error(kind: PluginFloorKindV1) -> RegistryError {
     RegistryError::Floor(PluginFloorErrorV1::Fork(kind))
 }
 
-// ---------------------------------------------------------------------------
-// G1: advance_policy
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_denied_admission_records_nothing_until_advance_policy_records_it() -> TestResult {
     let mut h = Harness::<Store>::open()?;
@@ -172,10 +168,6 @@ fn a_tps1_only_artifact_denial_blocks_admission_but_not_advance_policy() -> Test
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// H1: the PTR1 and PRV1 floors
-// ---------------------------------------------------------------------------
-
 #[test]
 fn ptr1_floor_follows_the_lower_equal_fork_and_descendant_rules() -> TestResult {
     let mut h = Harness::<Store>::open()?;
@@ -273,10 +265,6 @@ fn prv1_floor_follows_the_equal_fork_and_descendant_rules_independently() -> Tes
     h.assert_advance_denied(&branch, fork_error(PluginFloorKindV1::Revocation))?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// R1 to R6: rollback
-// ---------------------------------------------------------------------------
 
 /// A provisioned store holding two admitted releases, the second active.
 fn two_releases() -> TestResult<Harness<Store>> {
@@ -642,10 +630,6 @@ fn a_stored_receipt_grants_no_authority_after_a_later_revocation() -> TestResult
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// S1 and S2: scopes and uninterpreted TPS1 content
-// ---------------------------------------------------------------------------
-
 #[test]
 fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one() -> TestResult {
     let mut h = Harness::<Store>::open()?;
@@ -772,10 +756,6 @@ fn unused_tps1_content_is_retained_byte_for_byte_and_never_interpreted() -> Test
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// X1: admission-level denials leave the state byte-identical
-// ---------------------------------------------------------------------------
-
 #[test]
 fn every_admission_denial_names_its_error_and_changes_nothing() -> TestResult {
     let genesis_after = |h: &Harness<Store>, spec: &Spec, tps: TpsSpec| -> TestResult<_> {
@@ -889,10 +869,6 @@ fn an_expired_tps1_is_denied_exactly_at_offline_valid_through() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The retained-record accessors
-// ---------------------------------------------------------------------------
-
 #[test]
 fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> TestResult {
     let mut h = Harness::<Store>::open()?;
@@ -974,10 +950,6 @@ fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> Tes
     assert_eq!(identity.timeline_id(), h.timeline);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// The closed error
-// ---------------------------------------------------------------------------
 
 #[test]
 fn registry_error_messages_are_stable_and_secret_free() {
@@ -1082,10 +1054,6 @@ fn registry_error_messages_are_stable_and_secret_free() {
         assert!(error.source().is_some());
     }
 }
-
-// ---------------------------------------------------------------------------
-// Revision 7: the release proof of admit and rollback (R7-T3, R7-T4, R7-T5)
-// ---------------------------------------------------------------------------
 
 /// Admit `manifest` with `proof` and assert exactly `expected` with nothing changed.
 ///

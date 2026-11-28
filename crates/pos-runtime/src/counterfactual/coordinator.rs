@@ -276,15 +276,6 @@
 //!   Driver/Plugin declaration API is a separate ticket. Every Tick is
 //!   recorded: there is no unrecorded path.
 //!
-//! # Deferred
-//!
-//! - Proving the committed coverage of the Ticks from `first_tick` up to the
-//!   global frontier.
-//! - The production [`CounterfactualFrontierSourceV1`] (Redmine #536, #553).
-//! - The Driver/Plugin dependency declaration API behind
-//!   [`CounterfactualDeclaringTickStagerV1`].
-//! - Classified Forks whose FAR1 was imported (Redmine #447).
-
 use std::collections::BTreeSet;
 
 use pos_conformance::counterfactual::frontier_artifacts::{

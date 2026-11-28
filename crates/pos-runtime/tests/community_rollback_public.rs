@@ -128,10 +128,6 @@ fn assert_nothing_rolled_back(world: &World, installs: usize) -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The rollback and its activation Event
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_rollback_commits_the_targets_activation_event_and_reactivates_it() -> TestResult {
     let (mut world, first, second) = two_installed()?;
@@ -189,10 +185,6 @@ fn a_repeated_rollback_is_an_idempotent_replay_without_a_second_event() -> TestR
     assert_eq!(events(&world)?.len(), 3);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// The evaluation world's rollback and the gate
-// ---------------------------------------------------------------------------
 
 /// The host trust material of the publisher world's current evidence.
 fn trust_material(world: &World, material: &Material) -> CommunityPluginTrustMaterialV1 {
@@ -279,10 +271,6 @@ fn the_evaluation_world_rollback_reactivates_the_target_for_the_gate() -> TestRe
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Refusals
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_source_failure_is_reported_as_source() -> TestResult {
     let (mut world, ..) = two_installed()?;
@@ -352,10 +340,6 @@ fn a_rollback_to_the_active_release_is_refused_by_the_registry() -> TestResult {
     assert_eq!(events(&world)?.len(), 2);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// The total host error mapping
-// ---------------------------------------------------------------------------
 
 /// The number of arms `index` distinguishes: two outer ones and six wrapped ones.
 const ARMS: usize = 8;

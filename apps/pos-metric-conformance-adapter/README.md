@@ -1,13 +1,13 @@
 # pos-metric-conformance-adapter
 
 The EAI1/EAO1 `exported-artifact` subject adapter of plugins/eval for the metric computation
-profile `pigloros.w8.metric-computation` (ADR-062 Revision 7 slice 4, #1217).
+profile `pigloros.w8.metric-computation`.
 
 Results are Local-relaxation engineering evidence of a Draft profile, not hosted conformance. A
-pass claims metric computation only: no calibration quality, predictive benefit,
-representativeness, external validity or deployment fitness (profile section 4.1 item 2). Any
-hosted, Candidate or Stable claim still needs the Sandbox Provider, and Stable needs a second
-independently developed implementation under test (section 4.5 item 5).
+pass claims metric computation only. It does not establish calibration quality, predictive
+benefit, representativeness, external validity or deployment fitness. Hosted, Candidate or Stable
+claims require the Sandbox Provider; Stable also requires a second independently developed
+implementation under test.
 
 ## What it does
 
@@ -28,8 +28,8 @@ mode is `Unavailable`.
 - The gates of the other families: the subject holds only `read-public-bundle`, so any other
   requested capability and any network use is `capability-denied` before a member is read
   (`den.1`, `den.2`); a step request above the attempt's execution-step budget is a resource
-  limit (`res.3`); an oversized member goes through the #222 transport's bounds, which reject a
-  member above the 64 MiB selected ceiling with `FieldOutOfBounds` (`res.2`); a provider
+  limit (`res.3`); the EAI1 frame decoder rejects a member above the selected 64 MiB ceiling with
+  `FieldOutOfBounds` (`res.2`); a provider
   contract other than `pigloros.fixture.metric-conformance@2.0.0` is `incompatible-contract`
   with no fallback (`dgr.2`).
 - A `canonical-output` family outputs its record of every sub-case, the RFC 8785 JSON of the

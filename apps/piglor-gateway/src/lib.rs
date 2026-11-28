@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-//! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
+//! `piglor-gateway` — a local-first gateway with an HTTP interface.
 //!
 //! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. The production serve
 //! composition ([`local_principal::local_gateway`]) requires host-bound Principal authorization
@@ -1235,8 +1235,7 @@ pub struct Gateway {
     /// Whether protected operations need [`Self::authorization`] (always set
     /// with it), so a composition without its authorizer fails closed.
     authorization_required: bool,
-    /// The admission hook of the Local erasure driver, set once its task
-    /// runs (ADR-136 §6; owner decision D7 of 2026-11-18 on #1413).
+    /// The Local erasure driver's admission hook, bound when its task is spawned.
     local_erasure_wake: Arc<std::sync::OnceLock<local_erasure_composition::LocalErasureTriggerV1>>,
     /// The Decision Preview installed-profile port, quota and in-flight
     /// slots (ADR-140).
@@ -1401,11 +1400,6 @@ fn gateway_action_registry_with_authority(
     Arc::new(gateway_action_registry_builder_for_test(bodies, authority))
 }
 
-// The production registry selects the reviewed Gateway entry with installed
-// evidence for the profile the bound execution mode selects (ADR-134 §7,
-// field 9: Local `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135).
-// No installed Gateway EPF1 exists, so it fails closed; #461 owns positive
-// activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1416,9 +1410,6 @@ fn gateway_action_registry_builder(
     })
 }
 
-// Behavior fixtures have no installed profile, session pin, or production
-// registration authority. They exist only in unit tests, so they never enter
-// the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -1624,7 +1615,7 @@ pub(crate) struct GenerationBoundEventPage {
     pub(crate) inventory_generation: Option<ErasureReferenceV1>,
 }
 
-/// JSON notice pushed on the event bus / WebSocket.
+/// Event metadata published to Gateway subscribers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventNotice {
     pub timeline_id: String,
@@ -1634,7 +1625,7 @@ pub struct EventNotice {
     pub seq: u64,
 }
 
-/// Authoritative result of one admitted human action (ADR-021 / #319).
+/// Result of one admitted human action.
 ///
 /// It carries the store's committed receipt and the committed Event that
 /// receipt names; the tentative `ActionApprover` result never leaves host
@@ -1678,10 +1669,7 @@ impl AdmittedAction {
     }
 }
 
-/// One authenticated human action request (ADR-021 / #319).
-///
-/// Exact Wave 9 route fields remain owned by #301/#306; this is the Gateway
-/// library seam every human action uses.
+/// Input to one authenticated human action admission.
 #[derive(Clone, Debug)]
 pub struct HumanActionRequest<'a> {
     /// Target Timeline identifier.
@@ -2911,7 +2899,7 @@ impl Gateway {
         Ok(result)
     }
 
-    /// Subscribe to live append notices (WebSocket / tests).
+    /// Subscribe to event notices published by this Gateway.
     ///
     /// Slow subscribers can see [`broadcast::error::RecvError::Lagged`]; resync via
     /// the bounded HTTP poll — the store is authoritative.
@@ -3807,20 +3795,20 @@ impl Gateway {
         }
     }
 
-    /// Append one `society.signal` (fan-out convenience for #71).
+    /// Append one `society.signal` event.
     ///
     /// # Errors
-    /// Returns store / id errors.
+    /// Returns a Gateway error if the client Timeline is unavailable, the
+    /// payload or response exceeds its bound, the event limit is reached, or
+    /// the store operation fails.
     pub async fn append_signal(
         &self,
-        timeline_id: &str,
-        entity_id: &str,
+        timeline_id: TimelineId,
+        entity_id: EntityId,
         signal: &SocietySignal,
     ) -> Result<Event, GatewayError> {
-        let timeline =
-            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
-        let entity = parse_entity_id(entity_id)?;
-        let draft = draft_signal(entity, signal);
+        let timeline = self.client_timeline(timeline_id)?;
+        let draft = draft_signal(entity_id, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
         self.append_draft(timeline, draft).await
     }
@@ -4495,9 +4483,6 @@ mod tests {
         drop(gateway);
     }
 
-    /// ADR-134 §7: registration follows the bound mode's selection (Local
-    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135) and fails
-    /// closed in both modes until #461 installs an EPF1.
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
         for mode in [
@@ -7921,7 +7906,7 @@ mod tests {
             object: None,
         };
         let event = gw
-            .append_signal(&tl.id().to_string(), &EntityId::new().to_string(), &signal)
+            .append_signal(tl.id(), EntityId::new(), &signal)
             .await
             .test_ok();
         let notice = rx.try_recv().test_ok();
@@ -7953,34 +7938,6 @@ mod tests {
                 "not-a-ulid",
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({}),
-            )
-            .await
-            .test_err();
-        assert!(matches!(err, GatewayError::InvalidId(_)));
-        let err = gw
-            .append_signal(
-                &tl.id().to_string(),
-                "not-a-ulid",
-                &SocietySignal {
-                    dimension: SocietyDimension::Trust,
-                    value: 0.1,
-                    subject: None,
-                    object: None,
-                },
-            )
-            .await
-            .test_err();
-        assert!(matches!(err, GatewayError::InvalidId(_)));
-        let err = gw
-            .append_signal(
-                "not-a-ulid",
-                &EntityId::new().to_string(),
-                &SocietySignal {
-                    dimension: SocietyDimension::Trust,
-                    value: 0.1,
-                    subject: None,
-                    object: None,
-                },
             )
             .await
             .test_err();

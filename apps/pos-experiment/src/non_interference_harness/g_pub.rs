@@ -1,8 +1,6 @@
-//! The G-PUB capture adapters of the non-interference harness (ADR-062
-//! Revision 8 slice N1, #1229; owner note
-//! `ADR-062_R8_NonInterference_Executions`).
+//! G-PUB capture adapters for the non-interference harness.
 //!
-//! Two ADR-059 rows are captured here; both use the same subject:
+//! Two observations are captured here; both use the same subject:
 //!
 //! - `NI-PUBLIC-006` captures the public Gateway protocol. The capture
 //!   speaks HTTP to a fresh `piglor-gateway` router.
@@ -378,10 +376,6 @@ impl NonInterferenceSessionSubjectV1 for GPubSessionSubjectV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Subject
-// ---------------------------------------------------------------------------
-
 struct GPubPlugin;
 
 impl Plugin for GPubPlugin {
@@ -439,10 +433,6 @@ fn live_events(experiment: Experiment) -> Result<Vec<Event>, NonInterferenceNonE
         .and_then(|mut session| recorded(&mut session))
         .map(|(_, events)| events)
 }
-
-// ---------------------------------------------------------------------------
-// Surfaces
-// ---------------------------------------------------------------------------
 
 /// The position-relative export: its Event stream and the export record
 /// `[mode code, name or null, owner ordinal or null, head, stream]`, the
@@ -502,10 +492,6 @@ fn seam_order(unauthorized_value: &[u8]) -> [SeamRole; 2] {
         [SeamRole::Subject, SeamRole::Denied]
     }
 }
-
-// ---------------------------------------------------------------------------
-// NI-EVAL-007: exported artifact and evaluator input
-// ---------------------------------------------------------------------------
 
 fn evaluator_surfaces(
     run: &GPubRunV1<'_>,
@@ -731,10 +717,6 @@ fn evaluator_attempt(
         },
     }
 }
-
-// ---------------------------------------------------------------------------
-// NI-PUBLIC-006: public Gateway protocol
-// ---------------------------------------------------------------------------
 
 fn public_surfaces(
     run: &GPubRunV1<'_>,

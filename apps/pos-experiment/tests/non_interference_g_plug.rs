@@ -3,9 +3,6 @@
 #![cfg(unix)]
 
 //! Public-interface tests for the G-PLUG non-interference capture adapters
-//! (ADR-062 Revision 8 slice N2, #1230; owner note
-//! `ADR-062_R8_NonInterference_Plugin`, scoping
-//! `ADR-059_R9_State_Migration_Scoping`).
 //!
 //! The matrix test runs every G-PLUG coordinate once (one shared run):
 //! - Local spawns `pos-ni-g-plug-subject` as a fresh process.
@@ -226,10 +223,6 @@ fn capture(
     )
 }
 
-// ---------------------------------------------------------------------------
-// Matrix
-// ---------------------------------------------------------------------------
-
 /// Run every G-PLUG coordinate once and return the executed cases. Every
 /// Air-Gapped case must carry its typed cause and no claim.
 fn execute_every_coordinate(
@@ -325,10 +318,6 @@ fn every_g_plug_coordinate_executes_or_stays_typed_non_executed_and_matches_its_
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures: the one-delta proof and the migration-only canary
-// ---------------------------------------------------------------------------
-
 #[test]
 fn every_g_plug_pair_differs_only_in_its_declared_unauthorized_value() -> TestResult {
     for fixture_id in G_PLUG_FIXTURE_IDS_V1 {
@@ -399,10 +388,6 @@ fn the_migration_only_canary_is_non_executed_unsupported_without_an_nia1() -> Te
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Capture adapters
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_host_writes_the_unauthorized_value_only_to_its_own_record() -> TestResult {
@@ -653,10 +638,6 @@ fn a_capture_without_an_adapter_or_its_host_files_is_typed_non_executed() -> Tes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The public Plugin protocol
-// ---------------------------------------------------------------------------
-
 fn invocation() -> pos_runtime::community_plugin_host::PluginInvocationV1 {
     g_plug_invocation_v1(1, 1, b"observation".to_vec(), vec![0; 32])
 }
@@ -859,10 +840,6 @@ fn the_host_admits_only_a_response_for_the_export_it_invoked() -> TestResult {
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Local subject
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_local_subject_serves_one_request_or_writes_nothing() -> TestResult {

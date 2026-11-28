@@ -117,10 +117,6 @@ const EVALUATOR: [u8; 32] = [0xa2; 32];
 /// Recomputation Ticks after the first one, up to the plan horizon.
 const HORIZON_SPAN: u64 = 2;
 
-// ---------------------------------------------------------------------------
-// The registry and its Drivers
-// ---------------------------------------------------------------------------
-
 /// One Driver of the factual history and the Plugin that owns its Event type.
 struct Spec {
     plugin: u128,
@@ -256,10 +252,6 @@ impl Setup {
         Ok(registry)
     }
 }
-
-// ---------------------------------------------------------------------------
-// The store adapters
-// ---------------------------------------------------------------------------
 
 struct Shared<B>(Arc<Mutex<B>>);
 
@@ -534,10 +526,6 @@ impl Backend for SqliteStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The factual history
-// ---------------------------------------------------------------------------
-
 /// Where the factual history can be cut.
 #[derive(Clone, Copy)]
 enum CutChoice {
@@ -671,10 +659,6 @@ fn fork_runtime<B: Backend>(
         owners,
     })
 }
-
-// ---------------------------------------------------------------------------
-// The provisional graph
-// ---------------------------------------------------------------------------
 
 /// What the Fork reads of the recorded prefix at its cut.
 struct Prefix {
@@ -1069,10 +1053,6 @@ impl CounterfactualDeclaringTickStagerV1 for ProvisionalTickStager {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plan and host records
-// ---------------------------------------------------------------------------
-
 /// The Intervention that assigns the output of the first Driver at `tick`.
 fn intervention(tick: u64) -> InterventionV1 {
     InterventionV1 {
@@ -1219,10 +1199,6 @@ const fn suffix_request(
         evaluator_identity_digest: EVALUATOR,
     }
 }
-
-// ---------------------------------------------------------------------------
-// The scenario
-// ---------------------------------------------------------------------------
 
 /// Everything the counterfactual half needs, read after the Fork exists.
 struct Prepared<B> {

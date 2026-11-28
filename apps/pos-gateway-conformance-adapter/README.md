@@ -1,12 +1,13 @@
 # pos-gateway-conformance-adapter
 
-The EAI1/EAO1 `public-gateway-protocol` subject adapter of apps/piglor-gateway for profile
-`pigloros.w8.gateway-client-seam` (provider `pigloros.fixture.gateway-client-conformance@2.0.0`,
-Redmine #1295).
+The EAI1/EAO1 `public-gateway-protocol` subject adapter for the Gateway client conformance
+profile `pigloros.w8.gateway-client-seam` (provider
+`pigloros.fixture.gateway-client-conformance@2.0.0`).
 
-Results are Local-relaxation engineering evidence, not hosted conformance. The normative surface is
-the documented ADR-014 route table only: no OpenAPI document, Golden Path transition or public
-client action or authentication contract.
+Results are Local-relaxation engineering evidence, not hosted conformance. The adapter exercises
+the cases in the checked-in profile fixtures. It does not claim conformance for Gateway operations
+that those cases do not cover. The wire contract is documented in
+[`contracts/gateway/v1`](../../contracts/gateway/v1/README.md).
 
 ## What it does
 
@@ -18,26 +19,26 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
 
 - Library: `pos_gateway_conformance_adapter`. `run(reader, writer)` is the whole adapter; the
   binary only wires the process's standard streams to it. `executor_declaration` is its exact
-  ADR-068 `FixtureExecutorV1`.
+  `FixtureExecutorV1`.
 - Every sub-case runs on a fresh in-process Gateway over a verified empty in-memory erasure host.
   Its exchanges are raw HTTP requests through the Gateway's public `router` (loopback) and
   `spectator_router` (the non-loopback public listener), with no socket, so Local and Air-Gapped
   are the same execution.
-- The `authorized` and `authorized-air-gapped` compositions are the production serve
-  composition (#1361): a fresh SQLite store is bound to the Local or the Air-Gapped execution
-  mode (ADR-134), a fixture Local Principal document, which lets one actor create Timelines, read
-  their Events and read its own Session (#1362) and grants no action, signal or network
+- The `authorized` and `authorized-air-gapped` compositions use the production serve
+  composition: a fresh SQLite store is bound to the Local or the Air-Gapped execution
+  mode, a fixture Local Principal document, which lets one actor create Timelines, read
+  their Events and read its own Session and grants no action, signal or network
   capability, is provisioned into it, and the production `local_gateway` composition serves it
-  and requires it for every protected operation. No production authority is sourced from the
-  fixture document (ADR-108). The `authorized-consented` composition (#309) also grants
+and requires it for every protected operation. No production authority is sourced from the
+fixture document. The `authorized-consented` composition also grants
   `consent.revoke` and binds one consent, provisioned through the production `provision_on_host`
   path, that governs Timeline creation; an exchange that captures `consent` fills the `{consent}`
   slot of later request bodies with the first `consent_ref` its Session lists. The
-  `authorized-rooms` composition (#303) may create, derive and read Scenario Rooms, create and
-  read Decision Previews (#305) and revoke its consent, records the
+  `authorized-rooms` composition may create, derive and read Scenario Rooms, create and
+  read Decision Previews and revoke its consent, records the
   fixture governance record and binds one export-permitted consent; an exchange that captures
   `room` fills the `{room}` slot of later paths with the room `id`.
-- The `authorized-erasure` compositions (#1449) grant only `erasure.request` and
+- The `authorized-erasure` compositions grant only `erasure.request` and
   `erasure.read`. Three of them serve the Local erasure authority: a fixture deployment trust
   state, a bundle the production `provision_local_erasure` builds and a fixture
   `erasure-bundle/` root signs, and a fixture role-2 signer, composed by the Gateway's own
@@ -62,5 +63,5 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
 evidence-status records and `src/subject/schema_digests.rs`, and verifies them with `--check`.
 `tests/adapter_public.rs` builds the attempts from the checked-in files and drives the library and
 the binary through the pos-reference EAI1/EAO1 codec in both modes. `tests/provider_dispatch_public.rs`
-runs every family through the evaluator's exact-identity dispatch (ADR-062 R8 N6) in the Local and
+runs every family through the evaluator's exact-identity dispatch in the Local and
 Air-Gapped ExecutionProfile runs and requires the flipped records.

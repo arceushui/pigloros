@@ -394,9 +394,9 @@ fn a_bundle_for_another_policy_or_executor_is_a_mismatch() -> TestResult {
     Ok(())
 }
 
-/// Owner decision Q14 (2026-11-17, #1412): the bundle must list its store's
-/// Erasure Host Timeline among `host_timelines`, with or without a composed
-/// executor; other host Timelines beside it do not matter.
+/// The bundle must list its store's Erasure Host Timeline among
+/// `host_timelines`, with or without a composed executor; other host Timelines
+/// beside it do not matter.
 #[test]
 fn a_bundle_without_its_erasure_host_timeline_is_a_mismatch() -> TestResult {
     let mut store = provisioned_store()?;
@@ -432,8 +432,8 @@ fn a_bundle_without_its_erasure_host_timeline_is_a_mismatch() -> TestResult {
     Ok(())
 }
 
-/// Owner decision Q6 (2026-11-17, #1412): the pinned executor binding is
-/// `CA("ELEXV1", [executor_id, version])` of exactly these values.
+/// The pinned executor binding is `CA("ELEXV1", [executor_id, version])` of
+/// exactly these values.
 #[test]
 fn the_executor_binding_is_the_pinned_executor_version_digest() -> TestResult {
     assert_eq!(
@@ -896,8 +896,8 @@ fn the_compiled_policy_carries_the_owner_constants() -> TestResult {
     Ok(())
 }
 
-/// The owner's 48-row table (decisions D1-a to D5 of 2026-11-16 on #1403),
-/// as `[artifact_class, data_class, category, ack_class]` codes, written
+/// The 48-row expected classification table, as
+/// `[artifact_class, data_class, category, ack_class]` codes, written
 /// independently of the compiled constant.
 const OWNER_CLASSIFICATION: &str = "\
     0,0,0,artifact-store 0,0,0,client-cache-signal 0,0,0,timeline-payload \
@@ -961,10 +961,8 @@ fn the_classification_is_exactly_the_owner_table() {
     assert_eq!(permitted, 48);
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §5/§6: `LocalErasureAuthorityV1` and `submit_local_erasure`
 // (acceptance tests 3b, 5 and 6, authority parts).
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
@@ -2497,10 +2495,8 @@ fn destruction_goes_only_to_an_owner_the_bundle_names() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Freeze and Fork scope extension at the public seams (ADR-136 amendment
 // decisions 1B, 4A and 5A; acceptance tests 2, 3, 3b, 5 and 6).
-// ---------------------------------------------------------------------------
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
@@ -3416,7 +3412,7 @@ fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestR
     );
     drop(host);
     // A routine bundle rotation is refused while the frozen request pins
-    // the old bundle (owner decision Q12 on #1431).
+    // the old bundle.
     let rotated_key = rotated_signer().verifying_key().to_bytes();
     let material = SigningKeyMaterial::new(rotated_signer());
     owned.store.register(KeyRegistrationV1::new(
@@ -3596,8 +3592,7 @@ fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestR
 }
 
 /// Acceptance test 3b on both adapters: the bound is 4,096 targets per
-/// category, and the store target counts toward it (owner decision of
-/// 2026-11-20).
+/// category, and the store target counts toward it.
 ///
 /// 4,095 affected Timelines and the store target are admitted; growth to
 /// 4,096 after submission commits `Rejected` at freeze, and a new request
@@ -3662,10 +3657,8 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ARD1 rows bound to an affected Timeline (decision 2A over C1′). The MRM1
 // closure fixture follows `pos-store/tests/artifact_registration_persistence_public.rs`.
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
@@ -3680,8 +3673,8 @@ use pos_core::{
     WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
 
-// This fixture isolates the store's transactional port. Its synthetic WCR1
-// registration is not Wave 8 owner-verification evidence.
+// This fixture isolates the store's transactional port. Its verifier checks
+// the TimelineReplay class and canonical WCR1 encoding only.
 struct TestOnlyStructuralOwnerVerifier {
     recording_data_class: ArtifactDataClassV1,
     recording_keys: Vec<pos_core::ArtifactKeyDependencyV1>,
@@ -3887,8 +3880,8 @@ fn commit_bound_closure(
     Ok(())
 }
 
-/// The cells decision 1B gives every bound ARD1 row of `class`: its owner
-/// cell, and the Key and Backup cells of each role-7 dependency's target.
+/// Build cells for each bound ARD1 row of `class`: its artifact-store target
+/// and the Key and Backup targets of each role-7 dependency.
 fn ard1_cells(
     store: &LocalStore,
     timeline: TimelineId,
@@ -3902,7 +3895,7 @@ fn ard1_cells(
     {
         let digest = ErasureReferenceV1::from_digest(*row.artifact_digest().as_bytes());
         // No MRM1 closure record is a report class, so each is an
-        // `artifact-store` cell (D5).
+        // `artifact-store` cell.
         cells.push((
             local_target(row.artifact_class(), digest, reference(0))?,
             ErasureInventoryCategoryV1::Artifact,
@@ -4197,13 +4190,11 @@ fn an_anchor_only_scope_freezes_and_recovers() -> TestResult {
     assert_committed_freeze(&store, host, request, Vec::new(), &cells, &signed)
 }
 
-// ---------------------------------------------------------------------------
 // Attempt, acknowledgement and receipt admission at the public seams
 // (ADR-136 §5 and §6; acceptance tests 4, 6 and 8, authority parts). The
 // tests play the C4 driver and signer: owner results are retained ELO1
 // records, and every signature is made with the fixture signer key the
 // bundle pins.
-// ---------------------------------------------------------------------------
 
 use std::sync::Mutex;
 
@@ -4971,7 +4962,7 @@ fn an_attempt_must_be_the_one_its_request_derives() -> TestResult {
     }
     drop(host);
     // Attempt 0 continues the frozen request, so it is admitted after the
-    // bundle expires (owner decision of 2026-11-16).
+    // bundle expires.
     assert_eq!(
         attempted
             .store
@@ -6180,11 +6171,9 @@ fn a_retry_recovers_on_its_retained_frozen_bundle_after_a_rotation() -> TestResu
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §4a: `LocalErasureExecutorV1`, `destroy_key_for_erasure` and the
 // dispatch outbox, with MemoryStore/SQLite parity, and the Q18 subject-fence
 // exemption (#1430).
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     ErasureAuthorityExecutionV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
@@ -7175,11 +7164,9 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §5/§6: `LocalErasureSignerV1` and `LocalErasureDriverV1`, the
 // rotation rule and the startup sweep (#1431; acceptance tests 1, 4, 7 and
 // the signer parts of 6).
-// ---------------------------------------------------------------------------
 
 use pos_runtime::{
     LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureSignerV1,
@@ -8080,7 +8067,7 @@ fn a_refused_signature_defers_the_step() -> TestResult {
 }
 
 /// `advance` commits one transition per call, in the order `step` would,
-/// and answers `Idle` once nothing is due (owner decision D7 on #1413).
+/// and answers `Idle` once nothing is due.
 #[test]
 fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
     for adapter in ADAPTERS {
@@ -8371,11 +8358,9 @@ fn an_overflowing_sweep_is_skipped() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-138 §5 and §7: the `export-recipient` owner withdraws the grantee's
 // publication at the host seam (acceptance tests 1, 3, 6 and 7, and ADR-136
 // acceptance test 3 as ADR-138 §2 amends it; #1446).
-// ---------------------------------------------------------------------------
 
 use pos_core::LocalErasureRecipientExportWithdrawalV1;
 use pos_store::sqlite::{RecipientExportPublicationErrorV1, RecipientKeyOwnerV1};
@@ -9040,9 +9025,10 @@ fn signer_rotation(
     )
 }
 
-/// Owner decision of 2026-11-18 on #1431: a new role-2 signer key is
-/// registered only while no request pins a bundle, or as a compromise the
-/// installed TPS1 reflects; the registered key itself is an exact re-run.
+/// A routine role-2 key change is refused while any request pins a bundle.
+/// A compromise rotation requires installed TPS1 to revoke the old signer and
+/// each pinned bundle's root or signer.
+/// Re-requesting the current registered key is a no-op.
 #[test]
 fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResult {
     let new_key = rotated_signer().verifying_key().to_bytes();
@@ -9150,11 +9136,8 @@ fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// #1449: the ELADM1 submission binding (owner decision D5 on #1413), the
-// typed admission refusals (D3, D9) and the `getErasure` projection
-// (ADR-136 §7).
-// ---------------------------------------------------------------------------
+// ELADM1 submission binding, typed admission refusals, and the `getErasure`
+// projection.
 
 use pos_core::LocalErasureAdmissionV1;
 use pos_runtime::{LocalErasureClassCountV1, LocalErasureProjectionV1};
@@ -9486,11 +9469,8 @@ fn the_redaction_generation_rises_across_requests() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
-// a subject-scoped export through core `export_timeline`, then erasure,
-// then the export again through the public offline evaluator.
-// ---------------------------------------------------------------------------
+// Verify subject-scoped export through core `export_timeline` before and
+// after erasure using the public offline evaluator.
 
 use pos_core::{
     store::export_timeline, ArtifactClaimInputV1, ArtifactOptionalityV1, ArtifactStateV1,
@@ -9589,30 +9569,24 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // The ADR-136 acceptance matrix, slice C6a (#1469): the runtime gaps of
 // acceptance tests 2 to 6, over both adapters. It reuses every fixture
 // above; `docs/erasure/adr-136-acceptance-matrix.md` maps each bullet.
-// ---------------------------------------------------------------------------
 
 #[path = "local_erasure_composition/acceptance.rs"]
 mod acceptance;
 
-// ---------------------------------------------------------------------------
 // ADR-129 revision 13 (#560 A4b-2, R13-1): the Memory community
 // erasure-budget counters against the authority's closure.
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
 #[path = "local_erasure_composition/community_budget.rs"]
 mod community_budget;
 
-// ---------------------------------------------------------------------------
 // ADR-136 follow-up F3 (#1408): the operator's admissions record closes
 // fresh Local submissions only. An exact replay, the driver and its startup
 // sweep never read it, so every admitted request still freezes and
 // completes.
-// ---------------------------------------------------------------------------
 
 use pos_core::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
 

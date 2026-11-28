@@ -41,10 +41,6 @@ fn admitted() -> TestResult<Harness<Store>> {
     Ok(h)
 }
 
-// ---------------------------------------------------------------------------
-// EV1: the facts, and nothing written
-// ---------------------------------------------------------------------------
-
 #[test]
 fn an_evaluation_reports_the_retained_facts_and_changes_nothing() -> TestResult {
     let h = admitted()?;
@@ -87,10 +83,6 @@ fn an_evaluation_reports_the_retained_facts_and_changes_nothing() -> TestResult 
     assert_eq!(h.evaluate(&later, &one)??, evaluation);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// EV2: the precedence table (public rows)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_unprovisioned_scope_is_missing_state_before_anything_else() -> TestResult {
@@ -327,10 +319,6 @@ fn a_forked_floor_precedes_the_active_pointer_check() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// EV3: the UTC floor is read, never raised
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_utc_floor_is_enforced_but_never_raised_by_an_evaluation() -> TestResult {
     let h = admitted()?;
@@ -353,10 +341,6 @@ fn the_utc_floor_is_enforced_but_never_raised_by_an_evaluation() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// EV4: the evidence is bound to the call's coordinates
-// ---------------------------------------------------------------------------
-
 #[test]
 fn evidence_built_at_other_coordinates_than_the_call_is_refused() -> TestResult {
     let h = admitted()?;
@@ -374,10 +358,6 @@ fn evidence_built_at_other_coordinates_than_the_call_is_refused() -> TestResult 
     assert_eq!(h.snapshot(&[&one])?, before);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// EV5: active-pointer equality
-// ---------------------------------------------------------------------------
 
 #[test]
 fn only_the_active_release_of_a_plugin_id_evaluates() -> TestResult {
@@ -418,10 +398,6 @@ fn only_the_active_release_of_a_plugin_id_evaluates() -> TestResult {
     h.assert_evaluate_denied(&genesis, &other_plugin, RegistryError::ReleaseNotActive)?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// EV6: denials
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_adopted_revocation_refuses_the_release_although_its_receipt_is_unchanged() -> TestResult {
@@ -544,10 +520,6 @@ fn an_expired_unknown_or_ungranted_release_is_refused_without_any_adoption() -> 
     )?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// EV7: policy adoption
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_valid_successor_policy_is_refused_until_it_is_adopted() -> TestResult {
@@ -673,10 +645,6 @@ fn the_bridge_reports_expiry_then_root_then_revocation_mappings() -> TestResult 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// EV8: scope isolation and the anchor
-// ---------------------------------------------------------------------------
-
 /// Evaluate `manifest` in the scope of `env`, which may differ from the harness scope.
 fn evaluate_in(
     h: &Harness<Store>,
@@ -753,10 +721,6 @@ fn every_anchor_field_is_compared() -> TestResult {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// EV11: the policy facts come from the retained policy, not the decision
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_policy_facts_follow_the_retained_policy_after_an_adoption() -> TestResult {

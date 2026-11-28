@@ -23,10 +23,6 @@ use crate::{digest_payload, signature_verifies};
 
 /// The signature-math fact. It says nothing about admission.
 ///
-/// The enum is deliberately closed (no `#[non_exhaustive]`): the product is
-/// unreleased, so a later slice replaces it in place in a coordinated
-/// breaking change.
-///
 /// A retained key that is not a usable curve point reports `Invalid`, the
 /// same as a wrong signature; only an absent key is `Unverifiable`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,10 +38,6 @@ pub enum ReleaseSignatureMathV1 {
 }
 
 /// The registry's current record of the claimed signing identity.
-///
-/// The enum is deliberately closed (no `#[non_exhaustive]`): the product is
-/// unreleased, so a later slice replaces it in place in a coordinated
-/// breaking change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SigningKeyStateV1 {
     /// The identity is the owner's active `PluginReleaseSigning` epoch.
@@ -67,10 +59,6 @@ pub enum SigningKeyStateV1 {
 /// validity interval, so the only honest report is that admission was not
 /// evaluated. Only the installer's admission path may decide installability.
 ///
-/// The enum is deliberately closed (no `#[non_exhaustive]`): the installer
-/// (#573) decides admission through its own receipt, and any change here is a
-/// coordinated breaking change, since the product is unreleased and types are
-/// replaced in place.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentAdmissionV1 {
     /// No trust policy, revocation state, interval or clock was consulted.

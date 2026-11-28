@@ -438,10 +438,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn resolved_entry_without_outcome_data_skips_brier_block() {
-        // status == "resolved" but outcome/resolved_at/brier_score are None.
-        // This covers the `}` on line 170 — the path where the outer
-        // `if entry.status == "resolved"` guard is true but the inner
-        // `if let (Some(outcome), Some(at), Some(brier))` pattern fails.
         let mut e = pending_entry("id1", "T");
         e.status = "resolved".to_owned();
         // outcome, resolved_at, brier_score left as None

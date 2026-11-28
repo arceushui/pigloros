@@ -37,10 +37,6 @@ use pos_store::plugin_trust_registry::{
 
 type TestResult = BoxResult<()>;
 
-// ---------------------------------------------------------------------------
-// Shared setup and assertions
-// ---------------------------------------------------------------------------
-
 /// A world with R1 installed (activation tag 1) and its successor R2 installed (tag 2), so R2
 /// is active and R1 is a retained rollback target.
 fn two_installed() -> BoxResult<(World, PublishedPluginReleaseV1, PublishedPluginReleaseV1)> {
@@ -97,10 +93,6 @@ const fn signature_error() -> PluginReleaseRollbackErrorV1 {
 const fn registry_error(error: PluginTrustPolicyRegistryErrorV1) -> PluginReleaseRollbackErrorV1 {
     PluginReleaseRollbackErrorV1::Registry(error)
 }
-
-// ---------------------------------------------------------------------------
-// Positive rollback and replay
-// ---------------------------------------------------------------------------
 
 #[test]
 fn signed_malformed_rollback_target_refuses_before_time_or_registry() -> TestResult {
@@ -243,10 +235,6 @@ fn the_retry_after_a_lost_acknowledgement_is_an_idempotent_replay() -> TestResul
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Registry refusals pass through typed
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_never_admitted_target_is_an_unknown_rollback_target() -> TestResult {
     let mut world = World::new()?;
@@ -346,10 +334,6 @@ fn an_unavailable_trusted_clock_refuses_before_the_registry() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Refusals before the registry
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_target_with_a_tampered_signature_is_refused_before_the_registry() -> TestResult {
     let (mut world, _, _) = two_installed()?;
@@ -434,10 +418,6 @@ fn a_noncanonical_target_pmf1_is_refused_before_the_registry() -> TestResult {
     assert_eq!(source.remaining(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// The closed error
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_rollback_error_displays_its_cause_transparently() {

@@ -1,14 +1,13 @@
 # Gateway v1 contract
 
-The language-neutral contract of the PiglorOS Gateway, the only public application boundary
-(ADR-022, Redmine #301). A client needs these files and nothing else: no Rust source, private
-crate or database.
+The language-neutral contract for the PiglorOS Gateway. Clients use these files without depending
+on the Rust source, private crates, or database.
 
 | File | What it is |
 |------|------------|
 | [`openapi.json`](openapi.json) | The canonical description: OpenAPI 3.1.1 with the JSON Schema 2020-12 dialect. |
 | [`problem-types.json`](problem-types.json) | The open RFC 9457 problem-type registry: every failure `code`, its `type` URN, `title` and permitted HTTP statuses. A later v1 revision may add a problem type (rule 5). |
-| [`execution-mode-profiles.json`](execution-mode-profiles.json) | The reviewed GMD1 declaration of the two Gateway execution-mode profiles (ADR-134), from which a client recomputes every `mode_profile_digest`. Its closed schema is [`execution-mode-profiles.schema.json`](execution-mode-profiles.schema.json). |
+| [`execution-mode-profiles.json`](execution-mode-profiles.json) | The GMD1 declaration of the two Gateway execution-mode profiles, from which a client recomputes every `mode_profile_digest`. Its closed schema is [`execution-mode-profiles.schema.json`](execution-mode-profiles.schema.json). |
 | [`examples/`](examples/) | Golden request and response pairs, positive and fail-closed, for every operation. |
 | [`compatibility/baseline.json`](compatibility/baseline.json) | The frozen v1 baseline: every served operation, the components it reaches and the problem registry as published. |
 | [`compatibility/examples/`](compatibility/examples/) | The frozen golden examples that stay valid for the whole compatibility window. |
@@ -26,8 +25,9 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 - `served`: the Gateway serves it today and its responses are drift-checked. `x-pigloros-listeners`
   names the listeners that serve it: `loopback` (the complete local API) or also `public` (the
   spectator-only Prediction Ledger routes of a non-loopback bind).
-- `draft`: a Wave 9 resource family (owner ticket in `x-pigloros-owner`, #302 to #309). It is not
-  served yet; only its golden examples validate, and it may change until its owner serves it.
+- `draft`: the operation is specified but is not registered by the current Gateway router. Its
+  golden examples validate the contract shape; they do not claim that the implementation serves
+  the operation. A draft operation can change until the implementation serves it.
 
 ## Schemas and media types
 
@@ -36,17 +36,17 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   compose the resource envelope (schema ID, resource ID, revision or generation, provenance,
   `mode_profile`, `execution_profile` and capability-filtered availability, whose withheld
   reasons are `unknown`, `unauthorized`, `revoked`, `deleted` and `unavailable`). The envelope and
-  the schemas it reaches are frozen with `GET /v1/session` (#1362), so every Draft resource
+  the schemas it reaches are frozen with `GET /v1/session`, so every Draft resource
   composes the frozen envelope.
-- `GET /v1/session` is served (#1362): the acting Principal's own Session, derived by the host
+- `GET /v1/session` is served: the acting Principal's own Session, derived by the host
   from its recorded grant, the bound execution mode and the authority evaluator, never from the
   request. It requires the `session.read` grant like any protected operation.
-  `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on;
-  a client accepts both.
-- `POST /v1/me/consent-revocations` is served (#309): the acting Principal revokes one of the
+- The server currently returns `contract.contract_version: 1.0.0-draft`; the schema also accepts
+  `1.0.0`.
+- `POST /v1/me/consent-revocations` is served: the acting Principal revokes one of the
   consents its `Session` lists, named by `consent_ref`, under the `consent.revoke` grant. The
-  revocation is a `consent.revoked.v1` Event on the Principal's consent Timeline whose sequence
-  is the ADR-039 fence; it takes effect before the next decision. From then on every operation
+  revocation is a `consent.revoked.v1` Event on the Principal's consent Timeline; its sequence
+  is the revocation fence and it takes effect before the next decision. From then on every operation
   the consent governs (the granted operations of its purpose and data categories) is
   `403 revoked`; every other operation stays available, and no consent ever governs reading the
   Session, revoking a consent or the network capability. A consent the acting entity is not a
@@ -63,7 +63,7 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   a value it does not know as unknown and never fails on it. `execution_profile.state`,
   `provenance.origin` and the Session `network` posture are deliberately closed in v1, like
   every other response enumeration except the problem `code`.
-- `mode_profile` is the Gateway execution-mode profile (GMP1, ADR-134) the resource was produced
+- `mode_profile` is the Gateway execution-mode profile (GMP1) the resource was produced
   under: its ID (`gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`), mode, digest and the
   store `binding_epoch` recorded in the producing commit's evidence. Only `Session` reports the
   current binding, with the operator's `network_grants` and the Principal's `network` (`absent`
@@ -74,12 +74,12 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   public declaration is `execution-mode-profiles.json` (closed schema
   `execution-mode-profiles.schema.json`); `mode_profile_digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes). The checker
-  pins each profile's rotation chain (ADR-135 §7.6): every revision's digest, oldest first, each
+  pins each profile's rotation chain: every revision's digest, oldest first, each
   revision naming its predecessor as `previous_mode_profile_digest`. The examples under
   `examples/` and the gateway-client-conformance fixtures name the head; a frozen example under
   `compatibility/examples/` may name any revision of the chain, because rule 6 freezes its wire
   validity, not what the current release serves.
-- The Scenario Room routes are served (#303): `createScenarioRoom`, `deriveScenarioRoomRevision`
+- The Scenario Room routes are served: `createScenarioRoom`, `deriveScenarioRoomRevision`
   and `getScenarioRoomRevision`, each under its own grant (`scenario-room.create`, `.derive`,
   `.read`). Every `persona` participant must be an actor the Principal's grant covers, and
   `governance_ref` must be the host's governance record: the optional `governance_record_id` of
@@ -91,19 +91,19 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   permit, so a revocation takes effect from the next room operation. The check precedes the
   Idempotency-Key lookup, so even an exact retry after the consent was revoked is `403 revoked`:
   a revoked consent stops all protected work on the room, replays included. Under decision 2a the
-  consent need not match the room's purpose or data categories; a later #309 consent scope may
-  narrow that. A room's Timeline is an ordinary root Timeline: it shares the root-Timeline
+  consent need not match the room's purpose or data categories. A room's Timeline is an ordinary
+  root Timeline: it shares the root-Timeline
   ceiling and its `room.revision.v1` and `room.request.v1` Events are readable through
   `GET /v1/timelines/{timeline_id}/events` with the `timeline.events.read` grant.
 - A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
   `400 invalid-request` before the authority decision and before any lookup; every other
   answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
   claimed once, as a plain Event on the host's request Timeline for a creation, or on the room's
-  own Timeline for a derive, and stays claimed for that Timeline's lifetime (no ADR-038
-  retention window applies to it). A refused request, a stale derive and a ceiling refusal
+  own Timeline for a derive, and stays claimed for that Timeline's lifetime. A refused request, a
+  stale derive and a ceiling refusal
   claim nothing, so the key stays free for another request. A derive whose parent is not the
   head is decided before any key lookup or claim: it answers with the revision already derived
-  from that parent (`200`) when it hashes like that revision (ADR-041 section 7), and is
+  from that parent (`200`) when it hashes like that revision, and is
   otherwise `409 append-conflict`, even when its `Idempotency-Key` was used for a different
   request, which would else be `409 idempotency-conflict`. A new room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
   room. A creation claims on the host's request Timeline (at most one claim per room, so the
@@ -112,17 +112,19 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `events_per_timeline` revisions. A ceiling is a permanent `429 resource-limit-exceeded`
   (`retryable: false`), as on every other route. Finding a claim reads its Timeline once, since
   the host has no entity index.
-- A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
+- A `ScenarioRoomRevision` is `principal-authored`. Its `provenance.digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
   `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a
-  Crockford base32 ULID), in lower-case hex. The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
-  hashes of the ADR-041 amendment of #303; `plugin_composition_hash` depends on the host's bundled
-  Plugins and cannot be recomputed by a client. This `provenance.digest` is what
+  Crockford base32 ULID), in lower-case hex. `rule_set_hash` is BLAKE3 of the canonical JSON rules
+  array. `descriptor_hash` is BLAKE3 of the canonical descriptor object before that hash is
+  added. `plugin_composition_hash` depends on the host's bundled Plugins and cannot be recomputed
+  by a client. This `provenance.digest` is what
   `createDecisionPreview` binds as `scenario_room.digest`.
-- `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
+- `execution_profile` is EPF1-only: `state: installed` with a `profile_id` and
   its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Every
   Gateway resource reports `unavailable`, except a Decision Preview, which reports the EPF1 it was
-  admitted under. In production no preview can be admitted until #1364 or #461 installs an EPF1.
+  admitted under. The current release composition has no installed EPF1, so fresh preview requests
+  fail with `409 incompatible-profile`.
 - A request body is `application/json` (`content-type: application/json`; any other type is
   `415 invalid-request`).
 - A success body is `application/json`; every failure, including unknown paths (`404`), unserved
@@ -139,7 +141,7 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 ## Preferences and OptionSpecs
 
 `POST /v1/preferences`, `POST /v1/option-specs` and their
-`GET .../{id}/revisions/{revision}` reads are served (#304). Both resources are user-authored and
+`GET .../{id}/revisions/{revision}` reads are served. Both resources are user-authored and
 subject-scoped: the subject is the acting entity (`x-piglor-actor-entity`), which the Local
 Principal's grant must cover, and the operations need the grants `preference.create`,
 `preference.read`, `option-spec.create` and `option-spec.read`. A request carries
@@ -182,7 +184,7 @@ Principal's grant must cover, and the operations need the grants `preference.cre
 ## Decision Previews
 
 `POST /v1/decision-previews` (`createDecisionPreview`) and
-`GET /v1/decision-previews/{preview_id}` (`getDecisionPreview`) are served (#305, ADR-140), each
+`GET /v1/decision-previews/{preview_id}` (`getDecisionPreview`) are served, each
 under its own grant: `decision-preview.create` (resource `decision-preview`) and
 `decision-preview.read` (resource `decision-preview.status`). A preview is the
 `pigloros.match-score.v1` Recommendation of the acting entity's own Preference and OptionSpec
@@ -198,7 +200,8 @@ inert, and nothing reaches the real world.
   `Retry-After`. The claim of the key is then looked up: the same key with another request is
   `409 idempotency-conflict`. A fresh request passes, in order, the profile gate (a `profile_id`
   outside the bound mode's servable set of rule 3, or without an installed EPF1, is
-  `409 incompatible-profile`; until #1364 and #461 install one, every fresh request stops here),
+  `409 incompatible-profile`; the current release composition has no installed EPF1, so every
+  fresh request stops here),
   the room (the revision must exist and its `provenance.digest` must be `scenario_room.digest`),
   the bindings (the Preference and the OptionSpec must be the acting entity's, unerased, with the
   named digests, and the acting entity a `persona` participant of the room) and the room's
@@ -266,7 +269,7 @@ inert, and nothing reaches the real world.
 ## Erasure
 
 `POST /v1/me/erasures` (`requestErasure`) and `GET /v1/me/erasures/{erasure_id}` (`getErasure`)
-are served by a Gateway composed with the single-host Local erasure authority (#309, ADR-136).
+are served by a Gateway composed with the single-host Local erasure authority.
 Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.read` (resource
 `erasure.status`), and both are consent-exempt: a revoked consent never refuses them.
 
@@ -292,7 +295,7 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   which a retry never clears. A Gateway without a Local erasure composition, or whose trust
   admission has expired, answers a non-retryable `503 temporarily-unavailable`.
 - **Operator closure.** The operator can close new erasure admissions durably with
-  `piglor-gateway erasure-admissions close <sqlite-path>` and reopen them with `open` (#1408).
+  `piglor-gateway erasure-admissions close <sqlite-path>` and reopen them with `open`.
   While they are closed, a fresh request is a non-retryable `503 erasure-admissions-closed` and
   nothing is requested; only reopening clears it. An exact retry of an admitted request still
   answers its receipt, and `getErasure` and the completion of admitted requests continue, also
@@ -302,7 +305,7 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   caller reaches) and a Gateway without a Local erasure composition all answer the same
   `404 not-found-or-unavailable`. A saturated store executor is the one
   `429 resource-limit-exceeded` it answers, retryable without `Retry-After`. `state` is the
-  ADR-060 lifecycle of the verified ERS1 head, `provenance.digest` the raw ERS1 state digest
+  lifecycle of the verified ERS1 head, `provenance.digest` the raw ERS1 state digest
   (`host-derived`), and `mode_profile` the binding the erasure was submitted under.
   `generation` is the head's ERS1 ordinal times 2^16 plus the acknowledgements committed in the
   active attempt; every attempt closes with a new ERS1 state, so it never decreases.
@@ -312,22 +315,22 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   `partial-failure` with those classes negative. Nothing an erasure answer carries names a
   Timeline, Fork, selector, target, owner or bundle content.
 - **Redaction generation.** An `Erasure` served by a Local erasure composition always carries
-  `redaction_generation` (#1407): the number of client-cache redaction generations (ELCG1) the
+  `redaction_generation`: the number of client-cache redaction generations (ELCG1) the
   store has committed, across every erasure of every subject, `0` before the first. The store
-  raises it by one in the same transaction that commits each `client-cache-signal` owner
-  effect, so it never decreases, also across a restart, and never exceeds 2^53-1, the schema's
+  raises it by one in the same transaction that commits each `client-cache-signal` effect, so it
+  never decreases, also across a restart, and never exceeds 2^53-1, the schema's
   JSON-safe `maximum`: a store at that bound refuses the next commit rather than answer a value
   a JSON client cannot represent. The member is optional in the schema, so a v1 client must
   not require it. See *Client cache* for what a client does with it. The value is store-wide,
   not per subject: it discloses to the caller how many client-cache redactions the host has
-  committed, across every subject. This is intended (owner decision on #1407): every caller of
-  `getErasure` on a Local host is an actor of its one Local Principal.
+  committed across every subject. Every caller of `getErasure` on a Local host is an actor of its
+  one Local Principal.
 
 ## Client cache
 
-The rules below are normative for the Gateway and for every supported client of v1 (ADR-136
-follow-up F2, #1407). A *managed representation* is any response body of a protected loopback
-operation: a Timeline's Events, a Session, a consent, a Scenario Room, Preference or OptionSpec
+The rules below define the Gateway's cache behavior and the client behavior required by v1. A
+*managed representation* is any response body of a protected loopback operation: a Timeline's
+Events, a Session, a consent, a Scenario Room, Preference or OptionSpec
 revision, a Decision Preview or its admission receipt, an erasure receipt or projection, and every
 problem.
 
@@ -374,11 +377,13 @@ lookup answers `not-found-or-unavailable` and never reveals whether the resource
 `503` is not always transient: `erasure-admissions-closed` stays until the operator reopens
 erasure admissions, so it is not retryable.
 
-Every loopback operation except `/health` and the public Ledger reads is protected by the host's
-Local Principal (#1361): loopback reachability is the trust boundary, there is no credential
-scheme, and a request names the entity it acts as in the optional `x-piglor-actor-entity` header,
-which the Principal's grant must cover; a Society Signal's `entity_id` must be that entity. A
-host without a provisioned Local Principal answers every protected operation
+Protected loopback routes use the host's Local Principal: loopback reachability is the trust
+boundary, and the protected API has no separate credential scheme. A request names the entity it
+acts as in the optional `x-piglor-actor-entity` header, which the Principal's grant must cover; a
+Society Signal's `entity_id` must be that entity. `/health`, `/`, `/ledger`, and `GET /v1/ledger`
+are public. When configured, `POST /v1/bridges/owntracks` uses its paired Basic authentication
+credential instead of the Local Principal. A non-loopback listener exposes only the public
+Prediction Ledger routes. A host without a provisioned Local Principal answers every protected operation
 `401 unauthenticated` before reading its body, and so does a request without a valid actor. A
 denied createPrediction is `403 unauthorized` or `403 revoked`, like a write while Ledger writes
 are disabled. An authority decision precedes any protected
@@ -433,8 +438,8 @@ Only an Event with a Timeline sequence is a commit receipt.
 
 ## Compatibility and version negotiation
 
-The rules below are normative (MUST) for the Gateway and for every client of v1. They are the
-compatibility policy of section 11 of the Wave 9 acceptance specification.
+The rules below are normative (MUST) for the Gateway and for every client of v1. The frozen
+compatibility baseline and its declared window are in `compatibility/baseline.json`.
 
 1. **Major in the path.** The API major is the first path segment (`/v1/...`). A request under
    any other major (`/v2/...`, `/v01/...`) is `400 unsupported-version` with the request path as
@@ -448,22 +453,12 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    profile the deployment cannot serve is `409 incompatible-profile`; a Local deployment never
    reports or serves an Air-Gapped profile. The servable sets are Local {`replay-v1`,
    `deterministic-local-v1`, `live-local-v1`} and Air-Gapped {`replay-v1`,
-   `deterministic-air-gapped-v1`, `live-air-gapped-v1`} (ADR-135 §6). They
-   are a server invariant, not a schema rule: an `installed` `execution_profile.profile_id` is
+   `deterministic-air-gapped-v1`, `live-air-gapped-v1`}. They are a server invariant, not a
+   schema rule: an `installed` `execution_profile.profile_id` is
    always in the servable set of the resource's `mode_profile.mode`, while the schema keeps the
    identifier open so a later family stays within v1. A profile in the set is served only once
-   its EPF1 is installed (ADR-134 §5):
-
-   | Requested ADR-058 profile | Local | Air-Gapped | Served when |
-   |---|---|---|---|
-   | `replay-v1` | 409 | 409 | #1364 delivers its EPF1 |
-   | `deterministic-local-v1` | 409 | 409 always (not servable) | Local: #1364 |
-   | `deterministic-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #1364 |
-   | `live-local-v1` | 409 | 409 always (not servable) | Local: #461 |
-   | `live-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #461 installs its EPF1 |
-
-   The positive examples that bind a profile, including the served Decision Preview examples,
-   show the answer once its EPF1 is installed.
+   its EPF1 is installed. The current release composition has no installed EPF1, so fresh
+   Decision Preview requests return `409 incompatible-profile` in both modes.
 4. **Unknown members are handled as each schema declares.** An open request object (no
    `additionalProperties: false`) ignores unknown members; a closed one rejects them. A
    schema-less value such as `EventView.payload` is preserved verbatim. Response schemas are
@@ -486,10 +481,9 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    `oneOf`/`anyOf`/`allOf`/`prefixItems` keep their shape and `pattern`, `format` and `default`
    stay identical even where a change would be harmless.
 6. **Compatibility window.** The served operations frozen in `compatibility/baseline.json` stay
-   supported through Wave 10 after Wave 9 acceptance, and every example under
-   `compatibility/examples/` stays valid for that window, including the fail-closed ones: a
-   request a frozen example rejects stays rejected. Draft operations join the baseline when their
-   owner serves them.
+   supported for the window declared there, and every example under `compatibility/examples/`
+   stays valid for that window, including fail-closed examples. Draft operations join the
+   baseline when they are registered by the Gateway router.
 
 `scripts/check_gateway_contract.py` enforces rules 1, 4 (the declaration), 5 and 6: it compares
 the contract with the frozen baseline (requests must keep accepting what they accepted, responses
@@ -511,8 +505,8 @@ URL, and the description's revision label is not part of the wire contract. The 
 - Run `python3 scripts/check_gateway_contract.py` and
   `python3 scripts/test_check_gateway_contract.py` with the hash-pinned `jsonschema` of
   `requirements-pinned-dependencies.txt`.
-- When an owner ticket turns a Draft operation into a served one, or adds an optional member,
-  parameter, response or header to a served one, run
+- When a Draft operation becomes served, or the contract gains an optional member, parameter,
+  response or header for a served operation, run
   `python3 scripts/check_gateway_contract.py --freeze`. It first checks the contract against the
   existing baseline, then appends the newly served operations, the optional additions to frozen
   ones, the components and security schemes they reach, the served limits, any new problem type
@@ -526,4 +520,4 @@ URL, and the description's revision label is not part of the wire contract. The 
   that states them states every required header of the response it answers (case-insensitive
   names, values of the declared schema) and no undeclared one; an example without `headers`
   asserts none, so a header added within v1 leaves every frozen example valid. The
-  `client-cache-*` examples show `Cache-Control: no-store` (#1407).
+  `client-cache-*` examples show `Cache-Control: no-store`.

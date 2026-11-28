@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the Gateway v1 contract, its examples, served fixtures and compatibility (#1312-#1314).
+"""Check the Gateway v1 contract, its examples, served fixtures and compatibility.
 
 The canonical contract is `contracts/gateway/v1/openapi.json` (OpenAPI 3.1.1, JSON Schema
 2020-12 dialect) with its RFC 9457 problem-type registry `problem-types.json`. This check fails
@@ -22,11 +22,11 @@ fixtures disagree:
    the served routers by `apps/pos-gateway-conformance-adapter`, so a served response that
    drifts from the description fails one of the two checks. An exchange that reaches a Draft
    operation fails: a Draft operation is never mistaken for a served one;
-5. a Draft operation (`x-pigloros-status: draft`) names its owning ticket in
-   `x-pigloros-owner` and in its description, has exactly one family tag and at least one
-   golden example, and every Draft family has a positive and a fail-closed example. A Draft
-   mutation requires `Idempotency-Key`, a Draft read answers a resource that composes the
-   resource envelope, and every `202` answers the admission receipt;
+5. a Draft operation (`x-pigloros-status: draft`) starts its description with `Draft:`, has
+   exactly one family tag and at least one golden example, and every Draft family has a
+   positive and a fail-closed example. Public contract metadata does not expose internal
+   ticket ownership. A Draft mutation requires `Idempotency-Key`, a Draft read answers a
+   resource that composes the resource envelope, and every `202` answers the admission receipt;
 6. every schema a Draft operation reaches is `x-pigloros-maturity: draft` or shared with a
    served operation, and no served operation reaches a Draft schema. Every array, string and
    map of a Draft schema is bounded;
@@ -52,15 +52,13 @@ fixtures disagree:
    frozen example under `compatibility/examples/` is still valid. Every
    served operation is frozen, and parameters are declared per operation with a `schema`.
 
-10. the Gateway execution-mode profile declaration `execution-mode-profiles.json` (ADR-134
-    §3) is valid for its closed schema `execution-mode-profiles.schema.json`, its `profiles`
-    are sorted by identifier bytes, each names as `previous_mode_profile_digest` the
-    predecessor in its rotation chain (`MODE_PROFILE_ROTATION_CHAINS`, ADR-135 §7.6, whose
-    head is recomputed from the declaration by the `piglor-gateway` build and its golden
-    tests), and every `mode_profile` or `produced_under_mode_profiles` entry names a digest of
-    that chain: the head in a golden example and in the gateway-client-conformance inputs and
-    oracles, any revision of the chain in a frozen example under `compatibility/examples/`,
-    which pins v1 wire validity rather than what the current release serves.
+10. the Gateway execution-mode profile declaration `execution-mode-profiles.json` is valid
+    for its closed schema `execution-mode-profiles.schema.json`; its profiles are sorted by
+    identifier bytes; each names its predecessor in the rotation chain; and every
+    `mode_profile` or `produced_under_mode_profiles` entry names a digest from that chain.
+    The Gateway build recomputes the chain head from the declaration. Golden tests verify
+    the head in current examples and conformance inputs and verify prior chain revisions in
+    frozen examples under `compatibility/examples/`.
 
 `--append-only <git-ref>` also requires `compatibility/` to have only gained entries since the
 merge base of HEAD with `<git-ref>` (CI passes `origin/main`), so a change cannot loosen the
@@ -114,15 +112,14 @@ BASELINE = COMPATIBILITY / "baseline.json"
 FROZEN_EXAMPLES = COMPATIBILITY / "examples"
 MODE_PROFILES = CONTRACT / "execution-mode-profiles.json"
 MODE_PROFILES_SCHEMA = CONTRACT / "execution-mode-profiles.schema.json"
-# The rotation chain of each declared profile (ADR-135 §7.6): the ADR-134 §2 BLAKE3 digest of
-# every revision's canonical record, under its own domain, oldest first. Each revision names
-# its predecessor as `previous_mode_profile_digest`, and the last entry is the current head. A
-# reviewed revision appends its digest together with the `piglor-gateway` golden tests; no
-# entry is ever removed.
+# Each declared profile's rotation chain stores the BLAKE3 digest of every canonical record,
+# oldest first. Each revision names its predecessor as `previous_mode_profile_digest`, and the
+# last entry is the current head. The Gateway build recomputes the head from the declaration.
+# A new revision appends its digest and golden tests; no entry is removed.
 MODE_PROFILE_ROTATION_CHAINS = {
     "gateway-mode-air-gapped-v1": (
         "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
-        # 2.0.0 (ADR-135 §7.3): air-gapped-no-route, live-air-gapped-v1.
+        # Revision 2.0.0 adds air-gapped-no-route and live-air-gapped-v1.
         "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb",
     ),
     "gateway-mode-local-v1": (
@@ -137,7 +134,6 @@ MEDIA_TYPES = {"application/json", "application/problem+json"}
 METHODS = ("get", "put", "post", "delete", "patch")
 STATUSES = {"served", "draft"}
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
-DRAFT_OWNER = re.compile(r"^#30[2-9]$")
 ENVELOPE_ID = SCHEMA_ID_PREFIX + "resource-envelope"
 ADMISSION_ID = SCHEMA_ID_PREFIX + "admission-receipt"
 PROBLEM_ID = SCHEMA_ID_PREFIX + "problem"
@@ -424,15 +420,12 @@ def check_operation_status(contract: Contract, method: str, where: str, operatio
     for status, response in operation["responses"].items():
         if status == "202" and response_schema_id(contract, response) != ADMISSION_ID:
             raise ContractError(f"{where} 202: an admission answers the admission receipt")
-    owner = operation.get("x-pigloros-owner")
+    if "x-pigloros-owner" in operation:
+        raise ContractError(f"{where}: public operation metadata exposes internal ticket ownership")
     if operation["x-pigloros-status"] == "served":
-        if owner is not None:
-            raise ContractError(f"{where}: a served operation has no Draft owner")
         return
-    if not isinstance(owner, str) or not DRAFT_OWNER.match(owner):
-        raise ContractError(f"{where}: a Draft operation names its owner ticket #302-#309")
-    if not operation.get("description", "").startswith(f"Draft ({owner}): "):
-        raise ContractError(f"{where}: the description does not start with Draft ({owner})")
+    if not operation.get("description", "").startswith("Draft: "):
+        raise ContractError(f"{where}: the description does not start with Draft:")
     tags = operation.get("tags")
     if not isinstance(tags, list) or len(tags) != 1:
         raise ContractError(f"{where}: a Draft operation has exactly one family tag")

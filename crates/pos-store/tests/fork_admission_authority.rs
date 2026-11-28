@@ -5350,10 +5350,6 @@ fn sqlite_reopen_rejects_a_different_host_key_and_prior_sessions() -> Result<(),
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// ADR-106 revision 3: admitted Fork erasure containment and parent visibility.
-// ---------------------------------------------------------------------------
-
 use pos_core::{ErasureGate as _, ErasureVerifiedInventoryQueryV1 as _};
 
 type AdmissionResult = Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
@@ -6152,10 +6148,6 @@ fn sqlite_admitted_fork_is_recovered_after_reopen_and_freeze() -> Result<(), Box
     assert_eq!(sqlite_graph_rows(&path)?, before);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// ADR-109 revision 9 (A11): permit-bearing delivery execution parity.
-// ---------------------------------------------------------------------------
 
 type DeliveryResult = Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>;
 

@@ -175,10 +175,6 @@ fn cause_of(
     outcome.non_executed_cause()
 }
 
-// ---------------------------------------------------------------------------
-// Probe subjects
-// ---------------------------------------------------------------------------
-
 /// What a test runner returns for every run.
 #[derive(Clone)]
 enum Behaviour {
@@ -492,10 +488,6 @@ impl NonInterferenceSessionSubjectV1 for SessionProbe {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Acceptance: each runner signs, publishes and passes the verifier
-// ---------------------------------------------------------------------------
-
 #[test]
 fn each_runner_signs_a_published_nia1_the_independent_verifier_accepts() -> TestResult {
     let work = tempfile::tempdir()?;
@@ -659,10 +651,6 @@ fn warm_and_cold_preparation_are_both_exercised_in_every_runner() -> TestResult 
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Acceptance: Air-Gapped and every non-executed cause make no claim
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_air_gapped_case_is_unavailable_and_never_a_pass_or_fail() -> TestResult {
@@ -1127,10 +1115,6 @@ impl std::io::Write for ClosedWriter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Publication and inventory
-// ---------------------------------------------------------------------------
-
 #[test]
 fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -1243,10 +1227,6 @@ fn keys_and_harness_debug_forms_show_only_public_material() {
         key().public_key()
     );
 }
-
-// ---------------------------------------------------------------------------
-// NIR1: only 192 trusted NIA1 build a report
-// ---------------------------------------------------------------------------
 
 /// One test-signed NIA1 per coordinate (test-only data, not a claim).
 fn synthetic_artifacts(secret: &[u8; 32]) -> TestResult<Vec<Vec<u8>>> {
@@ -1394,10 +1374,6 @@ fn hex(bytes: &[u8]) -> String {
         text
     })
 }
-
-// ---------------------------------------------------------------------------
-// Exact provenance, budgets and delegation
-// ---------------------------------------------------------------------------
 
 /// The Local request the runner writes for `unauthorized` in a cold case.
 fn local_request_bytes(permitted: &[u8], unauthorized: &[u8]) -> TestResult<Vec<u8>> {
@@ -1644,10 +1620,6 @@ fn a_report_names_the_first_unequal_mode_divergence() -> TestResult {
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Hang guard and concurrent pipes
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_local_process_that_outlives_the_timeout_is_killed_and_unavailable() -> TestResult {

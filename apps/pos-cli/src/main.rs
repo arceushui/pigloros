@@ -52,7 +52,7 @@ mod coverage_entrypoints {
             error.downcast_ref::<pos_runtime::OutputAdmissionErrorV1>()
                 == Some(&pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
         }));
-        assert!(installed_registration_closed()
+        assert!(missing_installed_execution_profile()
             .downcast_ref::<pos_runtime::OutputAdmissionErrorV1>()
             .is_some_and(|error| {
                 *error == pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
@@ -168,7 +168,7 @@ fn builtin_output_binding<P: Plugin>(
 }
 
 /// Installed registration fails closed when no execution profile is installed.
-fn installed_registration_closed() -> Box<dyn std::error::Error> {
+fn missing_installed_execution_profile() -> Box<dyn std::error::Error> {
     pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
 }
 
@@ -282,10 +282,6 @@ fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// store subcommands
-// ---------------------------------------------------------------------------
-
 fn handle_store(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
         Some("init") => {
@@ -343,10 +339,6 @@ fn cmd_store_info(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     output_stdout!("Total events: {total_events}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// timeline subcommands
-// ---------------------------------------------------------------------------
 
 fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
@@ -490,10 +482,6 @@ fn cmd_timeline_merge(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// events subcommands
-// ---------------------------------------------------------------------------
-
 fn handle_events(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("log") {
         if args.len() < 3 {
@@ -532,10 +520,6 @@ fn cmd_events_log(
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// experiment subcommands
-// ---------------------------------------------------------------------------
 
 fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
@@ -596,7 +580,7 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
         })
         .and(obs_binding)
         .err()
-        .unwrap_or_else(installed_registration_closed))
+        .unwrap_or_else(missing_installed_execution_profile))
 }
 
 // This fixture never enters the installed-registration seam or creates a
@@ -848,10 +832,6 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
     let mut stdout_lock = stdout.lock();
     report_manifest_head_verification(&manifest, store.as_ref(), &mut stdout_lock)
 }
-
-// ---------------------------------------------------------------------------
-// Argument parsing helpers
-// ---------------------------------------------------------------------------
 
 /// Parse `--ticks <N>` from a slice of args, returning `N`.
 fn parse_ticks_flag(args: &[String]) -> Result<u64, Box<dyn std::error::Error>> {
@@ -1590,7 +1570,6 @@ mod tests {
 
     #[test]
     fn parse_ticks_flag_skips_non_ticks_flags() {
-        // A flag that is not --ticks before --ticks — covers the loop body else branch (line 230)
         let a: Vec<String> = vec![
             "--other".to_owned(),
             "val".to_owned(),
@@ -2054,12 +2033,9 @@ mod main_coverage {
     use super::*;
 
     #[test]
-    fn main_does_not_panic_in_test_context() {
-        // main() reads std::env::args() — in test context the first arg is the
-        // test binary path, so run_with_args hits the `_` arm and returns Ok(()).
-        // This exercises lines 21-27 (the main body including the if let Err path
-        // when run_with_args succeeds).
-        main();
+    fn unknown_command_returns_without_error() {
+        let args = ["pos".to_owned(), "unknown".to_owned()];
+        assert!(run_with_args(&args).is_ok());
     }
 
     #[test]
@@ -2209,7 +2185,6 @@ mod final_coverage {
 
     #[test]
     fn verify_manifest_against_store_timeline_not_found() {
-        // Cover the `else { false }` branch (line 248): store exists but timeline_id is absent.
         use pos_core::ids::TimelineId;
         use pos_store::StoreConfig;
 
@@ -2262,7 +2237,6 @@ mod final_coverage {
 
     #[test]
     fn verify_manifest_with_events_uses_chain_head_hash() {
-        // Cover lines 248-252: the non-empty events blake3 path in verify_manifest_against_store.
         use pos_core::event::{CanonicalBytes, EventDraft, Kind};
         use pos_core::ids::EntityId;
 

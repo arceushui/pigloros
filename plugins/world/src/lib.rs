@@ -134,10 +134,6 @@ pub enum WorldCodecError {
     CborError,
 }
 
-// ---------------------------------------------------------------------------
-// CBOR helpers
-// ---------------------------------------------------------------------------
-
 fn cbor_magic(magic: [u8; 4]) -> ciborium::Value {
     ciborium::Value::Bytes(magic.to_vec())
 }
@@ -344,10 +340,6 @@ fn decode_canonical_action_params_field(
     decode_actuator_pair_v1(&params).map(|velocity| (params, velocity))
 }
 
-// ---------------------------------------------------------------------------
-// Additional CBOR helpers for f32 and tstr
-// ---------------------------------------------------------------------------
-
 fn cbor_f32(v: f32) -> Result<ciborium::Value, WorldCodecError> {
     if !v.is_finite() {
         return Err(WorldCodecError::NonFiniteFloat);
@@ -397,10 +389,6 @@ fn decode_tstr(val: &ciborium::Value) -> Result<String, WorldCodecError> {
         _ => Err(WorldCodecError::WrongFieldType),
     }
 }
-
-// ---------------------------------------------------------------------------
-// WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047)
-// ---------------------------------------------------------------------------
 
 /// A versioned world action command (ADR-047, `world.action.v1`).
 ///
@@ -492,10 +480,6 @@ impl WorldActionV1 {
         ))
     }
 }
-
-// ---------------------------------------------------------------------------
-// WorldObservationV1 — CBOR definite array, magic WOB1 (ADR-047 v3)
-// ---------------------------------------------------------------------------
 
 /// A versioned world body observation (ADR-047 v3, `world.observation.v1`).
 ///
@@ -680,10 +664,6 @@ impl WorldObservationV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// WorldConfigV1 — CBOR definite array, magic WCF1 (ADR-047 v3)
-// ---------------------------------------------------------------------------
-
 /// Pinned world configuration (ADR-047 v3, `world.config.v1`).
 ///
 /// Array (14 elements):
@@ -787,10 +767,6 @@ impl WorldConfigV1 {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// World backend trait (physics seam)
-// ---------------------------------------------------------------------------
 
 /// Internal physics step seam used by the built-in backend and test fixtures.
 trait WorldBackend: Send + Sync {
@@ -921,10 +897,6 @@ impl WorldCoordinateObservation {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Built-in backend: SimpleKinematicBackend
-// ---------------------------------------------------------------------------
-
 /// Simple Euler integration of three-dimensional velocity over the pinned step.
 #[derive(Default)]
 struct SimpleKinematicBackend;
@@ -985,14 +957,6 @@ impl WorldBackend for SimpleKinematicBackend {
             .collect()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Payload types
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Plugin descriptor
-// ---------------------------------------------------------------------------
 
 /// World simulation plugin.
 #[derive(Clone)]
@@ -1161,10 +1125,6 @@ impl ActionApprover for WorldPlugin {
         ))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Driver
-// ---------------------------------------------------------------------------
 
 /// Produces `world.config.v1` once on the first tick and `world.observation.v1` per body per step.
 pub struct WorldDriver {
@@ -2002,10 +1962,6 @@ impl Driver for WorldDriver {
         result
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -5400,10 +5356,6 @@ mod tests {
         assert_eq!(driver.tick, 2);
     }
 
-    // ---------------------------------------------------------------------------
-    // Conformance fixtures (A5)
-    // ---------------------------------------------------------------------------
-
     mod conformance_fixtures {
         use super::*;
 
@@ -5489,10 +5441,6 @@ mod tests {
             assert_eq!(obs.sensor_kind, SensorKindV1::Proximity.as_u8());
         }
     }
-
-    // -----------------------------------------------------------------------
-    // A3: action folding tests
-    // -----------------------------------------------------------------------
 
     fn make_action_event_from(entity: EntityId, action: &WorldActionV1) -> Event {
         Event {

@@ -51,7 +51,6 @@ impl Reducer for SyntheticReducer {
             serde_json::Value::Number((observations + 1).into()),
         );
 
-        // Decode the CBOR payload to extract last_value
         if let Ok(payload) = ciborium::from_reader::<ObsPayload, _>(event.payload.as_slice()) {
             if let Some(n) = serde_json::Number::from_f64(payload.value) {
                 state.set("last_value", serde_json::Value::Number(n));

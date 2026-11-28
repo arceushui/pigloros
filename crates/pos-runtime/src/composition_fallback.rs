@@ -1,17 +1,14 @@
-//! ADR-119 explicit domain fallback: candidate facts, validation and triggers.
+//! Domain fallback composition: candidate facts, validation and triggers.
 //!
-//! This module holds the `pos-runtime` seams of ADR-119 section 7 slice 3:
+//! This module holds the `pos-runtime` seams for domain fallback composition:
 //!
 //! - the facts-only community registration path. It registers a candidate in
 //!   a scratch [`PluginRegistry`] behind a [`FallbackDriverShellV1`], a stub
-//!   Driver that is never stepped, so no handle and no worker exist
-//!   (section 4.1, "Validation input");
+//!   Driver that is never stepped, so no handle and no worker exist;
 //! - the derivation and enforcement of [`RequiredPluginV1`] from IMK1;
 //! - the scratch validation of a candidate against the primary, rules 1-7;
-//! - the trigger-eligibility classifier of section 4.2;
-//! - the runtime `declare` of section 4.3 (slice 4).
-//!
-//! It activates and swaps nothing: those are later slices.
+//! - the trigger-eligibility classifier;
+//! - runtime declaration of an eligible fallback.
 
 use std::collections::BTreeSet;
 use std::time::Duration;

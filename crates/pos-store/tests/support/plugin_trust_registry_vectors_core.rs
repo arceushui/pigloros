@@ -30,10 +30,6 @@ use pos_store::plugin_trust_registry::{
     TrustedUtcSecondV1,
 };
 
-// ---------------------------------------------------------------------------
-// C1: the trusted UTC second
-// ---------------------------------------------------------------------------
-
 #[test]
 fn genuine_registry_fixtures_have_content_proofs_bound_to_their_manifests() -> TestResult {
     for fixture in [release_one(), release_two(), release_three()] {
@@ -121,10 +117,6 @@ fn utc_second_samples_the_source_exactly_once() -> TestResult {
     assert_eq!(source.remaining(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// D1: provisioning
-// ---------------------------------------------------------------------------
 
 #[test]
 fn provisioning_creates_a_scope_with_no_floors_clock_or_release() -> TestResult {
@@ -328,10 +320,6 @@ fn reprovisioning_after_the_policy_advanced_leaves_the_later_snapshot() -> TestR
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// D2: the highest trusted UTC second
-// ---------------------------------------------------------------------------
-
 #[test]
 fn utc_floor_is_raised_by_every_committed_transaction_and_replay() -> TestResult {
     let mut h = Harness::<Store>::open()?;
@@ -402,10 +390,6 @@ fn utc_floor_is_raised_by_every_committed_transaction_and_replay() -> TestResult
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// D3: the evidence coordinates must equal the transaction's
-// ---------------------------------------------------------------------------
-
 #[test]
 fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
     let mut h = Harness::<Store>::open()?;
@@ -455,10 +439,6 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
     assert_eq!(h.snapshot(&[&one])?, before);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// E1: the scoped release chain
-// ---------------------------------------------------------------------------
 
 #[test]
 fn release_chain_allows_first_same_content_and_direct_successor_only() -> TestResult {
@@ -632,10 +612,6 @@ fn the_disclosed_chain_deadlock_needs_a_publisher_relink() -> TestResult {
     )??;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// E2 and E3: the activation Event
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_decision_and_rollback_carries_its_activation_event_identity() -> TestResult {
@@ -867,10 +843,6 @@ fn a_store_with_another_payload_hasher_can_never_activate() -> TestResult {
     assert!(store.read(timeline, SeqRange::all())?.is_empty());
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// F1 and F2: idempotency
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_identical_admission_returns_the_original_receipt_and_commits_only_the_utc_raise() -> TestResult

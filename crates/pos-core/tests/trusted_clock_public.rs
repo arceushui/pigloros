@@ -279,10 +279,6 @@ fn acknowledge(
     acknowledge_trusted_clock_overrun(&mut store, &mut wall, &request)
 }
 
-// ---------------------------------------------------------------------------
-// Sources, constants and values
-// ---------------------------------------------------------------------------
-
 #[test]
 fn conversions_round_nanoseconds_up_and_reject_out_of_range_values() -> TestResult {
     let convert = wall_time_from_epoch_duration;
@@ -382,10 +378,6 @@ fn wait_budget_is_shared_across_phases() {
     assert_eq!(guard, Ok(()));
     assert_eq!(budget.remaining(), ZERO);
 }
-
-// ---------------------------------------------------------------------------
-// Reservation and migration
-// ---------------------------------------------------------------------------
 
 #[test]
 fn first_reservation_migrates_rows_and_commits_the_sample() -> TestResult {
@@ -611,10 +603,6 @@ fn wait_budget_spans_owner_locks_and_reservation() -> TestResult {
     assert!(!fixture.writer_held());
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Guard, expiries and handoff
-// ---------------------------------------------------------------------------
 
 #[test]
 fn expiry_bound_is_exclusive_at_one_microsecond() -> TestResult {
@@ -914,10 +902,6 @@ fn expiries_from_another_guard_are_refused() -> TestResult {
     assert!(!first.writer_held());
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Overrun latch and acknowledgement
-// ---------------------------------------------------------------------------
 
 #[test]
 fn post_handoff_overruns_are_signalled_and_latched() -> TestResult {

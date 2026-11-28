@@ -47,10 +47,6 @@ use pos_store::plugin_trust_registry::{
 
 type TestResult = BoxResult<()>;
 
-// ---------------------------------------------------------------------------
-// Shared assertions
-// ---------------------------------------------------------------------------
-
 /// The installation was refused before the registry: exactly `expected`, no
 /// `admit` call, no clock sample, and an observable-state-identical registry.
 fn assert_refused_before_registry(
@@ -77,10 +73,6 @@ const fn signature_error() -> PluginReleaseInstallErrorV1 {
 const fn authorization_error(error: PluginTrustErrorV1) -> PluginReleaseInstallErrorV1 {
     PluginReleaseInstallErrorV1::Authorization(error)
 }
-
-// ---------------------------------------------------------------------------
-// Positive installation
-// ---------------------------------------------------------------------------
 
 #[test]
 fn signed_malformed_content_refuses_before_time_or_registry() -> TestResult {
@@ -259,10 +251,6 @@ fn a_changed_activation_identity_for_the_same_release_conflicts() -> TestResult 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The release chain passes through typed
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_release_chain_is_enforced_by_the_registry_and_passes_through() -> TestResult {
     let mut world = World::new()?;
@@ -313,10 +301,6 @@ fn the_release_chain_is_enforced_by_the_registry_and_passes_through() -> TestRes
     assert_eq!(world.snapshot(&digests)?, before);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Registry errors pass through typed
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_registry_error_variant_passes_through_typed() -> TestResult {
@@ -454,10 +438,6 @@ fn an_unavailable_trusted_clock_refuses_before_the_registry() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Signature refusals happen before the registry
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_release_with_a_bad_signature_is_refused_before_the_registry() -> TestResult {
     let mut world = World::new()?;
@@ -531,10 +511,6 @@ fn signature_verification_precedes_the_registry_call() -> TestResult {
     assert_eq!(world.registry.admits.len(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Authorization refusals happen before the signature and the registry
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_revoked_publisher_key_is_refused_before_signature_and_registry() -> TestResult {
@@ -625,10 +601,6 @@ fn a_release_by_an_owner_without_the_grant_is_refused_before_the_registry() -> T
         authorization_error(PluginTrustErrorV1::PluginIdNotGranted),
     )
 }
-
-// ---------------------------------------------------------------------------
-// Tampered or unreadable releases
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_pmf1_that_does_not_bind_its_component_is_refused_before_the_registry() -> TestResult {
@@ -728,10 +700,6 @@ fn an_unknown_address_is_refused_before_the_registry() -> TestResult {
     assert_eq!(source.remaining(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Historical validity is not current trust
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_rotated_and_revoked_key_still_verifies_historically_but_is_not_installable() -> TestResult {

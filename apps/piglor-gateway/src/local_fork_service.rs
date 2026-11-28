@@ -663,10 +663,6 @@ pub mod tests {
         vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, code, 0xf6]
     }
 
-    // -----------------------------------------------------------------
-    // Credentials, sockets, and FAL1 frames.
-    // -----------------------------------------------------------------
-
     fn protected_credential_file(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
         let path = directory.join(name);
         if path.exists() {
@@ -876,10 +872,8 @@ pub mod tests {
         ))
     }
 
-    // -----------------------------------------------------------------
     // The managed Local Fork admission serve mode of ADR-136 acceptance
     // test 11, shared with the served erasure suite (#1471).
-    // -----------------------------------------------------------------
 
     /// The three managed credentials by name, as `serve` loads them.
     ///
@@ -953,10 +947,6 @@ pub mod tests {
         let listener = start_listener(coordinator, socket)?;
         Ok((gateway, listener, erasure))
     }
-
-    // -----------------------------------------------------------------
-    // One provisioned database and its independent observers.
-    // -----------------------------------------------------------------
 
     struct World {
         _directory: tempfile::TempDir,
@@ -1153,10 +1143,8 @@ pub mod tests {
         Ok(page.inventory_generation)
     }
 
-    // -----------------------------------------------------------------
     // Test-only erasure authority (equivalent to the Gateway integration
     // test `HealthAuthority`), injected only through the startup seam.
-    // -----------------------------------------------------------------
 
     const fn reference(value: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([value; 32])
@@ -1655,7 +1643,6 @@ pub mod tests {
         Ok((world, parents, authority, composition))
     }
 
-    // -----------------------------------------------------------------
     // ADR-109 revision 9 acceptance vectors A1 to A12 (Gateway part).
     //
     // A3 ("parent affected by an active, not yet frozen request") is not
@@ -1670,7 +1657,6 @@ pub mod tests {
     // `erasure_coordinator_host_public::assert_host_admitted_fork_contract`).
     // A11 is covered by the pos-store and pos-runtime delivery tests, and
     // A12 by the unchanged ADR-109 golden tests in `local_fork_listener`.
-    // -----------------------------------------------------------------
 
     /// A1: a proven-unaffected parent on a Ready host (closed composition,
     /// verified-empty inventory) is admitted with code 0; the successor is
@@ -2206,10 +2192,6 @@ pub mod tests {
         rusqlite::Connection::open(&world.database)?.query_row(query, [], |row| row.get(0))
     }
 
-    // -----------------------------------------------------------------
-    // Credential, lifecycle, and framing boundaries.
-    // -----------------------------------------------------------------
-
     /// ADR-134 §8: provisioning is an offline writer. It refuses an unbound
     /// store and a store `migrate-mode` holds, and never binds.
     #[test]
@@ -2636,10 +2618,6 @@ pub mod tests {
         };
         assert!(listener.stop().await.is_err());
     }
-
-    // -----------------------------------------------------------------
-    // ADR-109 revision 12: FCP1 startup and classifier registration.
-    // -----------------------------------------------------------------
 
     fn classifier_rows(world: &World) -> rusqlite::Result<[i64; 2]> {
         Ok([

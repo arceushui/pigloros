@@ -642,8 +642,6 @@ mod tests {
     #[test]
     fn verify_toml_with_resolved_entry_covers_sort_closure(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L93: the sort closure `a.0.cmp(&b.0)` in verify_toml which
-        // only runs when there are 2+ files to compare AND a manifest is provided.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -993,7 +991,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_wrong_length_pubkey_rejected() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L173: "--pubkey must be 32 bytes" when hex decodes to != 32 bytes.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
@@ -1015,7 +1012,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_invalid_ed25519_key_rejected() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L175: `e.to_string()` in verifying_key_from_public_key error.
         // Find a 32-byte value that is invalid for ed25519-dalek by scanning.
         use pos_core::{
             clock::{Seq, WallTime},
@@ -1097,7 +1093,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_invalid_sqlite_path_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L180: `format!("open sqlite: {e}")` in verify_store.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
         // The explicit anchor carries a valid 32-byte key to reach store opening.
@@ -1133,14 +1128,12 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_with_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L183: `format!("list timelines: {e}")` in verify_store.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
         std::fs::write(&bad_db, b"not sqlite data at all\n").test_ok()?;
         // Use an explicit anchor with a valid 32-byte key to reach store opening.
         let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
         let err = run(&Source::Store(bad_db), Some(&trust_anchor), None);
-        // Either open fails (L180) or list_timelines fails (L183).
         assert!(err.is_err(), "expected error for corrupted DB");
 
         Ok(())
@@ -1173,8 +1166,6 @@ mod tests {
     #[test]
     fn verify_toml_with_store_tier_manifest_reports_mismatch(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // verify_toml() receives a Store-tier manifest → the `else` branch
-        // on lines 82-89 (manifest is not a toml-tier export).
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1211,7 +1202,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_with_bad_json_manifest_is_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Exercises the serde_json::from_str error path (line 240-241).
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1243,7 +1233,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_hashes_skips_non_toml_files() -> Result<(), Box<dyn std::error::Error>> {
-        // Exercises the `continue` on line 148: a non-.toml file is ignored.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(dir.join("predictions")).test_ok()?;
@@ -1259,8 +1248,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_unsigned_event_reports_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-        // Exercises the `None => return Ok(VerifyReport { unsigned })` branch
-        // (lines 196-203) in verify_store.
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, Kind, SchemaVersion},
@@ -1537,7 +1524,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_rejects_invalid_hex_char() {
-        // Exercises the `_` error arm in the test module's nib helper.
         assert!(nib('g').is_err());
         assert!(nib('z').is_err());
     }
@@ -1545,8 +1531,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_toml_manifest_read_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L79: `?` on std::fs::read_to_string(path) in verify_toml
-        // when the manifest file doesn't exist.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -1560,8 +1544,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn collect_hashes_readdir_entry_error() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L148: `entry?` in collect_hashes when a readdir entry fails.
-        // Also covers L152: `std::fs::read(&path)?` when a file is unreadable.
         use std::os::unix::fs::PermissionsExt;
         if running_as_root() {
             return Ok(());
@@ -1571,7 +1553,6 @@ mod tests {
         std::fs::create_dir_all(dir.join("predictions")).test_ok()?;
         let pred_file = dir.join("predictions").join("test.toml");
         std::fs::write(&pred_file, "[data]\n").test_ok()?;
-        // Make the file unreadable so fs::read fails at L152.
         std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o000)).test_ok()?;
         let err = run(&Source::Toml(dir), None, None).test_err()?;
         std::fs::set_permissions(&pred_file, std::fs::Permissions::from_mode(0o644)).test_ok()?;
@@ -1583,7 +1564,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L182: `?` on list_timelines in verify_store when DB is corrupt.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
         let mut content = b"SQLite format 3\x00".to_vec();
@@ -1604,8 +1584,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L181: `?` on list_timelines in verify_store when the timeline
-        // id column is corrupt (same SQLite injection technique as pos-cli).
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         cli_run(&[
@@ -1644,7 +1622,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn verify_store_read_fails_on_corrupt_events() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L186: `?` on store.read when an Event identifier is corrupt.
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         cli_run(&[
@@ -1697,9 +1674,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error_in_verify() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L230: `?` on nib(l) in hex_decode when second nibble is bad.
-        // This exercises the `?` for the second nibble via a hex string where
-        // the first nibble is valid but the second is not.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let _ = pos_store::open_store(pos_store::StoreConfig::Sqlite {
@@ -1726,14 +1700,12 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_first_nibble_error() {
-        // Covers L697:28: `nib(h)?` first nibble error in test hex_decode_local.
         assert!(hex_decode("g0").is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_second_nibble_error_in_test_helper() {
-        // Covers L697:44: `nib(l)?` second nibble error in test hex_decode_local.
         assert!(hex_decode("0g").is_err());
     }
 }

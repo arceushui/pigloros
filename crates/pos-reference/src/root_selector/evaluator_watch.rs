@@ -1,5 +1,5 @@
-//! Watching the evaluator connection while its provider attempt runs
-//! (owner decision on #1503: SCQ1 when the evaluator drops after AGR1).
+//! Watching the evaluator connection while its provider attempt runs,
+//! including SCQ1 when the evaluator drops after AGR1.
 //!
 //! The evaluator socket is idle during an execute: the request was read in
 //! full, and the evaluator waits for the reply. A peer that closed its end
@@ -89,12 +89,8 @@ impl InFlightAttempt {
     }
 }
 
-/// Whether `revents` says the peer is gone: hang-up, error or an invalid
-/// descriptor. Written without `|` so that each flag is tested on its own.
 fn is_gone(revents: PollFlags) -> bool {
-    [PollFlags::HUP, PollFlags::ERR, PollFlags::NVAL]
-        .iter()
-        .any(|flag| revents.contains(*flag))
+    revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
 }
 
 /// Whether `evaluator` closed its end entirely before `wake` became ready or

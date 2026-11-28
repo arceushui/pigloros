@@ -35,10 +35,6 @@
 //! output, or the guest's own validated `plugin-error`, for the supervisor to
 //! approve and commit at the Tick Boundary.
 //!
-//! The evidence for the pin and the compatibility gates is in
-//! `docs/evidence/adr-061-r4-prototype.md`. Later slices build on this crate:
-//! #542 runs it in a supervised worker process, and #543 commits approved
-//! output atomically at the Tick Boundary.
 
 // Public modules keep crate-only items compatible with both `unreachable_pub`
 // and Clippy's `redundant_pub_crate`.

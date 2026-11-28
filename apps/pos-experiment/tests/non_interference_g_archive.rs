@@ -271,10 +271,6 @@ fn every_archive_coordinate_executes_or_stays_typed_non_executed_and_matches_its
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The capture through its public seam
-// ---------------------------------------------------------------------------
-
 fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     let mut session = g_pub_experiment_v1(permitted_input)?.start()?;
     while session.step()? {}
