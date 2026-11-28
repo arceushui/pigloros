@@ -1,9 +1,7 @@
 //! Event-type schema registry.
 //!
-//! Plugins declare the event types they own. The runtime rejects any `EventDraft`
-//! whose `event_type` is not registered. Payload validation is intentionally
-//! lightweight in Wave 3 — a plugin can provide a JSON Schema string for richer
-//! validation in future waves.
+//! Plugins declare the Event types they own. The registry checks that a draft's
+//! Event type is registered. JSON Schema strings are retained as metadata.
 
 use std::collections::{hash_map::Entry, HashMap};
 
@@ -18,13 +16,13 @@ pub struct EventTypeSchema {
     pub event_type: Kind,
     /// Human-readable description of this event type.
     pub description: String,
-    /// Optional JSON Schema string for payload validation (Wave 3: presence check only).
+    /// Optional JSON Schema metadata for this Event type.
     pub json_schema: Option<String>,
 }
 
 /// Registry of all event type schemas declared by loaded plugins.
 ///
-/// Enforces the invariant: every appended event must have a known `event_type`.
+/// Validates draft Event types against the registered names.
 #[derive(Default, Debug)]
 pub struct SchemaRegistry {
     schemas: HashMap<String, EventTypeSchema>,

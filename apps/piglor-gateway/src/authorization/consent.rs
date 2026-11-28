@@ -1,19 +1,18 @@
-//! The consent-bound part of a Principal's authority (#309, owner decisions
-//! 1(a) and 2(b); ADR-039, ADR-059).
+//! Consent-bound authorization for a Local Principal.
 //!
 //! A Principal whose provisioning binds consents holds one root grant of the
 //! operations no consent governs and, for each consent, one consent-bound root
 //! grant of the operations that consent governs: the granted operations whose
 //! resource is one of the consent's data categories and whose purpose is the
 //! consent's purpose. Each consent-bound grant names the consent subject and
-//! references exactly its own consent, so the ADR-059 evaluator requires that
-//! consent to be active and to cover the request. A request is decided on the
+//! references exactly its own consent, so the evaluator requires that consent
+//! to be active and to cover the request. A request is decided on the
 //! chain of the consent whose grant covers its resource, action and purpose,
 //! and every other request on the root chain, so revoking a consent blocks
 //! exactly the operations it governs. No consent governs an exempt operation
 //! ([`GatewayOperationV1::consent_exempt`]).
 //!
-//! A consent is revoked at its ADR-039 fence: the sequence of its first
+//! A consent is revoked at its fence: the sequence of its first
 //! `consent.revoked.v1` Event on the consent Timeline. The host brings the
 //! consent Timeline head current before every decision, so a revocation takes
 //! effect before the next decision.
@@ -47,7 +46,7 @@ impl GatewayConsentRevocationV1 {
         self.event
     }
 
-    /// The ADR-039 fence: the Event's consent Timeline sequence.
+    /// The Event's sequence on the consent Timeline.
     #[must_use]
     pub const fn fence(&self) -> Seq {
         self.fence
@@ -61,7 +60,7 @@ impl GatewayConsentRevocationV1 {
 }
 
 /// One consent as the host discloses it: the `EventId` of its
-/// `consent.granted.v1` Event (D7), its grantee, its sequence, whether it
+/// `consent.granted.v1` Event, its grantee, its sequence, whether it
 /// permits export, and its revocation, if any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayConsentV1 {
@@ -100,7 +99,7 @@ impl GatewayConsentV1 {
         }
     }
 
-    /// The `EventId` of the consent's `consent.granted.v1` Event (D7).
+    /// The `EventId` of the consent's `consent.granted.v1` Event.
     #[must_use]
     pub const fn consent_ref(&self) -> EventId {
         self.consent_ref
@@ -131,8 +130,8 @@ impl GatewayConsentV1 {
     }
 }
 
-/// Every consent of one consent Timeline at one head: the ADR-059 records
-/// the evaluator decides with, in consent-ID order, and their disclosure, in
+/// Every consent on one Timeline at one head, with its recorded reference
+/// and disclosure. References are in consent-ID order; disclosures are in
 /// Timeline order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayConsentsV1 {
@@ -202,14 +201,14 @@ impl GatewayConsentsV1 {
             .copied()
     }
 
-    /// The registry bindings of the ADR-059 records.
+    /// The registry bindings of the recorded consent references.
     pub(crate) fn bindings(&self) -> impl Iterator<Item = Hash> + '_ {
         self.references
             .iter()
             .map(ConsentGrantRefV1::binding_digest)
     }
 
-    /// The ADR-059 records the consent IDs `referenced` name.
+    /// The recorded consent references whose IDs are in `referenced`.
     fn referenced(&self, referenced: &[Hash]) -> Vec<ConsentGrantRefV1> {
         self.references
             .iter()
@@ -292,7 +291,7 @@ impl GatewayConsentedAuthorityV1 {
     }
 
     /// Bind `request`, decided on `view`, to the consent `view` references:
-    /// the subject, that consent's ADR-059 record and the consent Timeline
+    /// the subject, referenced consent record and consent Timeline
     /// coordinate the evaluator checks. Unread consents bind nothing, so the
     /// grant's subject scope refuses the request.
     pub(crate) fn bind(
@@ -319,10 +318,10 @@ impl GatewayConsentedAuthorityV1 {
 }
 
 impl GatewayOperationV1 {
-    /// The operations no consent may govern (owner decision 2(b) on #309):
+    /// The operations no consent may govern:
     /// reading the Session stays available whatever consent is revoked,
     /// revoking a consent must stay possible after another is revoked, a
-    /// subject may always request and observe its own erasure (ADR-136 §3),
+    /// subject may always request and observe its own erasure,
     /// and the network capability authorizes no data operation.
     pub const CONSENT_EXEMPT: &'static [Self] = &[
         Self::NETWORK,

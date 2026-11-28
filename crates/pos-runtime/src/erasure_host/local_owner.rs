@@ -1,6 +1,4 @@
-//! The Local owner host commands of the single-host erasure executor
-//! (ADR-136 §4a and §5; owner decisions of 2026-11-17 on #1412, ticket
-//! #1430).
+//! The host commands used by the Local erasure executor.
 //!
 //! `LocalErasureExecutorV1` runs every owner effect through these host
 //! commands. Each command first proves that it serves a coordinator-dispatched
@@ -22,15 +20,15 @@
 //! | ack class | effect |
 //! |---|---|
 //! | `key-registry` | the two key-destruction phases, the tombstone bound to ELO1 |
-//! | `artifact-store`, `managed-report` | ELAD1 when the ARD1 row depends on keys and every one is tombstoned (Q7), else ELNEG1 `ArtifactDeletionFailed` |
-//! | `client-cache-signal` | ELCG1 at the attempt's admitted position (Q8) |
+//! | `artifact-store`, `managed-report` | ELAD1 when the ARD1 row depends on keys and every one is tombstoned, else ELNEG1 `ArtifactDeletionFailed` |
+//! | `client-cache-signal` | ELCG1 at the attempt's admitted position |
 //! | `export-recipient` | the ADR-138 recipient-export withdrawal: ELXW1 once withdrawn, else ELNEG1 `ArtifactDeletionFailed` |
 //! | `timeline-payload` | ELNEG1 `ArtifactDeletionFailed` |
 //! | `local-backup-inventory` | ELNEG1 `BackupInventoryIncomplete` |
-//! | `local-replica` | once every other owner has an ELO1, the F1 purge outside every fence, then ELRP1 or ELNEG1 (Q3) |
+//! | `local-replica` | once every other owner has an ELO1, the F1 purge outside every fence, then ELRP1 or ELNEG1 |
 //!
 //! The only transient code is the purge's `ReplicaTimeout`; the Local
-//! executor never emits `KeyRegistryUnavailable` (Q19).
+//! executor never emits `KeyRegistryUnavailable`.
 
 use pos_core::{
     deletion_receipt, local_erasure_key_digest_v1, local_erasure_owner_ref_v1,
@@ -62,9 +60,9 @@ use ErasureInventoryCategoryV1::{Artifact, Backup, Key, Replica};
 /// The owner work of one acknowledgement class.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum OwnerWorkV1 {
-    /// ARD1 redaction (Q7).
+    /// ARD1 redaction after its key dependencies are destroyed.
     Disposition,
-    /// The client-cache redaction generation (Q8).
+    /// The client-cache redaction generation.
     CacheGeneration,
     /// A class with no destruction primitive: always this permanent code.
     Refused(ErasureErrorV1),
@@ -129,7 +127,7 @@ type CandidateEffectV1 = (
 );
 
 /// The order owners of one attempt run in: keys first, so an artifact
-/// whose keys the attempt destroys is then redacted (Q7); the single local
+/// whose keys the attempt destroys is then redacted; the single local
 /// replica last, after every other owner of the request (F1).
 const fn execution_rank(category: ErasureInventoryCategoryV1) -> u8 {
     match category {
@@ -173,16 +171,15 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// The command runs under the protected-append fence of the store's
     /// Erasure Host Timeline, `ELHT1` of its erasure store identity, which
-    /// the host derives itself (owner decision of 2026-11-18 on #1431: no
-    /// caller supplies the Timeline). Every bundle lists it as a host
+    /// the host derives itself; no caller supplies the Timeline. Every
+    /// bundle lists it as a host
     /// Timeline, so no erasure ever freezes it. Inside that one fence it
     /// commits two transactions: the pending destruction of `identity`, then
     /// its tombstone together with the positive ELO1 through
     /// `commit_local_owner_effect`. The destruction request's
     /// `authorization_digest` is the command identity `CA(request, target)`,
     /// and the tombstone's deletion receipt is the key registry's
-    /// request-bound `deletion_receipt`, which the ELO1 binds as its effect
-    /// (owner decision Q5).
+    /// request-bound `deletion_receipt`, which the ELO1 binds as its effect.
     ///
     /// A crash between the transactions leaves the pending destruction; the
     /// next run of the same command finds it and completes it. A key the
@@ -822,7 +819,7 @@ fn registered_dependencies(
         })
 }
 
-/// The `artifact-store` or `managed-report` owner result of `command` (Q7).
+/// The `artifact-store` or `managed-report` owner result of `command`.
 ///
 /// It is the positive ELAD1, redacted with its views, only when the ARD1
 /// row of the target is registered in the request's committed scope,
@@ -846,7 +843,7 @@ fn disposition(
     })
 }
 
-/// Q7: whether the ARD1 row of `command`'s target is registered in the
+/// Whether the ARD1 row of `command`'s target is registered in the
 /// request's committed scope, depends on at least one key, and the key
 /// registry has tombstoned every key it depends on, so the artifact is
 /// unreadable and its positive ELAD1 is due. The executor's disposition and
@@ -876,7 +873,7 @@ fn redactable(
 }
 
 /// The `client-cache-signal` effect of `command`: the ELCG1 of the
-/// request's committed ERSC1 at the attempt's admitted position (Q8).
+/// request's committed ERSC1 at the attempt's admitted position.
 fn cache_effect(
     store: &dyn ErasureHostStore,
     command: &ErasureOwnerCommandV1,
@@ -1041,7 +1038,7 @@ fn others_executed(
         })
 }
 
-/// The `local-replica` owner result of `command` (ADR-136 F1; Q3).
+/// The `local-replica` owner result of `command`.
 ///
 /// The purge runs here, outside every store fence and transaction, because
 /// `VACUUM` cannot run inside one. ELRP1 and its ELO1 commit straight after
@@ -1098,7 +1095,7 @@ fn bound_command(
 
 /// Whether the Local executor's path for `work` can commit `effect` with
 /// outcome `error`: its class's own positive record, or one of the
-/// negative codes that path emits (M1 of the #1431 review). A tombstone a
+/// negative codes that path emits. A tombstone a
 /// key destruction commits is matched as the tombstone the registry holds,
 /// and a withdrawal's ELXW1 as the disposition its row records.
 fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEffectV1) -> bool {
@@ -1226,7 +1223,7 @@ fn committed_outcome(
 }
 
 /// The rules a positive outcome must still meet when it is signed: a
-/// positive ELAD1 Q7 (`redactable`), every key the ARD1 row depends on
+/// positive ELAD1 (`redactable`), every key the ARD1 row depends on
 /// tombstoned, as when the executor emitted it; a positive ELXW1 ADR-138
 /// §7 (`withdrawal_bound`) against its withdrawn row.
 ///

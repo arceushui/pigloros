@@ -3,6 +3,7 @@
 
 use std::error::Error;
 use std::fs::{self, File};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -21,7 +22,7 @@ use pos_reference::selector::installation::{
 };
 
 use super::port::ExecutePort;
-use super::reconcile::{Reconcile, ReconcileError};
+use super::reconcile::{attempt_network, Reconcile, ReconcileError};
 use super::{
     bind, reconcile_in_background, required_slots, start_reconciliation, AdmissionState,
     ProviderStartupError, RuntimeAuthority,
@@ -29,9 +30,10 @@ use super::{
 use pos_reference::sandbox_provider_protocol::NetworkCaptureStore;
 
 use crate::{
-    issue_release, AdmittedRuntimeKey, AttemptLifecycle, CleanupBudget, ProviderInstallation,
-    ProviderInstallationError, ReconciledRestart, RuntimeAttestationSigner, StagingDirectory,
-    StagingLedger, StagingLimits, SystemdAttemptRegistry, SystemdTransientUnitTransport,
+    issue_release, AdmittedRuntimeKey, AttemptLifecycle, CleanupBudget, NetworkRange,
+    ProviderInstallation, ProviderInstallationError, ReconciledRestart, RuntimeAttestationSigner,
+    StagingDirectory, StagingLedger, StagingLimits, SystemdAttemptRegistry,
+    SystemdTransientUnitTransport,
 };
 
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -372,6 +374,12 @@ pub(super) fn test_port(limits: StagingLimits) -> TestResult<(PortFixture, Execu
         staging,
         captures: Arc::new(captures),
         namespaces: crate::ProviderNamespaces::observe()?,
+        network: attempt_network(NetworkRange::new(
+            Ipv4Addr::new(10, 213, 0, 0),
+            24,
+            Ipv6Addr::new(0xfd00, 0x913, 0, 0, 0, 0, 0, 0),
+            120,
+        )?),
         budget: CleanupBudget::new(
             Duration::from_millis(100),
             Duration::from_millis(200),

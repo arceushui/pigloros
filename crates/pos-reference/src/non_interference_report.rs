@@ -401,11 +401,10 @@ pub fn verify_non_interference_report_v1(
 /// Independently verify one signed NIA1 execution artifact and return its
 /// content address (the digest an NIR1 mode reference names).
 ///
-/// This is the per-case acceptance the ADR-062 Revision 8 slice N0 harness
-/// publication is checked against (owner answer Q9): the same bounded
-/// canonical decode, profile, coordinate, trusted-executor and signature
-/// checks the complete report applies to each of its 192 artifacts. Accepting
-/// one artifact is not a report and makes no pass/fail claim for its row.
+/// Applies the same bounded canonical decoding, profile, coordinate,
+/// trusted-executor and signature checks used for each artifact in a complete
+/// report. Accepting one artifact is not a report and makes no pass/fail claim
+/// for its row.
 ///
 /// # Errors
 /// Rejects oversized, noncanonical, malformed, untrusted or incorrectly
@@ -739,7 +738,7 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    /// One NIA1 signed with `secret`, encoded the way the slice N0 harness
+    /// One NIA1 signed with `secret`, encoded the way the harness
     /// publishes it.
     fn signed_artifact(secret: &[u8; 32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let signing = ed25519_dalek::SigningKey::from_bytes(secret);

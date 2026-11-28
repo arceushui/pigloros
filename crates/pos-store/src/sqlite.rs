@@ -149,10 +149,13 @@ use crate::{
 mod composition_fallback_registry;
 mod composition_fallback_registry_rows;
 mod composition_fallback_registry_schema;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+mod consent_revocation_journal;
 mod counterfactual_store;
 mod erasure_admissions;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod erasure_fence_rows;
+mod erasure_fence_writers;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -196,6 +199,8 @@ mod plugin_trust_registry_rows;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry_schema;
 mod registry_durability;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod subject_key_deletion;
 
 use fork_code_two_read::{
     sqlite_retained_key_evidence, sqlite_validated_admission, sqlite_validated_graph,
@@ -2366,6 +2371,10 @@ impl SqliteStore {
                     // if a later schema fails (test-support builds only).
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_erasure_fence_rows_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_subject_key_deletion_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_consent_revocation_journal_schema()?;
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
@@ -11426,7 +11435,7 @@ fn apply_sqlite_erasure_cas(
     for index in mutation.index_inserts() {
         insert_sqlite_index(conn, mutation.request(), *index)?;
     }
-    let effect_cbor = mutation.effect().to_canonical_cbor()?;
+    let effect_cbor = erasure_fence_writers::fenced_effect_cbor(conn, mutation)?;
     let effect_subject = mutation
         .effect()
         .subject()
@@ -14891,15 +14900,9 @@ fn with_fork_authority_transaction<T>(
 ///
 /// Persisted grants and revocations are immutable, so once a mutation is
 /// `Unchanged` it stays `Unchanged`. An exact retry is therefore answered from
-/// one committed read without taking the write lock (#491). Any other outcome,
+/// one committed read without taking the write lock. Any other outcome,
 /// including an error, is decided again under `BEGIN IMMEDIATE`, and only a
 /// `Committed` outcome rewrites the authority state there.
-///
-/// Before #491 every outcome rewrote the state. That never failed another
-/// connection closed: the canonical bytes were identical, `SQLite` wrote no
-/// page, and `PRAGMA data_version` did not move. The real cost was write-lock
-/// contention, since each replay waited up to the 4 s busy timeout behind
-/// another writer and then failed as `Unavailable`.
 ///
 /// A read-only store answers an exact retry as `Unchanged`, because no write is
 /// needed; any mutation that must write still fails. A first-time record pays

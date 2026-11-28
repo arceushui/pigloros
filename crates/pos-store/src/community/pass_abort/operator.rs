@@ -32,10 +32,9 @@ use pos_core::community_lifecycle::{
     community_recipient_identity_digest_v1, CommunityAbortReasonV1, CommunityArtifactOperationV1,
     CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityAuthorityViewRowV1,
     CommunityClockBoundV1, CommunityCurrentViewInputV1, CommunityCurrentViewV1,
-    CommunityDecisionRowV1, CommunityGenerationAdmissionV1, CommunityKeyIntentV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
-    CommunityMetadataScopeV1, CommunityPassFrontierV1, CommunityScopeMembersV1,
-    CommunityTrustViewRowV1,
+    CommunityDecisionRowV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
+    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
+    CommunityPassFrontierV1, CommunityScopeMembersV1, CommunityTrustViewRowV1,
 };
 use pos_core::{
     AuthorityGranteeV1, AuthorityTrustRootSealV1, AuthorizationRequestV1, Hash, TimelineId,
@@ -50,7 +49,7 @@ use super::super::memory_domain::MemoryCommunityDomainV1;
 use super::super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::super::pass_record::CommunityPassRecordV1;
 use super::super::planner::key_rows;
-use super::super::quarantine::{current_floor, CommunityQuarantineContextV1};
+use super::super::quarantine::CommunityQuarantineContextV1;
 use super::super::sealer::SealedMetadataV1;
 use super::super::store_domain::CommunityStoreDomainV1;
 use super::{
@@ -88,6 +87,21 @@ pub struct CommunityPassAbortReceiptV1 {
 }
 
 impl CommunityPassAbortReceiptV1 {
+    /// The receipt of the Abort of `(timeline, reservation_operation_id)`.
+    pub(super) const fn from_parts(
+        timeline: TimelineId,
+        reservation_operation_id: [u8; 16],
+        abort_digest: Hash,
+        abort: Zeroizing<Vec<u8>>,
+    ) -> Self {
+        Self {
+            timeline,
+            reservation_operation_id,
+            abort_digest,
+            abort,
+        }
+    }
+
     /// The aborted pass's Timeline.
     #[must_use]
     pub const fn timeline(&self) -> TimelineId {
@@ -114,10 +128,10 @@ impl CommunityPassAbortReceiptV1 {
 }
 
 /// The metadata `write` decision of one Abort.
-struct MetadataWriteV1 {
-    request: AuthorizationRequestV1,
-    decision_digest: Hash,
-    leaf_grant_id: Hash,
+pub(super) struct MetadataWriteV1 {
+    pub(super) request: AuthorizationRequestV1,
+    pub(super) decision_digest: Hash,
+    pub(super) leaf_grant_id: Hash,
 }
 
 /// Everything one Abort commits, staged before the writer.
@@ -269,7 +283,7 @@ impl MemoryCommunityDomainV1 {
 
     /// The metadata `write` decision of the operation, which alone admits
     /// every CNE1 read or write (A5.4, no latch).
-    fn abort_metadata_write(
+    pub(super) fn abort_metadata_write(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         metadata: &mut CommunityMetadataAuthorityV1,
@@ -325,6 +339,16 @@ impl MemoryCommunityDomainV1 {
         if authenticated.at_time().as_micros() >= original.evidence_not_after_micros {
             return Err(Error::EvidenceExpired);
         }
+        self.open_original_abort(key, original)
+    }
+
+    /// The original receipt of a retry: the retained CAB1 must still open under
+    /// the pass metadata key as the receipt's.
+    pub(super) fn open_original_abort(
+        &self,
+        key: (TimelineId, [u8; 16]),
+        original: &CommittedPassAbortV1,
+    ) -> Result<CommunityPassAbortReceiptV1, Error> {
         self.keys
             .get(&original.metadata_key)
             .zip(original.records.first())
@@ -359,26 +383,12 @@ impl MemoryCommunityDomainV1 {
         inputs: &StageInputsV1<'_>,
     ) -> Result<StagedPassAbortV1, Error> {
         let reservation = record.reserved.reservation;
-        if context.profile.digest() != reservation.profile_digest {
-            return Err(Error::InvalidBinding);
-        }
-        let (anchor, selection, selection_address) = self.read_selection(context)?;
-        let (generation, head) = current_floor(&selection, inputs.call.timeline)?;
-        if generation != reservation.pass_key.generation() {
-            return Err(Error::StaleGeneration);
-        }
-        if head != reservation.predecessor_head_digest {
-            return Err(Error::StaleFrontier);
-        }
-        self.require_initial_head(inputs.call.timeline, generation, head)?;
-        let metadata_horizon = context
-            .binding
-            .metadata_policy
-            .as_input()
-            .metadata_not_after_micros;
-        if inputs.authenticated.decision_bound().as_micros() > metadata_horizon {
-            return Err(Error::EvidenceExpired);
-        }
+        let fenced = self.fence_first_abort(
+            context,
+            record,
+            inputs.call.timeline,
+            inputs.authenticated.decision_bound().as_micros(),
+        )?;
         let abort = abort_record(&AbortFieldsV1 {
             reservation,
             sealed_result_digest: record.sealed_result_digest,
@@ -392,44 +402,13 @@ impl MemoryCommunityDomainV1 {
             record,
             inputs,
             StageFactsV1 {
-                anchor,
-                selection_address,
-                metadata_horizon,
+                anchor: fenced.anchor,
+                selection_address: fenced.selection_address,
+                metadata_horizon: fenced.metadata_horizon,
                 abort,
                 inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
             },
         )
-    }
-
-    /// Fail closed unless `head` is the generation's initialization head.
-    ///
-    /// The CAV1 below states the `Initial` frontier with no head ref, which
-    /// is true only until a pass commits. A5 (Commit) replaces this guard
-    /// with the committed frontier and the head's CMI1 reference
-    /// (R15.1(5)).
-    fn require_initial_head(
-        &self,
-        timeline: TimelineId,
-        generation: [u8; 16],
-        head: Hash,
-    ) -> Result<(), Error> {
-        self.initializations
-            .iter()
-            .filter(|((initialized, _), _)| *initialized == timeline)
-            .find_map(|(_, committed)| {
-                self.keys
-                    .get(&committed.metadata_key)
-                    .zip(committed.records.last())
-                    .and_then(|(vault, sealed)| vault.open(sealed).ok())
-                    .and_then(|bytes| {
-                        CommunityGenerationAdmissionV1::from_canonical_cbor(&bytes).ok()
-                    })
-                    .filter(|admission| admission.as_input().generation == generation)
-                    .map(|admission| admission.as_input().initial_selected_head_digest)
-            })
-            .filter(|initial| *initial == head)
-            .map(|_| ())
-            .ok_or(Error::EvidenceUnavailable)
     }
 
     /// Stage the CAB1, CAV1 and CAU1 and the CSM1 that seals them.
@@ -493,6 +472,8 @@ impl MemoryCommunityDomainV1 {
                         leaf_grant_id: inputs.administrative.leaf_grant_id(),
                         metadata_key,
                         records: Vec::new(),
+                        admissions: Vec::new(),
+                        generation: record.reserved.reservation.pass_key.generation(),
                     },
                     scope,
                     plaintexts: [
@@ -584,7 +565,7 @@ impl MemoryCommunityDomainV1 {
     /// UTC second. So an operator Abort is never refused for a release the
     /// registry no longer holds, and the CAV1 is never partial. The set is
     /// never empty: a CDP1 roster has at least one row.
-    fn abort_trust_rows(
+    pub(super) fn abort_trust_rows(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         scope: &str,
@@ -677,12 +658,7 @@ impl MemoryCommunityDomainV1 {
         seal: &'static AuthorityTrustRootSealV1,
         mut staged: StagedPassAbortV1,
     ) -> Result<CommunityPassAbortReceiptV1, Error> {
-        let current = self.selection.as_ref().map(|(_, sealed)| sealed.address);
-        if self.inventory_generation != staged.inventory_generation
-            || current != Some(staged.read_selection)
-        {
-            return Err(Error::EvidenceUnavailable);
-        }
+        self.check_unmoved(staged.inventory_generation, staged.read_selection)?;
         let token = self.stage_abort(staged.key.0, staged.key.1, 0)?;
         staged.committed.records = self.seal_abort_records(&staged)?;
         self.apply_abort(seal, &token).map(|()| {
@@ -705,20 +681,48 @@ impl MemoryCommunityDomainV1 {
         &mut self,
         staged: &StagedPassAbortV1,
     ) -> Result<Vec<SealedMetadataV1>, Error> {
+        self.seal_plaintexts(
+            staged.committed.metadata_key,
+            &staged.scope,
+            &staged.plaintexts,
+        )
+    }
+
+    /// Seal `plaintexts` in order under the metadata key `metadata_key`.
+    pub(super) fn seal_plaintexts(
+        &mut self,
+        metadata_key: [u8; 16],
+        scope: &CommunityMetadataScopeV1<'_>,
+        plaintexts: &[(CommunityMetadataSchemaV1, Zeroizing<Vec<u8>>)],
+    ) -> Result<Vec<SealedMetadataV1>, Error> {
         self.keys
-            .get_mut(&staged.committed.metadata_key)
+            .get_mut(&metadata_key)
             .ok_or(Error::EvidenceUnavailable)
             .and_then(|vault| {
-                staged
-                    .plaintexts
+                plaintexts
                     .iter()
-                    .map(|(schema, plaintext)| vault.seal(&staged.scope, *schema, plaintext))
+                    .map(|(schema, plaintext)| vault.seal(scope, *schema, plaintext))
                     .collect()
             })
     }
 
+    /// The compare of the atomic commit: the inventory generation and the
+    /// CSI1 the operation read must be unmoved.
+    pub(super) fn check_unmoved(
+        &self,
+        inventory_generation: u64,
+        read_selection: Hash,
+    ) -> Result<(), Error> {
+        let current = self.selection.as_ref().map(|(_, sealed)| sealed.address);
+        if self.inventory_generation == inventory_generation && current == Some(read_selection) {
+            Ok(())
+        } else {
+            Err(Error::EvidenceUnavailable)
+        }
+    }
+
     /// The pass is terminal: its metadata key never encrypts again.
-    fn close_pass_metadata_key(&mut self, protection_id: [u8; 16]) {
+    pub(super) fn close_pass_metadata_key(&mut self, protection_id: [u8; 16]) {
         if let Some(vault) = self.keys.get_mut(&protection_id) {
             vault.close();
         }
@@ -785,7 +789,7 @@ fn abort_evidence(
 }
 
 /// The CAU1 decision row of `request`'s decision.
-fn decision_row(
+pub(super) fn decision_row(
     request: &AuthorizationRequestV1,
     decision_digest: Hash,
     leaf_grant_id: Hash,
@@ -803,4 +807,4 @@ fn decision_row(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
+pub(super) mod tests;

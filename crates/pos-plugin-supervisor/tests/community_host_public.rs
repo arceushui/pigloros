@@ -1,5 +1,5 @@
-//! The host pass seam at its public API (ADR-061 revision 7 decision 10, #584), on the shared
-//! signed-release test world of `pos-plugin-publisher` and the supervisor's pass harness.
+//! The host pass API on the shared signed-release test world of `pos-plugin-publisher`
+//! and the supervisor's pass harness.
 //!
 //! Every vector installs real signed releases into the world's Memory registry, builds each
 //! Driver from the release the gate accepted, and runs whole passes through
@@ -666,9 +666,6 @@ fn a_policy_refresh_fails_on_the_clock_and_on_unverifiable_records() -> TestResu
     Ok(())
 }
 
-/// R7-S4: a Plugin revoked after activation is quarantined `Revoked`, every later pass is
-/// refused, and clearing the quarantine meets a fresh refusal at the next gate (the disclosed
-/// registry-wide deadlock; #560 changes it).
 #[test]
 fn a_revoked_plugin_refuses_every_later_pass_until_the_deadlock_is_resolved() -> TestResult {
     let mut rig = Rig::new(&[ALPHA, BETA])?;
@@ -1025,14 +1022,6 @@ fn approval_refused(
     Ok((outcome, untouched && port.calls() == 1))
 }
 
-/// FU-6: an approval failure injected at the Tick-Boundary commit.
-///
-/// ADR-061 revision 8 decision 13 and owner decision O-10 narrowed D8 until this test existed
-/// (#626). For every typed approval refusal the pass fails with `AtomicCommitFailed` and a deterministic typed result,
-/// whose class is `Authoritative` (a store error is the other class, `Operational`); each
-/// member's staged output is discarded and its outcome record is `Discarded`; nothing commits,
-/// nobody is quarantined and every slot is empty. The next pass commits from the initial state,
-/// so the refused pass left nothing staged.
 #[test]
 fn an_approval_failure_at_the_commit_discards_the_pass_and_empties_every_slot() -> TestResult {
     assert_eq!(NOT_APPROVED.name(), "AtomicCommitFailed");

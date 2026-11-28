@@ -1191,6 +1191,7 @@ fn the_memory_domain_serves_step_4e_from_its_quarantine_index() -> TestResult {
                 failure_evidence_digest: hash(41),
             }],
             evidence_not_after_micros: BOUND,
+            states: BTreeMap::new(),
         },
     );
     assert_eq!(run(&world), Err(Error::Quarantined));

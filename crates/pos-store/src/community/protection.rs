@@ -113,49 +113,91 @@ impl CommunityArtifactProtectorV1 {
     /// CCI1 refusal (`InvalidBinding`, `BoundsExceeded`) for an invalid
     /// cohort.
     pub fn provision(
-        _seal: &'static AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         cohort: CommunityProtectionCohortV1,
     ) -> Result<Self, Error> {
-        fresh_identity().and_then(|protection_id| {
-            fresh_identity().and_then(|copy_id| {
-                VaultKeyV1::provision(CommunityKeyIntentInputV1 {
-                    protection_operation_id: protection_id,
-                    parent_operation: cohort.parent_operation,
-                    timeline: cohort.timeline,
-                    generation: cohort.generation,
-                    purpose: cohort.purpose,
-                    scope_set_digest: cohort.scope_set_digest,
-                    evidence_not_after_micros: cohort.evidence_not_after_micros,
-                    allowed_record_kinds: cohort.allowed_record_kinds,
-                    member_slots: cohort.member_slots,
-                    material_fingerprint: Hash::zero(),
-                    authority_request_digest: cohort.authority_request_digest,
-                })
-                .and_then(|key| {
-                    CommunityCopyInventoryV1::new(CommunityCopyInventoryInputV1 {
-                        copy_id,
-                        revision: 1,
-                        predecessor: None,
-                        parent_operation: cohort.parent_operation,
-                        timeline: cohort.timeline,
-                        generation: cohort.generation,
-                        holder: CommunityCopyHolderV1::KeyVault,
-                        holder_digest: key.intent().digest(),
-                        purpose: cohort.purpose,
-                        scope_set_digest: cohort.scope_set_digest,
-                        object_commitment: None,
-                        state: CommunityCopyStateV1::Owned,
-                        deadline_micros: cohort.evidence_not_after_micros,
-                    })
-                    .map(|copy| Self {
-                        cohort,
-                        protection_id,
-                        key,
-                        copy,
-                    })
+        fresh_identity()
+            .and_then(|protection_id| Self::provision_identified(seal, cohort, protection_id))
+    }
+
+    /// [`Self::provision`] under a protection ID the host allocated before
+    /// the writer, such as a Reserve's failure cohort key (R15.1(3)).
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::provision`]; a zero `protection_id`
+    /// is `InvalidBinding`.
+    pub fn provision_identified(
+        _seal: &'static AuthorityTrustRootSealV1,
+        cohort: CommunityProtectionCohortV1,
+        protection_id: [u8; 16],
+    ) -> Result<Self, Error> {
+        fresh_identity().and_then(|copy_id| {
+            VaultKeyV1::provision(CommunityKeyIntentInputV1 {
+                protection_operation_id: protection_id,
+                parent_operation: cohort.parent_operation,
+                timeline: cohort.timeline,
+                generation: cohort.generation,
+                purpose: cohort.purpose,
+                scope_set_digest: cohort.scope_set_digest,
+                evidence_not_after_micros: cohort.evidence_not_after_micros,
+                allowed_record_kinds: cohort.allowed_record_kinds,
+                member_slots: cohort.member_slots,
+                material_fingerprint: Hash::zero(),
+                authority_request_digest: cohort.authority_request_digest,
+            })
+            .and_then(|key| {
+                key_copy(&cohort, &key, copy_id).map(|copy| Self {
+                    cohort,
+                    protection_id,
+                    key,
+                    copy,
                 })
             })
         })
+    }
+
+    /// Rebuild a suboperation around the key a Reserve provisioned for a
+    /// failure cohort (ADR-129 R15.1(3)): the cohort is the key's own
+    /// intent, with `scope_cover_digest` as the COH1 cover.
+    ///
+    /// The Reserve sealed the key's CCI1, so the descriptor built here is
+    /// not retained; a failure Abort only uses the key.
+    ///
+    /// # Errors
+    /// Returns `StorageUnavailable` when the OS CSPRNG fails and the CCI1
+    /// refusal for an intent it cannot describe.
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_retained_key(
+        key: VaultKeyV1,
+        scope_cover_digest: Hash,
+    ) -> Result<Self, Error> {
+        let intent = *key.intent().as_input();
+        let cohort = CommunityProtectionCohortV1 {
+            parent_operation: intent.parent_operation,
+            timeline: intent.timeline,
+            generation: intent.generation,
+            purpose: intent.purpose,
+            scope_set_digest: intent.scope_set_digest,
+            scope_cover_digest,
+            evidence_not_after_micros: intent.evidence_not_after_micros,
+            allowed_record_kinds: intent.allowed_record_kinds,
+            member_slots: intent.member_slots,
+            authority_request_digest: intent.authority_request_digest,
+        };
+        fresh_identity()
+            .and_then(|copy_id| key_copy(&cohort, &key, copy_id))
+            .map(|copy| Self {
+                cohort,
+                protection_id: intent.protection_operation_id,
+                key,
+                copy,
+            })
+    }
+
+    /// The suboperation's key, once its records are protected.
+    #[cfg(target_os = "linux")]
+    pub(super) fn into_key(self) -> VaultKeyV1 {
+        self.key
     }
 
     /// The suboperation's key and its CCI1 key-vault copy descriptor, for
@@ -335,6 +377,30 @@ impl CommunityArtifactProtectorV1 {
     ) -> Result<ArtifactRegistrationV1, Error> {
         derive_registration(self.key.intent(), object, children, identity)
     }
+}
+
+/// The CCI1 key-vault copy descriptor of `key`'s material under `cohort`: revision 1,
+/// `KeyVault`, `Owned`, with the cohort horizon as deadline.
+fn key_copy(
+    cohort: &CommunityProtectionCohortV1,
+    key: &VaultKeyV1,
+    copy_id: [u8; 16],
+) -> Result<CommunityCopyInventoryV1, Error> {
+    CommunityCopyInventoryV1::new(CommunityCopyInventoryInputV1 {
+        copy_id,
+        revision: 1,
+        predecessor: None,
+        parent_operation: cohort.parent_operation,
+        timeline: cohort.timeline,
+        generation: cohort.generation,
+        holder: CommunityCopyHolderV1::KeyVault,
+        holder_digest: key.intent().digest(),
+        purpose: cohort.purpose,
+        scope_set_digest: cohort.scope_set_digest,
+        object_commitment: None,
+        state: CommunityCopyStateV1::Owned,
+        deadline_micros: cohort.evidence_not_after_micros,
+    })
 }
 
 /// The exact ARD1 of one COW1 protected under `intent`'s key (ADR-128 §3).

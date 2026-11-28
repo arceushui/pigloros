@@ -911,6 +911,28 @@ impl AdmittedSandboxProvider {
         self.authenticate_grant_with_commitment(bytes, request, commitment, launch.policy_digest)
     }
 
+    /// [`Self::authenticate_grant`], and for a Local launch policy the
+    /// admission bound to the authenticated grant, the same `commitment`, the
+    /// exact LPS1 `canonical_policy` and the request's plans (ADR-069 R14
+    /// §3.5); `None` for every other execution mode.
+    ///
+    /// # Errors
+    /// Those of [`Self::authenticate_grant`], and of binding a Local policy.
+    pub fn authenticate_grant_with_local_network(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        (image, launch): (&AdmittedSandboxImage, &LaunchPolicy),
+        (commitment, canonical_policy): (&SelectorGrantCommitment, &[u8]),
+    ) -> Result<Option<LocalNetworkAdmission>, SandboxAdmissionError> {
+        self.authenticate_grant(bytes, request, image, launch, commitment)
+            .and_then(|grant| {
+                grant
+                    .local_network_if_local(commitment, canonical_policy, &request.network_plans)
+                    .map_err(SandboxAdmissionError::from)
+            })
+    }
+
     /// Authenticate AGR1 from a sealed selector commitment and exact SPX1.
     ///
     /// This crate-private entry point deliberately accepts no caller-selected

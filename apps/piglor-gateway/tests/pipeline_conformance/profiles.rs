@@ -1,11 +1,8 @@
-//! ADR-021 Revision 3 scheduled observation profiles at the runtime seam.
+//! Tests for scheduled observation profiles at the runtime seam.
 //!
-//! No production host composes a participant-bound Driver yet (the Scenario
-//! Room host is planned for Wave 9). These runners act as the test host the
-//! amendment names: they compose each Driver's profile from its Participant
-//! binding (#504), stage a participant-authorized pass through the #481 seam
-//! and an anchored non-participant pass through the #480 seam, and offer both
-//! to a recording admission port.
+//! These runners compose each Driver's profile from its Participant binding,
+//! stage participant-authorized and anchored non-participant passes, and offer
+//! both to a recording admission port.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -45,7 +42,7 @@ use super::{
     },
 };
 
-/// The two observation digest domains ADR-021 Revision 3 Decision 5 names.
+/// The digest domains for participant-bound and non-participant observations.
 const ANCHORED_DOMAIN: &[u8] = b"PiglorOS.ScheduledObservationSnapshot.v1\0";
 const AUTHORIZED_DOMAIN: &[u8] = b"PiglorOS.AuthorizedScheduledPass.v1\0";
 /// The shared base cut of every pass in these runners.
@@ -421,7 +418,7 @@ fn non_participant_registry(participant: &Participant) -> (PluginRegistry, Arc<A
     (registry, aborts)
 }
 
-/// Bind each participant's Driver to its view's ADR-059 Participant.
+/// Bind each participant's Driver to its own view.
 pub(super) fn bind_participants(registry: &mut PluginRegistry, participants: &[&Participant]) {
     let bindings: Vec<(PluginId, ScheduledDriverBindingV1)> = participants
         .iter()

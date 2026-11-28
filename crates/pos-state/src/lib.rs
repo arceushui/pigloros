@@ -50,10 +50,6 @@ pub use candidate::{
 };
 pub use staged::{InstallErrorV1, RevokedSubjectsV1, StagedProjectionV1};
 
-// ---------------------------------------------------------------------------
-// EntityStateProjection
-// ---------------------------------------------------------------------------
-
 /// A [`Reducer`] that folds each event into minimal per-entity state.
 ///
 /// After each event the state contains:
@@ -151,9 +147,6 @@ fn fold_bound_event<T, E>(
 }
 
 /// A named registry of [`Reducer`] implementations backed by per-name [`StateRegistry`]s.
-///
-/// Plugins register reducers during Wave 3 initialisation; the registry then
-/// applies every incoming event to every registered reducer in insertion order.
 ///
 /// A host serving a Fork must bind its chain from [`pos_core::fork_ancestry()`]
 /// through [`Self::bind_fork_ancestry`], [`Self::refold_events`],
@@ -1372,10 +1365,6 @@ impl ConsentRevocationFoldListener for ProjectionRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RelationshipIndex
-// ---------------------------------------------------------------------------
-
 /// Adjacency index for directed [`Relationship`] values.
 ///
 /// NOT a [`Reducer`] — relationships are not per-entity event state; they are
@@ -1439,10 +1428,6 @@ impl RelationshipIndex {
         result
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

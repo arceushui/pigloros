@@ -70,7 +70,7 @@ pub enum ForkEventProvenanceErrorV1 {
     /// A required field is absent, zero, empty, or exceeds its bound.
     #[error("Fork Event-provenance field is out of bounds")]
     FieldOutOfBounds,
-    /// The record claims imported origin, which remains unavailable until #447.
+    /// The record claims an imported origin, which this codec does not accept.
     #[error("Fork Event-provenance origin is unavailable")]
     ImportedAuthorityUnavailable,
     /// The origin/intervention pair is `(0,1)`, which ADR-099 rejects.
