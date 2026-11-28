@@ -9,11 +9,12 @@ use pos_core::community_lifecycle::{
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1,
     CommunityAuthorityViewRowV1, CommunityCurrentViewV1, CommunityDurableProfileV1,
     CommunityInitializationRequestV1, CommunityKeyIntentInputV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1, CommunityMemberSlotsV1,
-    CommunityMetadataPolicyV1, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
-    CommunityMetadataScopeV1, CommunityPassFrontierV1, CommunityPassKeyV1,
-    CommunityProfileMemberV1, CommunityRecordKindsV1, CommunityReservationInputV1,
-    CommunityReservationV1, CommunityScopeMembersV1, CommunitySharedCountsV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationReferenceV1,
+    CommunityMaterializationV1, CommunityMemberSlotsV1, CommunityMetadataPolicyV1,
+    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
+    CommunityPassFrontierV1, CommunityPassKeyV1, CommunityProfileMemberV1, CommunityRecordKindsV1,
+    CommunityReservationInputV1, CommunityReservationV1, CommunityScopeMembersV1,
+    CommunitySharedCountsV1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
@@ -584,16 +585,20 @@ fn an_abort_states_the_first_members_state_revision() -> TestResult {
     Ok(())
 }
 
-/// R16.5(4): the head ref is the CSR1 of the CGI1's first listed member. The
-/// fixture builds the graph in the CGI1's order (`check_input` requires it),
-/// so the check reads the CGI1 from the sealed records and takes that
-/// member's slot, then the CSR1 `at` finds in the CMI1 list: the first
-/// member's, not the second's. A wrong index is refused.
-#[test]
-fn the_head_ref_is_the_cgi1_first_members_state_revision() -> TestResult {
-    let case = Case::new()?;
-    let refs = state_revisions(case.domain())?;
-    let opened = opened_records(case.domain())?;
+/// What the head-ref tests read from an initialized Timeline: its CSR1
+/// references, the sealed CGI1 with the digest it lists first, and the CMI1s
+/// in record order. The fixture builds the graph in the CGI1's order
+/// (`check_input` requires it).
+struct HeadRefScene {
+    case: Case,
+    refs: Vec<CommunityMaterializationReferenceV1>,
+    cgi1: Vec<u8>,
+    listed_first: Hash,
+    cmis: Vec<Zeroizing<Vec<u8>>>,
+}
+
+/// The sealed CGI1 and the CMB1 digest it lists first.
+fn sealed_cgi1(opened: &[Zeroizing<Vec<u8>>]) -> Fallible<(Vec<u8>, Hash)> {
     let cgi1 = opened
         .iter()
         .find(|bytes| CommunityInitializationRequestV1::from_canonical_cbor(bytes).is_ok())
@@ -601,46 +606,97 @@ fn the_head_ref_is_the_cgi1_first_members_state_revision() -> TestResult {
         .to_vec();
     let request = CommunityInitializationRequestV1::from_canonical_cbor(&cgi1)?;
     assert_eq!(request.as_input().member_binding_digests.len(), 2);
-    let listed_first = request
+    let first = request
         .as_input()
         .member_binding_digests
         .iter()
         .next()
         .ok_or("empty CGI1")?;
+    Ok((cgi1, first))
+}
+
+fn head_ref_scene() -> Fallible<HeadRefScene> {
+    let case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    let opened = opened_records(case.domain())?;
+    let (cgi1, listed_first) = sealed_cgi1(&opened)?;
     let cmis: Vec<Zeroizing<Vec<u8>>> = opened
         .into_iter()
         .filter(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes).is_ok())
         .collect();
     assert_eq!(cmis.len(), 10);
+    Ok(HeadRefScene {
+        case,
+        refs,
+        cgi1,
+        listed_first,
+        cmis,
+    })
+}
+
+/// R16.5(4): `at` takes the CSR1 CMI1 of the index it is given: slot 0's CSR1
+/// is record 2 and slot 1's is record 7, and the domain's selected view is
+/// slot 0's. Another record or an index out of range is refused.
+#[test]
+fn a_view_at_an_index_is_that_state_revision() -> TestResult {
+    let scene = head_ref_scene()?;
     let head = hash(1);
-    let first = CommunitySelectedViewV1::at(head, 2, &cmis)?;
-    let second = CommunitySelectedViewV1::at(head, 7, &cmis)?;
-    assert!(first.head_ref == refs[0] && second.head_ref == refs[1]);
-    let selected = case
+    let first = CommunitySelectedViewV1::at(head, 2, &scene.cmis)?;
+    let second = CommunitySelectedViewV1::at(head, 7, &scene.cmis)?;
+    assert!(first.head_ref == scene.refs[0] && second.head_ref == scene.refs[1]);
+    let selected = scene
+        .case
         .domain()
         .selected_views
         .get(&target())
         .ok_or("no selected view")?;
     assert!(selected.head_ref == first.head_ref && selected.head_ref != second.head_ref);
-    let looked = |member| (member == listed_first).then_some(7);
-    let view = CommunitySelectedViewV1::initial(head, &cgi1, looked, &cmis)?;
-    assert!(view.head_ref == refs[1]);
-    let other = |member| (member != listed_first).then_some(7);
-    assert_eq!(
-        CommunitySelectedViewV1::initial(head, &cgi1, other, &cmis).err(),
-        Some(Error::EvidenceUnavailable)
-    );
-    assert_eq!(
-        CommunitySelectedViewV1::initial(head, &cgi1, |_| None, &cmis).err(),
-        Some(Error::EvidenceUnavailable)
-    );
     for index in [0, 1, 3, 4, 99] {
         assert_eq!(
-            CommunitySelectedViewV1::at(head, index, &cmis).err(),
+            CommunitySelectedViewV1::at(head, index, &scene.cmis).err(),
             Some(Error::EvidenceUnavailable)
         );
     }
     assert!(CommunitySelectedViewV1::at(head, 0, &[Zeroizing::new(vec![0xff])]).is_err());
+    Ok(())
+}
+
+/// R16.5(4): `initial` asks for the slot of the digest the CGI1 lists first,
+/// and takes the CSR1 of the index it gets.
+#[test]
+fn the_initial_view_asks_for_the_cgi1_first_member() -> TestResult {
+    let scene = head_ref_scene()?;
+    let listed = scene.listed_first;
+    let view = CommunitySelectedViewV1::initial(
+        hash(1),
+        &scene.cgi1,
+        |member| (member == listed).then_some(7),
+        &scene.cmis,
+    )?;
+    assert!(view.head_ref == scene.refs[1]);
+    Ok(())
+}
+
+/// A member the lookup does not find, and a lookup that finds none, are
+/// refused.
+#[test]
+fn the_initial_view_refuses_an_unknown_member() -> TestResult {
+    let scene = head_ref_scene()?;
+    let listed = scene.listed_first;
+    assert_eq!(
+        CommunitySelectedViewV1::initial(
+            hash(1),
+            &scene.cgi1,
+            |member| (member != listed).then_some(7),
+            &scene.cmis
+        )
+        .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        CommunitySelectedViewV1::initial(hash(1), &scene.cgi1, |_| None, &scene.cmis).err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
 

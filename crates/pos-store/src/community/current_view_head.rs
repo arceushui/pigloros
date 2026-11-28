@@ -135,6 +135,12 @@ impl MemoryCommunityDomainV1 {
     /// The CAV1 of `head` and `rows`, with no scope rows and the clock latch
     /// read now.
     ///
+    /// The latch is read last, after the head view and the trust rows, as the
+    /// Abort sites always did. `SetReason` read it first before the helper;
+    /// every read here refuses with `EvidenceUnavailable` (the latch, the
+    /// head view and the trust registry alike), so the error is the same
+    /// whichever read fails first.
+    ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a missing clock latch and the CAV1
     /// codec refusals.
