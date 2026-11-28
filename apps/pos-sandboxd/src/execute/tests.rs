@@ -2005,6 +2005,20 @@ async fn the_watchdog_kills_an_attempt_that_never_empties() -> TestResult {
     Ok(())
 }
 
+/// The unit stays `active (exited)` after the main exit (R17-E6), so systemd no longer kills what
+/// the adapter left behind: a straggler holds the cgroup populated although the adapter is done,
+/// and only the broker's watchdog ends the attempt, at its deadline.
+#[tokio::test]
+async fn a_straggler_after_the_main_exit_holds_the_cgroup_until_the_watchdog() -> TestResult {
+    let started = Instant::now();
+    let (scenario, execution) = expired(&[]).await?;
+    // The cgroup never empties (`empty_after` is unreachable), as when a child outlives the adapter.
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+    assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_failed_cgroup_kill_does_not_change_the_watchdog_outcome() -> TestResult {
     let (scenario, execution) = expired(&[Fault::KillCgroup]).await?;
