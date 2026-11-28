@@ -279,7 +279,9 @@ pub(super) struct QuarantineReasonStateV1 {
 /// The receipt's CQO1 is live at `sample_micros`: its
 /// `evidence_not_after_micros` is after the sample (`EvidenceExpired`, 13,
 /// otherwise). The CQO1 plaintext is the receipt's own, so no sealed record
-/// is opened.
+/// is opened. Plaintext that does not decode is live here: the receipt is
+/// the one this domain retained, and `resolve_original` compares it byte for
+/// byte with the sealed CQO1 next, which gives 12 for any such difference.
 fn outcome_live(receipt: &CommunityQuarantineReceiptV1, sample_micros: u64) -> Result<(), Error> {
     let expired = CommunityQuarantineOutcomeV1::from_canonical_cbor(receipt.outcome())
         .is_ok_and(|outcome| sample_micros >= outcome.as_input().evidence_not_after_micros);
@@ -337,6 +339,37 @@ pub(super) struct CommittedQuarantineControlV1 {
 
 #[cfg(test)]
 impl CommittedQuarantineControlV1 {
+    /// A retained reset under `identity`, standing for any committed
+    /// control of T's Control namespace.
+    pub(super) fn reset_at(identity: [u8; 16]) -> Self {
+        let reference = ArtifactRefV1 {
+            schema_id: 1,
+            byte_length: 1,
+            digest: [1; 32],
+        };
+        Self {
+            kind: RetainedControlV1::Reset(ResetBoundV1 {
+                key: Hash::from_bytes([1; 32]),
+                expected_ledger: Hash::from_bytes([2; 32]),
+                reasons: Vec::new(),
+                expected_generation: [0x20; 16],
+                expected_head: Hash::from_bytes([30; 32]),
+                trust_snapshot_digest: Hash::from_bytes([3; 32]),
+                principal_ref: reference,
+                authorization_ref: reference,
+                authorization_not_after_micros: 1,
+            }),
+            receipt: CommunityQuarantineReceiptV1 {
+                timeline: TimelineId::from_ulid(ulid::Ulid::from_bytes([1; 16])),
+                control_operation_id: identity,
+                request_digest: Hash::from_bytes([4; 32]),
+                selected_ledger_digest: Hash::from_bytes([5; 32]),
+                already_quarantined: false,
+                outcome: Zeroizing::new(Vec::new()),
+            },
+        }
+    }
+
     /// The retained `SetReason`, if this is one.
     pub(super) const fn set_reason(&self) -> Option<&RetainedSetReasonV1> {
         match &self.kind {

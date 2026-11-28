@@ -1198,4 +1198,56 @@ fn the_memory_domain_serves_step_4e_from_its_quarantine_index() -> TestResult {
     Ok(())
 }
 
+/// R10.7 5f, I251: a materialization whose `M_id` equals a committed
+/// control identity of T gives 4 first, before the consumer, capacity and
+/// store checks; the same identity under another Timeline does not.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_used_control_identity_gives_4_before_every_other_5f_check() -> TestResult {
+    use super::super::quarantine::CommittedQuarantineControlV1;
+    use pos_core::community_lifecycle::community_observation_materialization_id_v1;
+    use pos_core::AuthorityTrustRootSealV1;
+
+    static SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
+    let catalogue = source_catalogue()?;
+    // `used` names whether the identity is committed under T itself.
+    let run = |used: Option<bool>, spoil: bool| -> Fallible<Result<(), Error>> {
+        let (mut domain, root, stored) = history(2)?;
+        let identity = community_observation_materialization_id_v1(root, [0x30; 16])?;
+        if let Some(under_root) = used {
+            let owner = if under_root { root } else { timeline() };
+            domain.quarantine_controls.insert(
+                (owner, identity),
+                CommittedQuarantineControlV1::reset_at(identity),
+            );
+        }
+        let mut input = observation_input(root, &stored);
+        if spoil {
+            input.consumers.clear();
+        }
+        with_minted_profile(catalogue.digest(), |profile| {
+            Ok(prepare_community_observation_v1(
+                &domain,
+                CommunityObservationInstallationV1 {
+                    profile,
+                    source_catalogue: catalogue,
+                    observation_schema_id: ENCODER,
+                },
+                CommunityObservationPassV1 {
+                    generation: G,
+                    reservation_operation_id: [0x30; 16],
+                },
+                &CommunityObservationMaterializationV1::new(&SEAL, input),
+            )
+            .map(|_| ()))
+        })
+    };
+    assert_eq!(run(Some(true), false)?, Err(Error::Conflict));
+    assert_eq!(run(Some(true), true)?, Err(Error::Conflict));
+    assert_eq!(run(None, false)?, Ok(()));
+    assert_ne!(run(None, true)?, Err(Error::Conflict));
+    assert_eq!(run(Some(false), false)?, Ok(()));
+    Ok(())
+}
+
 mod erasure;

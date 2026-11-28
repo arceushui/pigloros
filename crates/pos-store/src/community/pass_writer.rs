@@ -211,6 +211,33 @@ pub struct CommunityStagedReserveV1 {
     pub(super) request: CommunityReservationRequestInputV1,
     /// The failure cohort key's scope set digest.
     pub(super) failure_scope: Hash,
+    /// The minted materialization's control identity `M_id`, derived once at
+    /// the stage from T and the reservation operation (R9.7), which the
+    /// commit adds to T's Control namespace index (R16.9(4)).
+    pub(super) materialization_id: Option<[u8; 16]>,
+}
+
+/// What a Reserve allocated at the stage: its CPR1, its ordinals and the
+/// control identity of the materialization it mints.
+struct AllocatedV1 {
+    reservation: CommunityReservationInputV1,
+    ordinals: (u64, u64),
+    materialization_id: Option<[u8; 16]>,
+}
+
+/// The control identity `M_id` of the materialization a Reserve mints, none
+/// for a reused observation (R9.7).
+fn materialization_id(input: &CommunityReserveInputV1) -> Result<Option<[u8; 16]>, Error> {
+    input
+        .minted
+        .as_ref()
+        .map(|_| {
+            community_observation_materialization_id_v1(
+                input.timeline,
+                input.reservation_operation_id,
+            )
+        })
+        .transpose()
 }
 
 /// One Commit's writer inputs (R10.3(6), R11.3, R13.1(4)).
@@ -297,13 +324,14 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityStagedReserveV1, Error> {
         let bound = input.minted.as_ref().map_or(0, |minted| minted.rows);
         let key = (input.timeline, input.reservation_operation_id);
-        let (cri1, horizons) = self.check_reserve_preconditions(&input, key)?;
+        let (cri1, horizons) = self.check_identity(&input, key)?;
         let state = self.state_under_profile(&input)?;
         self.recheck_reserve(&input, state, horizons)?;
         // The Reserve allocates its native producer ordinal and its pass
         // ordinal in its own transaction (annex §4). Nothing is burned here.
         let outcome = horizons.horizons.outcome_micros;
-        let (reservation, ordinals) = self.reservation_for(&input, &cri1, state, outcome)?;
+        let allocated = self.reservation_for(&input, &cri1, state, outcome)?;
+        let (reservation, ordinals) = (allocated.reservation, allocated.ordinals);
         let facts = input.pass;
         // The materialization's rows bind in the Reserve transaction; the
         // entry holds only the rest and `F_p` (R13.1(4)).
@@ -336,6 +364,7 @@ impl MemoryCommunityDomainV1 {
             pass_ordinal: ordinals.1,
             request: input.request,
             failure_scope: facts.scope_set_digest,
+            materialization_id: allocated.materialization_id,
         })
     }
 
@@ -368,9 +397,15 @@ impl MemoryCommunityDomainV1 {
         cri1: &CommunityReservationRequestV1,
         state: &CommunityPassStateV1,
         outcome: u64,
-    ) -> Result<(CommunityReservationInputV1, (u64, u64)), Error> {
+    ) -> Result<AllocatedV1, Error> {
         let ordinals = self.next_ordinals(state)?;
-        mint_reservation(input, cri1, ordinals, outcome).map(|reservation| (reservation, ordinals))
+        mint_reservation(input, cri1, ordinals, outcome).and_then(|reservation| {
+            materialization_id(input).map(|materialization_id| AllocatedV1 {
+                reservation,
+                ordinals,
+                materialization_id,
+            })
+        })
     }
 
     /// The next native producer ordinal (the burned counter's) and the next
@@ -637,11 +672,11 @@ impl MemoryCommunityDomainV1 {
     pub(super) fn publish_reserve(&mut self, staged: CommunityStagedReserveV1) {
         let (timeline, _) = staged.key;
         self.native_producer_ordinal = staged.native_ordinal;
-        if staged.minted.is_some() {
+        if let Some(identity) = staged.materialization_id {
             // The burned ordinal is consumed by the materialization, whose
             // control identity joins T's Control namespace.
             self.burned_materialization = None;
-            self.index_materialization(staged.key);
+            self.materialization_ids.insert((timeline, identity));
         }
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
@@ -649,46 +684,6 @@ impl MemoryCommunityDomainV1 {
             state.highest_pass_ordinal = staged.pass_ordinal;
             record_reserve(state, staged.minted);
         });
-    }
-
-    /// Record the control identity `M_id` of the materialization the Reserve
-    /// `key` mints (R9.7, R16.9(4)): it derives from T and the reservation
-    /// operation, and is nonzero for every staged Reserve.
-    fn index_materialization(&mut self, key: (TimelineId, [u8; 16])) {
-        community_observation_materialization_id_v1(key.0, key.1)
-            .map(|id| {
-                self.materialization_ids.insert((key.0, id));
-            })
-            .ok();
-    }
-
-    /// A materialization whose `M_id` equals a committed control identity of
-    /// T gives 4, and the caller retries under a new reservation operation
-    /// (R9.7, R10.7 5f, I251).
-    fn check_materialization_id(&self, input: &CommunityReserveInputV1) -> Result<(), Error> {
-        let used = input.minted.is_some()
-            && community_observation_materialization_id_v1(
-                input.timeline,
-                input.reservation_operation_id,
-            )
-            .is_ok_and(|id| self.quarantine_controls.contains_key(&(input.timeline, id)));
-        if used {
-            Err(Error::Conflict)
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The Reserve's identity checks (`check_identity`), then the
-    /// materialization's control identity.
-    fn check_reserve_preconditions(
-        &self,
-        input: &CommunityReserveInputV1,
-        key: (TimelineId, [u8; 16]),
-    ) -> Result<(CommunityReservationRequestV1, WriterHorizonsV1), Error> {
-        let checked = self.check_identity(input, key)?;
-        self.check_materialization_id(input)?;
-        Ok(checked)
     }
 
     /// The cheap re-validation of an apply: the identity checks, then the

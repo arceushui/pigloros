@@ -888,6 +888,27 @@ fn a_used_control_identity_conflicts() -> TestResult {
     Ok(())
 }
 
+/// R16.9(2), I245: a failure's CQC1 `control_operation_id` equal to a
+/// committed materialization's `M_id` of T gives 4, and the Abort commits
+/// nothing.
+#[test]
+fn a_materialization_identity_conflicts() -> TestResult {
+    let mut scene = Scene::new(true)?;
+    scene
+        .case
+        .domain_mut()
+        .materialization_ids
+        .insert((target(), [0x71; 16]));
+    assert_eq!(
+        scene.trap_abort(MEMBER_ZERO, 0x71)?.err(),
+        Some(Error::Conflict)
+    );
+    assert!(scene.case.domain().quarantine_index.is_empty());
+    assert!(scene.case.domain().quarantine_controls.is_empty());
+    assert_eq!(scene.pass_status(), Some(CommunityPassStatusV1::Reserved));
+    Ok(())
+}
+
 /// R15.1(4): the scope bytes must be the pass's. Bytes that do not decode,
 /// a quote other than the Reserve's, a CPV1 of another budget and a CPV1
 /// of another scope each give 3 and change nothing.

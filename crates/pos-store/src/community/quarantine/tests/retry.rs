@@ -48,6 +48,21 @@ fn a_retry_at_the_cqo1_horizon_gives_13() -> TestResult {
     Ok(())
 }
 
+/// An undecodable CQO1 plaintext on the receipt is not a horizon: the retry
+/// goes on to the byte-for-byte comparison with the sealed CQO1, which gives
+/// 12.
+#[test]
+fn an_undecodable_receipt_outcome_gives_12() -> TestResult {
+    let mut case = QuarantineCase::new(&SEAL, Revocation::Artifact)?;
+    set_reason(&mut case, claim(Basis::Artifact))??;
+    retained(&mut case)?.receipt.outcome = zeroize::Zeroizing::new(vec![0xff]);
+    assert_eq!(
+        set_reason(&mut case, claim(Basis::Artifact))?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
 /// I245: a standalone `SetReason` whose `control_operation_id` equals a
 /// committed materialization's `M_id` of T gives 4, and commits nothing.
 #[test]
