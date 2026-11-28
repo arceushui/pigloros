@@ -12,6 +12,7 @@ use pos_core::community_lifecycle::{
     CommunityReservationInputV1, CommunitySharedCountsV1, COMMUNITY_ERASURE_TARGET_LINE_V1,
 };
 use pos_core::{ArtifactDataClassV1, AuthorityTrustRootSealV1, Hash};
+use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 
 use super::{
     CommunityQuarantineResetCallV1, CommunityResetTrustEvidenceV1, ResetPreparedV1, StagedResetV1,
@@ -40,7 +41,7 @@ use crate::community_initialization_fixture::{
 use crate::erasure_budget_rows::{community_rows, erasure_row};
 #[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::PluginTrustPolicyRegistryV1;
-use crate::plugin_trust_registry_fixtures::{release_one, spec, tps_after, Spec};
+use crate::plugin_trust_registry_fixtures::{release_one, spec, tps_after, Material, Spec};
 
 /// The trust-root seal of the test composition.
 const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
@@ -185,6 +186,34 @@ fn credential(case: &QuarantineCase, claim: &Claim, setup: &Setup) -> Fallible<V
     .unwrap_or_default())
 }
 
+/// The metadata policy the call names: the installed one, or with the
+/// leaf grant `setup` replaces.
+fn metadata_policy(case: &QuarantineCase, setup: &Setup) -> Fallible<CommunityMetadataPolicyV1> {
+    let mut input = *case.domain.policy.as_input();
+    if let Some(leaf) = setup.metadata_leaf {
+        input.metadata_authority_leaf_grant = leaf;
+    }
+    Ok(CommunityMetadataPolicyV1::new(input)?)
+}
+
+/// The trust histories `setup` presents: the member's, or none.
+fn histories<'a>(material: &'a Material, setup: &Setup) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
+    if setup.histories {
+        material.histories()
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
+/// The FAE1 and the manifest projection of the reset call.
+fn call_evidence(
+    case: &QuarantineCase,
+    claim: &Claim,
+    setup: &Setup,
+) -> Fallible<(Vec<u8>, ValidatedPluginManifestProjectionV1)> {
+    Ok((credential(case, claim, setup)?, release_one().projection()?))
+}
+
 /// Run `run` with the installed composition and the call of `claim` under
 /// `setup`.
 fn with_call<T>(
@@ -201,18 +230,9 @@ fn with_call<T>(
 ) -> Fallible<T> {
     let rows = case.roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
-    let mut input = *case.domain.policy.as_input();
-    if let Some(leaf) = setup.metadata_leaf {
-        input.metadata_authority_leaf_grant = leaf;
-    }
-    let policy = CommunityMetadataPolicyV1::new(input)?;
-    let projection = release_one().projection()?;
-    let credential = credential(case, claim, setup)?;
-    let (ptr1, prv1) = if setup.histories {
-        case.material.histories()
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let policy = metadata_policy(case, setup)?;
+    let (credential, projection) = call_evidence(case, claim, setup)?;
+    let (ptr1, prv1) = histories(&case.material, setup);
     let call = CommunityQuarantineResetCallV1 {
         credential: &credential,
         administrative_leaf: setup.leaf,
