@@ -1,8 +1,6 @@
-//! The G-PLUG capture adapters of the non-interference harness (ADR-062
-//! Revision 8 slice N2, #1230; owner note `ADR-062_R8_NonInterference_Plugin`,
-//! scoping `ADR-059_R9_State_Migration_Scoping`).
+//! G-PLUG capture adapters for the non-interference harness.
 //!
-//! Four ADR-059 rows are captured here, over one subject:
+//! Four Plugin observations are captured here over one subject:
 //! - `NI-TOOL-001`: host tools and imported services;
 //! - `NI-STATE-003`: Plugin state, on its state members;
 //! - `NI-NET-010`: the network and tool-call sequence;

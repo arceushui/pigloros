@@ -394,9 +394,9 @@ fn a_bundle_for_another_policy_or_executor_is_a_mismatch() -> TestResult {
     Ok(())
 }
 
-/// Owner decision Q14 (2026-11-17, #1412): the bundle must list its store's
-/// Erasure Host Timeline among `host_timelines`, with or without a composed
-/// executor; other host Timelines beside it do not matter.
+/// The bundle must list its store's Erasure Host Timeline among
+/// `host_timelines`, with or without a composed executor; other host Timelines
+/// beside it do not matter.
 #[test]
 fn a_bundle_without_its_erasure_host_timeline_is_a_mismatch() -> TestResult {
     let mut store = provisioned_store()?;
@@ -432,8 +432,8 @@ fn a_bundle_without_its_erasure_host_timeline_is_a_mismatch() -> TestResult {
     Ok(())
 }
 
-/// Owner decision Q6 (2026-11-17, #1412): the pinned executor binding is
-/// `CA("ELEXV1", [executor_id, version])` of exactly these values.
+/// The pinned executor binding is `CA("ELEXV1", [executor_id, version])` of
+/// exactly these values.
 #[test]
 fn the_executor_binding_is_the_pinned_executor_version_digest() -> TestResult {
     assert_eq!(
@@ -896,8 +896,8 @@ fn the_compiled_policy_carries_the_owner_constants() -> TestResult {
     Ok(())
 }
 
-/// The owner's 48-row table (decisions D1-a to D5 of 2026-11-16 on #1403),
-/// as `[artifact_class, data_class, category, ack_class]` codes, written
+/// The 48-row expected classification table, as
+/// `[artifact_class, data_class, category, ack_class]` codes, written
 /// independently of the compiled constant.
 const OWNER_CLASSIFICATION: &str = "\
     0,0,0,artifact-store 0,0,0,client-cache-signal 0,0,0,timeline-payload \
@@ -3412,7 +3412,7 @@ fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestR
     );
     drop(host);
     // A routine bundle rotation is refused while the frozen request pins
-    // the old bundle (owner decision Q12 on #1431).
+    // the old bundle.
     let rotated_key = rotated_signer().verifying_key().to_bytes();
     let material = SigningKeyMaterial::new(rotated_signer());
     owned.store.register(KeyRegistrationV1::new(
@@ -3592,8 +3592,7 @@ fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestR
 }
 
 /// Acceptance test 3b on both adapters: the bound is 4,096 targets per
-/// category, and the store target counts toward it (owner decision of
-/// 2026-11-20).
+/// category, and the store target counts toward it.
 ///
 /// 4,095 affected Timelines and the store target are admitted; growth to
 /// 4,096 after submission commits `Rejected` at freeze, and a new request
@@ -3881,8 +3880,8 @@ fn commit_bound_closure(
     Ok(())
 }
 
-/// The cells decision 1B gives every bound ARD1 row of `class`: its owner
-/// cell, and the Key and Backup cells of each role-7 dependency's target.
+/// Build cells for each bound ARD1 row of `class`: its artifact-store target
+/// and the Key and Backup targets of each role-7 dependency.
 fn ard1_cells(
     store: &LocalStore,
     timeline: TimelineId,
@@ -3896,7 +3895,7 @@ fn ard1_cells(
     {
         let digest = ErasureReferenceV1::from_digest(*row.artifact_digest().as_bytes());
         // No MRM1 closure record is a report class, so each is an
-        // `artifact-store` cell (D5).
+        // `artifact-store` cell.
         cells.push((
             local_target(row.artifact_class(), digest, reference(0))?,
             ErasureInventoryCategoryV1::Artifact,
@@ -4963,7 +4962,7 @@ fn an_attempt_must_be_the_one_its_request_derives() -> TestResult {
     }
     drop(host);
     // Attempt 0 continues the frozen request, so it is admitted after the
-    // bundle expires (owner decision of 2026-11-16).
+    // bundle expires.
     assert_eq!(
         attempted
             .store
@@ -8068,7 +8067,7 @@ fn a_refused_signature_defers_the_step() -> TestResult {
 }
 
 /// `advance` commits one transition per call, in the order `step` would,
-/// and answers `Idle` once nothing is due (owner decision D7 on #1413).
+/// and answers `Idle` once nothing is due.
 #[test]
 fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
     for adapter in ADAPTERS {
@@ -9026,9 +9025,8 @@ fn signer_rotation(
     )
 }
 
-/// Owner decision of 2026-11-18 on #1431: a new role-2 signer key is
-/// registered only while no request pins a bundle, or as a compromise the
-/// installed TPS1 reflects; the registered key itself is an exact re-run.
+/// A routine role-2 key change waits until no request pins a bundle. A
+/// compromise rotation requires installed TPS1 to revoke the old signer.
 #[test]
 fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResult {
     let new_key = rotated_signer().verifying_key().to_bytes();
@@ -9136,9 +9134,8 @@ fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
     Ok(())
 }
 
-// #1449: the ELADM1 submission binding (owner decision D5 on #1413), the
-// typed admission refusals (D3, D9) and the `getErasure` projection
-// (ADR-136 §7).
+// ELADM1 submission binding, typed admission refusals, and the `getErasure`
+// projection.
 
 use pos_core::LocalErasureAdmissionV1;
 use pos_runtime::{LocalErasureClassCountV1, LocalErasureProjectionV1};
@@ -9470,9 +9467,8 @@ fn the_redaction_generation_rises_across_requests() -> TestResult {
     Ok(())
 }
 
-// ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
-// a subject-scoped export through core `export_timeline`, then erasure,
-// then the export again through the public offline evaluator.
+// Verify subject-scoped export through core `export_timeline` before and
+// after erasure using the public offline evaluator.
 
 use pos_core::{
     store::export_timeline, ArtifactClaimInputV1, ArtifactOptionalityV1, ArtifactStateV1,

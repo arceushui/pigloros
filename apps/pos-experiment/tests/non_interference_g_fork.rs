@@ -3,8 +3,6 @@
 #![cfg(target_os = "linux")]
 
 //! Public-interface tests for the G-FORK non-interference capture adapter
-//! (ADR-062 Revision 8 slice N4, #1232; owner note
-//! `ADR-062_R8_NonInterference_Fork`).
 //!
 //! Acceptance criteria, for each variant S, D, W and C in modes L, R and F:
 //!

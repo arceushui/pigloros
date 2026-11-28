@@ -1,8 +1,6 @@
-//! The G-PUB capture adapters of the non-interference harness (ADR-062
-//! Revision 8 slice N1, #1229; owner note
-//! `ADR-062_R8_NonInterference_Executions`).
+//! G-PUB capture adapters for the non-interference harness.
 //!
-//! Two ADR-059 rows are captured here; both use the same subject:
+//! Two observations are captured here; both use the same subject:
 //!
 //! - `NI-PUBLIC-006` captures the public Gateway protocol. The capture
 //!   speaks HTTP to a fresh `piglor-gateway` router.

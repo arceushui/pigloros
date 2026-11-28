@@ -3,15 +3,13 @@
 #![cfg(unix)]
 
 //! Public-interface tests for the G-PUB non-interference capture adapters
-//! (ADR-062 Revision 8 slice N1, #1229; owner note
-//! `ADR-062_R8_NonInterference_Executions`).
 //!
 //! The matrix test runs every G-PUB coordinate once:
 //! - Local spawns `pos-ni-g-pub-subject` as a fresh process.
 //! - Replay and Fork drive the subject through the Experiment host.
 //! - Air-Gapped stays the typed non-executed `Unavailable`.
 //! - `NI-ARCHIVE-009` shares the subject; its RVA1 capture is exercised by
-//!   `non_interference_g_archive.rs` (slice N1b, #1284).
+//!   `non_interference_g_archive.rs`.
 //!
 //! Every executed case must:
 //! - be equal at every surface;

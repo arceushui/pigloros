@@ -1,7 +1,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-//! ADR-062 Revision 8 slice G4 (#1239): the CHS1 per-profile history chain and the Candidate ->
-//! Stable promotion gate, through their public seams, with the owner decisions of wiki
-//! `ADR-062_R8_Promotion_Gate` (2026-11-06).
+//! Public contract tests for the CHS1 per-profile history chain and the
+//! Candidate -> Stable promotion gate.
 //!
 //! Every fixture is a small synthetic in-memory record built here; nothing materializes an
 //! archive, and the two "implementations" of the positive test are test data, not a claim. The

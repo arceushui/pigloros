@@ -2005,8 +2005,8 @@ fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
     Ok(())
 }
 
-/// ELADM1 (owner decision D5 on #1413): round trip, golden bytes and
-/// address, and an epoch of zero refused on both encode and decode.
+/// The ELADM1 binding round-trips, preserves its golden bytes and address,
+/// and rejects an epoch of zero on both encode and decode.
 #[test]
 fn the_submission_binding_record_round_trips_and_needs_an_epoch() -> TestResult {
     let admission = LocalErasureAdmissionV1 {

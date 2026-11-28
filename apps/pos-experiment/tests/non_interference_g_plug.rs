@@ -3,9 +3,6 @@
 #![cfg(unix)]
 
 //! Public-interface tests for the G-PLUG non-interference capture adapters
-//! (ADR-062 Revision 8 slice N2, #1230; owner note
-//! `ADR-062_R8_NonInterference_Plugin`, scoping
-//! `ADR-059_R9_State_Migration_Scoping`).
 //!
 //! The matrix test runs every G-PLUG coordinate once (one shared run):
 //! - Local spawns `pos-ni-g-plug-subject` as a fresh process.

@@ -1,8 +1,6 @@
-//! The G-OPS capture adapters of the non-interference harness (ADR-062
-//! Revision 8 slice N3, #1231; owner note
-//! `ADR-062_R8_NonInterference_Operations`).
+//! G-OPS capture adapters for the non-interference harness.
 //!
-//! Four ADR-059 rows are captured here, all over the same subject:
+//! Four operational observations are captured here, all over the same subject:
 //!
 //! - `NI-CACHE-002`: the authorization cache of a host-owned
 //!   [`pos_runtime::ErasureExecutionHostV1`] (its hit, miss and eviction

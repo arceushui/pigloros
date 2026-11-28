@@ -94,7 +94,7 @@ fn export_of(owner: Option<EntityId>) -> TestResult<TimelineExport> {
 }
 
 /// Import the export of a Timeline `owner` owns, keeping its identity and
-/// owner (owner decision of 2026-11-20: ownership follows the data).
+/// owner.
 fn import_owned_by(store: &mut dyn SeedStore, owner: Option<EntityId>) -> TestResult<TimelineId> {
     let timeline = import_timeline_with_id(&mut *store, export_of(owner)?)?;
     assert_eq!(timeline.meta.owner, owner);
@@ -237,8 +237,7 @@ fn assert_actor_event_kept(host: &mut ErasureExecutionHostV1, other: TimelineId)
 /// the actor's lineage.
 ///
 /// Affected: the actor's root, a Fork of it made on the host for another
-/// actor, and an imported Timeline the actor owns (owner decision of
-/// 2026-11-20: ownership follows the data). Unaffected: another actor's
+/// actor, and an imported Timeline the actor owns. Unaffected: another actor's
 /// root and the actor's Fork of it, an unowned root, imports of another
 /// owner's and of an unowned Timeline, and a host-owned root. The positive
 /// proof holds after a restart (`SQLite`; a Memory store has no close and

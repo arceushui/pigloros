@@ -4,8 +4,6 @@
 #![cfg(target_os = "linux")]
 
 //! Public-interface tests for the G-OPS non-interference capture adapters
-//! (ADR-062 Revision 8 slice N3, #1231; owner note
-//! `ADR-062_R8_NonInterference_Operations`).
 //!
 //! The matrix test runs every G-OPS coordinate once:
 //! - Local spawns `pos-ni-g-ops-subject` as a fresh process.
