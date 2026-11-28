@@ -105,21 +105,24 @@ struct Seed {
     nonces: VolatileSubjectNonceLedgerV1,
 }
 
-fn seed() -> TestResult<Seed> {
-    let directory = tempfile::Builder::new()
+fn private_directory() -> TestResult<tempfile::TempDir> {
+    Ok(tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()?;
+        .tempdir()?)
+}
+
+fn open_bound_store(directory: &tempfile::TempDir) -> TestResult<SqliteStore> {
     let path = directory.path().join(MAIN);
     let mut store = SqliteStore::open(path.to_str().ok_or("path")?)?;
     store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(
         GatewayModeProfileRefV1::try_new("owner-subject-field-read-test", [7; 32])?,
     ))?;
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    let (owner, owner_identity) = signing("piglor-owner");
-    let (gateway, gateway_identity) = signing("timeline-owner");
-    let root = pattern(0x10);
-    let prf = pattern(0x11);
-    let wrap = SubjectKeyWrapV1::seal(
+    Ok(store)
+}
+
+fn subject_wrap() -> TestResult<SubjectKeyWrapV1> {
+    Ok(SubjectKeyWrapV1::seal(
         SubjectKeyWrapParamsV1 {
             subject_id: SUBJECT,
             epoch: 1,
@@ -130,40 +133,75 @@ fn seed() -> TestResult<Seed> {
             subkey_salt: pattern(0x15),
             wrap_nonce: pattern(0x16),
         },
-        &SubjectRootKeyV1::from_bytes(root),
-        &SubjectPrfOutputV1::from_bytes(prf),
-    )?;
-    let digest: Hash = SubjectRootKeyV1::from_bytes(root).material_digest();
-    let mut registry = KeyRegistryStateV1::new();
-    for (identity, material) in [(owner_identity, &owner), (gateway_identity, &gateway)] {
-        registry.register_key(KeyRegistrationV1::new(
-            identity,
-            material.material_digest(),
-            Some(material.public_verification_key()),
-        ))?;
-    }
+        &SubjectRootKeyV1::from_bytes(pattern(0x10)),
+        &SubjectPrfOutputV1::from_bytes(pattern(0x11)),
+    )?)
+}
+
+fn root_digest() -> Hash {
+    SubjectRootKeyV1::from_bytes(pattern(0x10)).material_digest()
+}
+
+fn register_signing(
+    registry: &mut KeyRegistryStateV1,
+    identity: KeyIdentityV1,
+    material: &SigningKeyMaterial,
+) -> TestResult {
+    registry.register_key(KeyRegistrationV1::new(
+        identity,
+        material.material_digest(),
+        Some(material.public_verification_key()),
+    ))?;
+    Ok(())
+}
+
+fn register_encryption(registry: &mut KeyRegistryStateV1) -> TestResult {
     let encryption = KeyIdentityV1::new(
         OwnerIdV1::new(subject_owner_id(SUBJECT)?)?,
         KeyRoleV1::SubjectDataEncryption,
         1,
     );
-    registry.register_key(KeyRegistrationV1::new(encryption, digest, None))?;
-    store.save_key_registry(&registry)?;
-    let timeline = store.create_timeline("subject-data")?.id();
-    let mut keys = SubjectKeyringV1::new(SUBJECT, owner_identity, owner.public_verification_key())?;
-    keys.unlock(wrap, &SubjectPrfOutputV1::from_bytes(prf))?;
-    let nonces =
-        VolatileSubjectNonceLedgerV1::new(SubjectNonceLedgerV1::new([SubjectNonceLedgerRowV1 {
+    registry.register_key(KeyRegistrationV1::new(encryption, root_digest(), None))?;
+    Ok(())
+}
+
+fn unlocked_keyring(identity: KeyIdentityV1, public: PublicKey) -> TestResult<SubjectKeyringV1> {
+    let mut keys = SubjectKeyringV1::new(SUBJECT, identity, public)?;
+    keys.unlock(
+        subject_wrap()?,
+        &SubjectPrfOutputV1::from_bytes(pattern(0x11)),
+    )?;
+    Ok(keys)
+}
+
+fn nonce_ledger() -> TestResult<VolatileSubjectNonceLedgerV1> {
+    Ok(VolatileSubjectNonceLedgerV1::new(
+        SubjectNonceLedgerV1::new([SubjectNonceLedgerRowV1 {
             owner_id: subject_owner_id(SUBJECT)?,
             epoch: 1,
-            root_material_digest: *digest.as_bytes(),
+            root_material_digest: *root_digest().as_bytes(),
             store_file_id: SubjectStoreFileIdV1::Linux {
                 device: 0,
                 inode: 0,
             },
             data_next: 1,
             bootstrap_next: 1,
-        }])?);
+        }])?,
+    ))
+}
+
+fn seed() -> TestResult<Seed> {
+    let directory = private_directory()?;
+    let mut store = open_bound_store(&directory)?;
+    let (owner, owner_identity) = signing("piglor-owner");
+    let (gateway, gateway_identity) = signing("timeline-owner");
+    let mut registry = KeyRegistryStateV1::new();
+    register_signing(&mut registry, owner_identity, &owner)?;
+    register_signing(&mut registry, gateway_identity, &gateway)?;
+    register_encryption(&mut registry)?;
+    store.save_key_registry(&registry)?;
+    let timeline = store.create_timeline("subject-data")?.id();
+    let keys = unlocked_keyring(owner_identity, owner.public_verification_key())?;
     Ok(Seed {
         store,
         directory,
@@ -171,7 +209,22 @@ fn seed() -> TestResult<Seed> {
         owner,
         owner_identity,
         keys,
-        nonces,
+        nonces: nonce_ledger()?,
+    })
+}
+
+/// Create the lookup index on a raw connection and make the file owner-only.
+fn index_and_restrict(path: &std::path::Path) -> TestResult {
+    Connection::open(path)?.execute_batch(EVENTS_INDEX_SQL)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn file_identity(path: &std::path::Path) -> TestResult<SubjectStoreFileIdV1> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(SubjectStoreFileIdV1::Linux {
+        device: metadata.dev(),
+        inode: metadata.ino(),
     })
 }
 
@@ -252,15 +305,10 @@ impl Seed {
         } = self;
         drop(store);
         let path = directory.path().join(MAIN);
-        Connection::open(&path)?.execute_batch(EVENTS_INDEX_SQL)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        index_and_restrict(&path)?;
         install_owner_store_namespace_v1(directory.path(), MAIN)?;
-        let metadata = std::fs::metadata(&path)?;
         Ok(World {
-            key: SubjectStoreFileIdV1::Linux {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            },
+            key: file_identity(&path)?,
             directory,
             context: Arc::new(OwnerStoreContextV1::default()),
             timeline,
