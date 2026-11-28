@@ -53,6 +53,11 @@ const REQUEST_MAC_DOMAIN: &[u8] = b"pigloros/subject-data-append-mac/v1\0";
 /// The longest admitted `field_tag`, so its length fits the one-byte prefix.
 const MAX_FIELD_TAG_LEN: u8 = 128;
 
+// The one-byte prefix and the digest must admit exactly the same tags.
+const _: () = assert!(
+    MAX_FIELD_TAG_LEN as usize == pos_crypto::subject_ciphertext::MAX_SUBJECT_FIELD_TAG_BYTES
+);
+
 /// Domain prefix of the request digest stored in a receipt.
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"pigloros/subject-data-append-request/v1\0";
 
