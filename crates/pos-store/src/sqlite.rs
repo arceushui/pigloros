@@ -149,10 +149,13 @@ use crate::{
 mod composition_fallback_registry;
 mod composition_fallback_registry_rows;
 mod composition_fallback_registry_schema;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+mod consent_revocation_journal;
 mod counterfactual_store;
 mod erasure_admissions;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod erasure_fence_rows;
+mod erasure_fence_writers;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -184,6 +187,8 @@ pub mod interval_test_support;
 mod local_cut_owner;
 mod local_erasure;
 mod local_replica_residual;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub(crate) mod owner_store_binding;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
@@ -2259,10 +2264,30 @@ impl SqliteStore {
         Self::require_utf8_encoding(&conn)?;
         let erasure_inventory_data_version =
             sqlite_data_version(&conn).map_err(|error| CoreError::Storage(error.to_string()))?;
-        let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
-        let erasure_gate_bound = false;
 
-        let mut store = Self {
+        let mut store = Self::with_connection(
+            conn,
+            writer_reservation_connection,
+            hasher,
+            erasure_inventory_data_version,
+        );
+        store.finish_open(
+            initialize_schema,
+            flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY),
+        )?;
+        Ok(store)
+    }
+
+    /// Wrap an opened connection in a store with no schema work done yet.
+    /// Every constructor, including the qualified owner-store binding,
+    /// builds its store here.
+    fn with_connection(
+        conn: Connection,
+        writer_reservation_connection: Option<Connection>,
+        hasher: Box<dyn Hasher>,
+        erasure_inventory_data_version: i64,
+    ) -> Self {
+        Self {
             conn,
             writer_reservation_connection,
             hasher,
@@ -2270,8 +2295,8 @@ impl SqliteStore {
             consent_permits: crate::ConsentPermitBinding::default(),
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
-            erasure_gate,
-            erasure_gate_bound,
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
+            erasure_gate_bound: false,
             erasure_inventory_data_version,
             erasure_inventory_generation: None,
             erasure_topology_requires_permit: false,
@@ -2288,12 +2313,7 @@ impl SqliteStore {
             #[cfg(test)]
             destruction_transaction_hook: None,
             mode_binding_epoch: None,
-        };
-        store.finish_open(
-            initialize_schema,
-            flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY),
-        )?;
-        Ok(store)
+        }
     }
 
     fn open_writer_reservation_connection(
@@ -2353,6 +2373,8 @@ impl SqliteStore {
                     self.prepare_erasure_fence_rows_schema()?;
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_subject_key_deletion_schema()?;
+                    #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+                    self.prepare_consent_revocation_journal_schema()?;
                     #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
                     self.prepare_gateway_consent_lease_schema()?;
                     self.prepare_authority_schema()
@@ -11415,7 +11437,7 @@ fn apply_sqlite_erasure_cas(
     for index in mutation.index_inserts() {
         insert_sqlite_index(conn, mutation.request(), *index)?;
     }
-    let effect_cbor = mutation.effect().to_canonical_cbor()?;
+    let effect_cbor = erasure_fence_writers::fenced_effect_cbor(conn, mutation)?;
     let effect_subject = mutation
         .effect()
         .subject()
