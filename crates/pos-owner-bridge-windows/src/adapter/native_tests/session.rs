@@ -31,6 +31,8 @@ pub(super) struct Session<'a> {
     // Ends the process once the bound passes: no owner may be released under a
     // live browser, and a hung test would otherwise hold the step to its timeout.
     abandon: fn() -> !,
+    // Bounded read-only stall snapshot emitted after the stall line is flushed.
+    on_stall: fn(&str, &str),
 }
 
 impl<'a> Session<'a> {
@@ -43,6 +45,7 @@ impl<'a> Session<'a> {
             had_controller: Cell::new(false),
             retirement_bound: RETIREMENT_BOUND,
             abandon: std::process::abort,
+            on_stall: super::trace::report_process_snapshot,
         })
     }
 
@@ -95,6 +98,8 @@ impl<'a> Session<'a> {
             self.events.exited(),
         );
         let _flushed_or_unavailable = stderr.flush();
+        drop(stderr);
+        (self.on_stall)("NATIVE_STALL_PROCESSES", "retirement-stalled");
     }
 }
 
@@ -360,6 +365,13 @@ mod tests {
     fn raw_session_whose_browser_never_exits_is_abandoned_after_the_bound() {
         thread_local! {
             static ABANDONED: Cell<bool> = const { Cell::new(false) };
+            static STALL_REPORTED: Cell<bool> = const { Cell::new(false) };
+        }
+        fn record_stall(tag: &str, context: &str) {
+            assert_eq!(tag, "NATIVE_STALL_PROCESSES");
+            assert_eq!(context, "retirement-stalled");
+            assert!(!ABANDONED.with(Cell::get));
+            STALL_REPORTED.with(|reported| reported.set(true));
         }
         fn record() -> ! {
             ABANDONED.with(|abandoned| abandoned.set(true));
@@ -374,6 +386,7 @@ mod tests {
             assert_eq!(session.controller_completion(), Some(Ok(())));
             session.retirement_bound = Duration::ZERO;
             session.abandon = record;
+            session.on_stall = record_stall;
             session
         });
         let error = session.as_ref().err();
@@ -381,6 +394,7 @@ mod tests {
         // No exit event ever arrives; the drop must still end, through `abandon`.
         let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(session)));
         assert!(dropped.is_err());
+        assert!(STALL_REPORTED.with(Cell::get));
         assert!(ABANDONED.with(Cell::get));
         let calls = native.calls.borrow();
         assert!(calls.contains(&"close_controller"));
