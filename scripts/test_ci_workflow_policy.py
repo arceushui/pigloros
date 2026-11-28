@@ -64,6 +64,21 @@ COVERAGE_GENERATE_STEP = {
         "--run-ignored all --no-fail-fast\n"
     ),
 }
+COVERAGE_CHANGED_CODE_STEP = {
+    "name": "Enforce changed production Rust code coverage first",
+    "run": (
+        'covgate check "${{ runner.temp }}/coverage.json" --base "${{ '
+        "github.event_name == 'pull_request' && "
+        "github.event.pull_request.base.sha || github.event_name == 'push' && "
+        'github.event.before || \'origin/main\' }}" --no-github-summary\n'
+    ),
+}
+COVERAGE_UPLOAD_JSON_WITH = {
+    "name": "coverage-json-${{ github.sha }}",
+    "path": "${{ runner.temp }}/coverage.json",
+    "retention-days": 1,
+    "if-no-files-found": "error",
+}
 COVERAGE_FLOOR_STEP = {
     "name": "Enforce workspace coverage floor",
     "run": (
@@ -929,14 +944,15 @@ def assert_workspace_coverage_floor_contract(
     between = steps[generate_idx + 1 : floor_idx]
     if (
         len(between) != 2
-        or not isinstance(between[0], dict)
-        or between[0].get("name") != "Enforce changed production Rust code coverage first"
-        or not str(between[0].get("run", "")).startswith(
-            'covgate check "${{ runner.temp }}/coverage.json"'
-        )
+        or between[0] != COVERAGE_CHANGED_CODE_STEP
         or not isinstance(between[1], dict)
+        or set(between[1].keys()) != {"name", "uses", "with"}
         or between[1].get("name") != "Upload coverage JSON for region diagnosis"
-        or not str(between[1].get("uses", "")).startswith("actions/upload-artifact@")
+        or not re.fullmatch(
+            r"actions/upload-artifact@[0-9a-f]{40}",
+            str(between[1].get("uses", "")),
+        )
+        or between[1].get("with") != COVERAGE_UPLOAD_JSON_WITH
     ):
         raise AssertionError(
             "only read-only changed-code gate and artifact upload may run between generating coverage.json and enforcing the floor"
@@ -3223,6 +3239,16 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 cov_step_idx(w, COVERAGE_FLOOR_STEP["name"]),
                 {"name": "Tamper coverage JSON", "run": "true\n"}),
              "read-only changed-code gate and artifact upload"),
+            ("covgate step appended command", lambda w: cov_step(
+                w, COVERAGE_CHANGED_CODE_STEP["name"]).update(
+                run=COVERAGE_CHANGED_CODE_STEP["run"] + 'echo "{}" > "${{ runner.temp }}/coverage.json"\n'),
+             "read-only changed-code gate and artifact upload"),
+            ("covgate step nonblocking", lambda w: cov_step(
+                w, COVERAGE_CHANGED_CODE_STEP["name"]).update({"continue-on-error": True}),
+             "read-only changed-code gate and artifact upload"),
+            ("upload step conditional", lambda w: cov_step(
+                w, "Upload coverage JSON for region diagnosis").update({"if": "false"}),
+             "read-only changed-code gate and artifact upload"),
             ("floor before generate", lambda w: w["jobs"]["coverage"]["steps"].insert(
                 0, w["jobs"]["coverage"]["steps"].pop(
                     cov_step_idx(w, COVERAGE_FLOOR_STEP["name"]))),
@@ -3855,11 +3881,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         ):
             with self.subTest(case=label):
                 mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
-                cache_step = next(
-                    step
-                    for step in mutated["jobs"]["clippy"]["steps"]
-                    if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
-                )
+                cache_step = _rust_cache_steps(mutated["jobs"]["clippy"])[0]
                 if value is None:
                     del cache_step["with"]["save-if"]
                 else:
