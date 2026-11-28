@@ -84,6 +84,15 @@ fn community(seed: u64) -> TestResult<ArtifactRegistrationCatalogRowV1> {
     )
 }
 
+/// The Timelines the fixture's store holds before any padding: the actor's
+/// root, its Fork and the nested Fork.
+const FIXTURE_TIMELINES: u64 = 3;
+
+/// The targets the fixture's store counts before any padding: the store, its
+/// Timelines, two role-0 keys, the rows it binds and the two role-7 key
+/// targets of the actor's own rows.
+const FIXTURE_TARGETS: u64 = 1 + FIXTURE_TIMELINES + 2 + (6 + 3 + 1 + 2 + 2) + 2;
+
 /// The Memory driver store with a Fork of the actor's root, the other
 /// actor's Fork of that Fork and its own root, rows of every kind on them,
 /// rows bound to two Timelines, a second role-0 key of the actor, the other
@@ -154,7 +163,7 @@ fn budget_store(targets: u64) -> TestResult<MemoryStore> {
     // row. The consented row, the role-7 key and the other root are not
     // the actor's.
     let counted = store.erasure_targets_for_test(actor());
-    assert_eq!(counted, 1 + 3 + 2 + (6 + 3 + 1 + 2 + 2) + 2);
+    assert_eq!(counted, FIXTURE_TARGETS);
     let padding = usize::try_from(targets - counted)?;
     owned_roots_on(&mut store, actor(), padding)?;
     assert_eq!(store.erasure_targets_for_test(actor()), targets);
@@ -194,10 +203,10 @@ fn the_counted_targets_are_the_closure_the_authority_admits() -> TestResult {
 ///
 /// The test stops at the freeze. Driving the request to its receipt signs one
 /// acknowledgement step per target, about 4,000 here, which does not finish
-/// within a CI job (it was cancelled after 20 minutes). The receipt form,
-/// where every community row is an Artifact obligation, and the form that
-/// reaches the line by passes up to the first refusal (14 or 19), remain
-/// obligations of the A5 Commit slice.
+/// within a CI job, and the frozen inventory has no read path of its own. The
+/// receipt form, where every community row is an Artifact obligation, and the
+/// form that reaches the line by passes up to the first refusal (14 or 19),
+/// remain obligations of the A5 Commit slice.
 #[test]
 fn a_request_freezes_at_the_community_line() -> TestResult {
     let mut host = memory_host(
@@ -212,10 +221,11 @@ fn a_request_freezes_at_the_community_line() -> TestResult {
         .erasure_state(request_of(1)?)?
         .ok_or("request missing")?;
     assert_eq!(frozen.lifecycle(), ErasureLifecycleV1::AccessFrozen);
-    // Every target at the line but the 19 of the fixture's store, role-0
-    // keys and rows is one Timeline payload: the root, its Fork, the nested
-    // Fork and the padding roots.
-    let affected = usize::try_from(COMMUNITY_ERASURE_TARGET_LINE_V1 - 19)?;
+    // Every target at the line that is not the fixture's store, role-0 keys
+    // or rows is one Timeline payload: the fixture's Timelines and the
+    // padding roots.
+    let affected =
+        usize::try_from(COMMUNITY_ERASURE_TARGET_LINE_V1 - (FIXTURE_TARGETS - FIXTURE_TIMELINES))?;
     assert_eq!(
         frozen
             .scope()
