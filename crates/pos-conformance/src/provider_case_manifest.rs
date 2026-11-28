@@ -60,28 +60,70 @@ const fn outcome_name(outcome: SandboxTerminalOutcomeV1) -> &'static str {
     }
 }
 
-/// The wire name of an SPE1 refusal code, as the guest report prints it.
+/// The wire name of every SPE1 refusal code, as the guest report prints it,
+/// in the order the codes are declared. The names are written out so that
+/// renaming a variant cannot change the wire; a test keeps the order and the
+/// names right for every variant.
+const CODE_NAMES: [(SandboxProviderErrorCodeV1, &str); 18] = [
+    (
+        SandboxProviderErrorCodeV1::InvalidEncoding,
+        "InvalidEncoding",
+    ),
+    (
+        SandboxProviderErrorCodeV1::UnsupportedVersion,
+        "UnsupportedVersion",
+    ),
+    (
+        SandboxProviderErrorCodeV1::FieldOutOfBounds,
+        "FieldOutOfBounds",
+    ),
+    (
+        SandboxProviderErrorCodeV1::NonCanonicalOrder,
+        "NonCanonicalOrder",
+    ),
+    (SandboxProviderErrorCodeV1::DigestMismatch, "DigestMismatch"),
+    (
+        SandboxProviderErrorCodeV1::SignatureInvalid,
+        "SignatureInvalid",
+    ),
+    (SandboxProviderErrorCodeV1::TrustRevoked, "TrustRevoked"),
+    (
+        SandboxProviderErrorCodeV1::AuthorityMismatch,
+        "AuthorityMismatch",
+    ),
+    (
+        SandboxProviderErrorCodeV1::ProviderCapabilityMissing,
+        "ProviderCapabilityMissing",
+    ),
+    (
+        SandboxProviderErrorCodeV1::ImageIdentityMismatch,
+        "ImageIdentityMismatch",
+    ),
+    (SandboxProviderErrorCodeV1::SelfTestFailed, "SelfTestFailed"),
+    (
+        SandboxProviderErrorCodeV1::SandboxUnavailable,
+        "SandboxUnavailable",
+    ),
+    (SandboxProviderErrorCodeV1::AdmissionBusy, "AdmissionBusy"),
+    (
+        SandboxProviderErrorCodeV1::AuditUnavailable,
+        "AuditUnavailable",
+    ),
+    (SandboxProviderErrorCodeV1::CleanupFailed, "CleanupFailed"),
+    (SandboxProviderErrorCodeV1::UnknownAttempt, "UnknownAttempt"),
+    (
+        SandboxProviderErrorCodeV1::RequestIdentityConflict,
+        "RequestIdentityConflict",
+    ),
+    (
+        SandboxProviderErrorCodeV1::PayloadTransferTimeout,
+        "PayloadTransferTimeout",
+    ),
+];
+
+/// The wire name of an SPE1 refusal code.
 const fn code_name(code: SandboxProviderErrorCodeV1) -> &'static str {
-    match code {
-        SandboxProviderErrorCodeV1::InvalidEncoding => "InvalidEncoding",
-        SandboxProviderErrorCodeV1::UnsupportedVersion => "UnsupportedVersion",
-        SandboxProviderErrorCodeV1::FieldOutOfBounds => "FieldOutOfBounds",
-        SandboxProviderErrorCodeV1::NonCanonicalOrder => "NonCanonicalOrder",
-        SandboxProviderErrorCodeV1::DigestMismatch => "DigestMismatch",
-        SandboxProviderErrorCodeV1::SignatureInvalid => "SignatureInvalid",
-        SandboxProviderErrorCodeV1::TrustRevoked => "TrustRevoked",
-        SandboxProviderErrorCodeV1::AuthorityMismatch => "AuthorityMismatch",
-        SandboxProviderErrorCodeV1::ProviderCapabilityMissing => "ProviderCapabilityMissing",
-        SandboxProviderErrorCodeV1::ImageIdentityMismatch => "ImageIdentityMismatch",
-        SandboxProviderErrorCodeV1::SelfTestFailed => "SelfTestFailed",
-        SandboxProviderErrorCodeV1::SandboxUnavailable => "SandboxUnavailable",
-        SandboxProviderErrorCodeV1::AdmissionBusy => "AdmissionBusy",
-        SandboxProviderErrorCodeV1::AuditUnavailable => "AuditUnavailable",
-        SandboxProviderErrorCodeV1::CleanupFailed => "CleanupFailed",
-        SandboxProviderErrorCodeV1::UnknownAttempt => "UnknownAttempt",
-        SandboxProviderErrorCodeV1::RequestIdentityConflict => "RequestIdentityConflict",
-        SandboxProviderErrorCodeV1::PayloadTransferTimeout => "PayloadTransferTimeout",
-    }
+    CODE_NAMES[code as usize].1
 }
 
 /// The public outcome a case must show, in the report's own names.
@@ -128,3 +170,6 @@ pub fn case_manifest_v1() -> Value {
         "version": VERSION,
     })
 }
+
+#[cfg(test)]
+mod tests;
