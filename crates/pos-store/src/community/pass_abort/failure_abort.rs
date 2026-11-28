@@ -290,7 +290,8 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// R15.3(2) step 5 after the live-call and status rule the lookup ran: no
-    /// control identity already in the CQC1 retry index (4), then the CDP1,
+    /// control identity already in the CQC1 retry index or a committed
+    /// materialization's `M_id` (4, R16.9(2)), then the CDP1,
     /// generation, head and metadata-horizon fences.
     fn first_failure_preconditions(
         &self,
@@ -300,9 +301,10 @@ impl MemoryCommunityDomainV1 {
         clock: ClockV1,
     ) -> Result<FencedV1, Error> {
         let used = input.failures.iter().any(|failure| {
-            failure
-                .control_operation_id
-                .is_some_and(|id| self.quarantine_controls.contains_key(&(input.timeline, id)))
+            failure.control_operation_id.is_some_and(|id| {
+                self.quarantine_controls.contains_key(&(input.timeline, id))
+                    || self.materialization_ids.contains(&(input.timeline, id))
+            })
         });
         if used {
             Err(Error::Conflict)

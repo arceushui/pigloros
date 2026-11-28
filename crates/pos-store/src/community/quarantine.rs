@@ -51,7 +51,7 @@ use pos_core::community_lifecycle::{
     CommunityMetadataAnchorV1, CommunityOwnerBindingV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1, CommunityPluginHostErrorV1, CommunityQuarantineControlInputV1,
     CommunityQuarantineControlKindV1, CommunityQuarantineControlV1,
-    CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
+    CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1, CommunityQuarantineOutcomeV1,
     CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1, CommunityQuarantineReasonsV1,
     CommunitySelectionV1, RevocationBasisV1,
 };
@@ -274,6 +274,20 @@ pub(super) struct QuarantineLedgerV1 {
 pub(super) struct QuarantineReasonStateV1 {
     pub(super) evidence_not_after_micros: u64,
     pub(super) share_spent: bool,
+}
+
+/// The receipt's CQO1 is live at `sample_micros`: its
+/// `evidence_not_after_micros` is after the sample (`EvidenceExpired`, 13,
+/// otherwise). The CQO1 plaintext is the receipt's own, so no sealed record
+/// is opened.
+fn outcome_live(receipt: &CommunityQuarantineReceiptV1, sample_micros: u64) -> Result<(), Error> {
+    let expired = CommunityQuarantineOutcomeV1::from_canonical_cbor(receipt.outcome())
+        .is_ok_and(|outcome| sample_micros >= outcome.as_input().evidence_not_after_micros);
+    if expired {
+        Err(Error::EvidenceExpired)
+    } else {
+        Ok(())
+    }
 }
 
 /// The per-reason states of a ledger once `reason` joins `current`'s.
@@ -509,13 +523,12 @@ impl MemoryCommunityDomainV1 {
             expected_generation: call.expected_generation,
             expected_head: call.expected_state_head_digest,
         };
-        if let Some(original) = self
-            .quarantine_controls
-            .get(&(failure.timeline, call.control_operation_id))
-        {
-            return self
-                .retry_set_reason(original, &bound)
-                .map(SetReasonPreparedV1::Original);
+        if let Some(retry) = self.set_reason_retry(
+            (failure.timeline, call.control_operation_id),
+            &bound,
+            reservation.sampled_at().as_micros(),
+        ) {
+            return retry.map(SetReasonPreparedV1::Original);
         }
         let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
         let authority = write.with_trust(trust_snapshot_digest);
@@ -584,16 +597,36 @@ impl MemoryCommunityDomainV1 {
             .ok_or(Error::EvidenceUnavailable)
     }
 
+    /// The A5.5 step-4 lookup of a `SetReason` under `key`: 4 when the
+    /// identity is a committed materialization's `M_id` (R16.9(2)), else the
+    /// retry of a retained control, if any.
+    fn set_reason_retry(
+        &self,
+        key: (TimelineId, [u8; 16]),
+        bound: &SetReasonBoundV1,
+        sample_micros: u64,
+    ) -> Option<Result<CommunityQuarantineReceiptV1, Error>> {
+        if self.materialization_ids.contains(&key) {
+            return Some(Err(Error::Conflict));
+        }
+        self.quarantine_controls
+            .get(&key)
+            .map(|original| self.retry_set_reason(original, bound, sample_micros))
+    }
+
     /// A retry of a `SetReason`: the original outcome for identical bound
-    /// content, otherwise 4.
+    /// content, otherwise 4; at or after the retained CQO1's horizon, 13,
+    /// judged before the CQO1 is opened (R16.9(1)).
     fn retry_set_reason(
         &self,
         original: &CommittedQuarantineControlV1,
         bound: &SetReasonBoundV1,
+        sample_micros: u64,
     ) -> Result<CommunityQuarantineReceiptV1, Error> {
         match &original.kind {
             RetainedControlV1::SetReason(held) if held.bound == *bound => {
-                self.resolve_original(held, &original.receipt)
+                outcome_live(&original.receipt, sample_micros)
+                    .and_then(|()| self.resolve_original(held, &original.receipt))
             }
             _ => Err(Error::Conflict),
         }

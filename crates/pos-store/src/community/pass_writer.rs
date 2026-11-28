@@ -59,12 +59,12 @@
 //! discard.
 
 use pos_core::community_lifecycle::{
-    community_prepared_input_set_digest_v1, CommunityGraphCountsV1,
-    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1, CommunityPassGraphTermsV1,
-    CommunityPassKeyV1, CommunityReservationInputV1, CommunityReservationRequestInputV1,
-    CommunityReservationRequestV1, CommunityReservationV1, CommunityScopeMemberV1,
-    CommunitySelectionInputV1, CommunitySelectionV1, CommunitySharedCountsV1,
-    CommunityTimelineFloorsV1,
+    community_observation_materialization_id_v1, community_prepared_input_set_digest_v1,
+    CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
+    CommunityPassGraphTermsV1, CommunityPassKeyV1, CommunityReservationInputV1,
+    CommunityReservationRequestInputV1, CommunityReservationRequestV1, CommunityReservationV1,
+    CommunityScopeMemberV1, CommunitySelectionInputV1, CommunitySelectionV1,
+    CommunitySharedCountsV1, CommunityTimelineFloorsV1,
 };
 use pos_core::store::EventStore;
 use pos_core::{AuthorityTrustRootSealV1, Hash, Seq, TimelineId};
@@ -297,7 +297,7 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityStagedReserveV1, Error> {
         let bound = input.minted.as_ref().map_or(0, |minted| minted.rows);
         let key = (input.timeline, input.reservation_operation_id);
-        let (cri1, horizons) = self.check_identity(&input, key)?;
+        let (cri1, horizons) = self.check_reserve_preconditions(&input, key)?;
         let state = self.state_under_profile(&input)?;
         self.recheck_reserve(&input, state, horizons)?;
         // The Reserve allocates its native producer ordinal and its pass
@@ -638,8 +638,10 @@ impl MemoryCommunityDomainV1 {
         let (timeline, _) = staged.key;
         self.native_producer_ordinal = staged.native_ordinal;
         if staged.minted.is_some() {
-            // The burned ordinal is consumed by the materialization.
+            // The burned ordinal is consumed by the materialization, whose
+            // control identity joins T's Control namespace.
             self.burned_materialization = None;
+            self.index_materialization(staged.key);
         }
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
@@ -647,6 +649,46 @@ impl MemoryCommunityDomainV1 {
             state.highest_pass_ordinal = staged.pass_ordinal;
             record_reserve(state, staged.minted);
         });
+    }
+
+    /// Record the control identity `M_id` of the materialization the Reserve
+    /// `key` mints (R9.7, R16.9(4)): it derives from T and the reservation
+    /// operation, and is nonzero for every staged Reserve.
+    fn index_materialization(&mut self, key: (TimelineId, [u8; 16])) {
+        community_observation_materialization_id_v1(key.0, key.1)
+            .map(|id| {
+                self.materialization_ids.insert((key.0, id));
+            })
+            .ok();
+    }
+
+    /// A materialization whose `M_id` equals a committed control identity of
+    /// T gives 4, and the caller retries under a new reservation operation
+    /// (R9.7, R10.7 5f, I251).
+    fn check_materialization_id(&self, input: &CommunityReserveInputV1) -> Result<(), Error> {
+        let used = input.minted.is_some()
+            && community_observation_materialization_id_v1(
+                input.timeline,
+                input.reservation_operation_id,
+            )
+            .is_ok_and(|id| self.quarantine_controls.contains_key(&(input.timeline, id)));
+        if used {
+            Err(Error::Conflict)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The Reserve's identity checks (`check_identity`), then the
+    /// materialization's control identity.
+    fn check_reserve_preconditions(
+        &self,
+        input: &CommunityReserveInputV1,
+        key: (TimelineId, [u8; 16]),
+    ) -> Result<(CommunityReservationRequestV1, WriterHorizonsV1), Error> {
+        let checked = self.check_identity(input, key)?;
+        self.check_materialization_id(input)?;
+        Ok(checked)
     }
 
     /// The cheap re-validation of an apply: the identity checks, then the
