@@ -134,14 +134,9 @@ pub fn derive_recomputation_frontier_v1(
     provenance_digest: [u8; 32],
 ) -> Result<RecomputationFrontierV1, RecomputationFrontierErrorV1> {
     check_inputs(plan, graph, provenance_digest)?;
-    RecomputationFrontierV1 {
-        frontier_id,
-        dependency_graph_digest: dependency_graph_digest_v1(graph),
-        provenance_digest,
-        ..unsealed_frontier(graph)
-    }
-    .seal()
-    .map_err(RecomputationFrontierErrorV1::Frontier)
+    unsealed_frontier(graph, frontier_id, provenance_digest)
+        .seal()
+        .map_err(RecomputationFrontierErrorV1::Frontier)
 }
 
 /// The `PresentationOnly` outputs made stale by recomputing `graph`'s
@@ -218,10 +213,11 @@ fn check_inputs(
     }
 }
 
-/// Every derived field; the caller supplies the ID, graph digest, and
-/// provenance, and [`RecomputationFrontierV1::seal`] supplies the frontier
-/// digest.
-fn unsealed_frontier(graph: &ValidatedDependencyGraphV1) -> RecomputationFrontierV1 {
+fn unsealed_frontier(
+    graph: &ValidatedDependencyGraphV1,
+    frontier_id: [u8; 16],
+    provenance_digest: [u8; 32],
+) -> RecomputationFrontierV1 {
     let affected = affected_nodes(graph);
     let fallback = !graph.is_complete();
     // The plan has at least one Intervention and the graph one node for each,
@@ -243,14 +239,11 @@ fn unsealed_frontier(graph: &ValidatedDependencyGraphV1) -> RecomputationFrontie
                 UnknownEdgePolicyV1::Reject,
             )
         };
-    // `frontier_id`, `dependency_graph_digest` and `provenance_digest` are
-    // placeholders the caller overwrites, and `RecomputationFrontierV1::seal`
-    // computes `frontier_digest`.
     RecomputationFrontierV1 {
-        frontier_id: [0; 16],
+        frontier_id,
         plan_digest: graph.plan_digest(),
         parent_cut_digest: graph.parent_cut_digest(),
-        dependency_graph_digest: [0; 32],
+        dependency_graph_digest: dependency_graph_digest_v1(graph),
         intervention_seed_nodes: seeds(graph).map(|node| node.node.clone()).collect(),
         affected_nodes: affected.iter().map(|node| node.node.clone()).collect(),
         owner_frontiers: owner_frontiers(&affected),
@@ -260,7 +253,7 @@ fn unsealed_frontier(graph: &ValidatedDependencyGraphV1) -> RecomputationFrontie
         unknown_edge_coordinates: graph.unknown_edge_coordinates().to_vec(),
         endogenous_suffix_end_tick: graph.horizon_tick(),
         classification_bundle_digest: graph.classification_bundle_digest(),
-        provenance_digest: [0; 32],
+        provenance_digest,
         frontier_digest: [0; 32],
     }
 }

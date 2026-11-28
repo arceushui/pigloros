@@ -30,19 +30,11 @@ pub const ENTITY_KIND: &str = "synthetic-source";
 /// The event type for synthetic observations.
 pub const EVENT_TYPE: &str = "obs.synthetic";
 
-// ---------------------------------------------------------------------------
-// Payload types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ObsPayload {
     value: f64,
     tick: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Plugin descriptor
-// ---------------------------------------------------------------------------
 
 /// A deterministic synthetic observation source plugin.
 pub struct SyntheticObsPlugin {
@@ -103,10 +95,6 @@ impl InstalledPluginFactoryV1 for SyntheticObsPlugin {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Driver
-// ---------------------------------------------------------------------------
 
 /// Produces one `obs.synthetic` event per step.
 ///
@@ -171,10 +159,6 @@ impl Driver for SyntheticDriver {
         Ok(StepOutput::new(vec![draft]))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -281,12 +265,24 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("test-amp").test_ok();
         let entity = EntityId::new();
-        let mut driver = SyntheticDriver::with_amplitude(entity, 2.0);
-        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        let payload: ObsPayload =
-            ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
-        // tick=0 → sin(0) * 2.0 = 0.0
-        assert!((payload.value - 0.0_f64).abs() < f64::EPSILON);
+        let mut baseline = SyntheticDriver::with_amplitude(entity, 1.0);
+        let mut doubled = SyntheticDriver::with_amplitude(entity, 2.0);
+        baseline.step(tl.id(), ObservationView::empty()).test_ok();
+        doubled.step(tl.id(), ObservationView::empty()).test_ok();
+        let baseline_output = baseline.step(tl.id(), ObservationView::empty()).test_ok();
+        let doubled_output = doubled.step(tl.id(), ObservationView::empty()).test_ok();
+        let baseline_payload: ObsPayload =
+            ciborium::from_reader(baseline_output.outputs[0].draft.payload.as_slice()).test_ok();
+        let doubled_payload: ObsPayload =
+            ciborium::from_reader(doubled_output.outputs[0].draft.payload.as_slice()).test_ok();
+        assert!(baseline_payload.value.abs() > f64::EPSILON);
+        assert!(
+            baseline_payload
+                .value
+                .mul_add(-2.0, doubled_payload.value)
+                .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]
@@ -296,16 +292,10 @@ mod tests {
         let tl = store.create_timeline("test").test_ok();
         let entity = EntityId::new();
 
-        // Compute expected values from the formula
-        let expected: Vec<f64> = (0..3_u64)
-            .map(|tick| {
-                #[allow(clippy::cast_precision_loss)]
-                let v = (tick as f64 * 0.1_f64).sin();
-                v
-            })
+        let expected: Vec<f64> = (0..3_u32)
+            .map(|tick| (f64::from(tick) * 0.1_f64).sin())
             .collect();
 
-        // Run the driver twice from tick=0 — same seed → same values
         for _ in 0..2 {
             let mut driver = SyntheticDriver::new(entity);
             for &expected_val in &expected {
@@ -338,10 +328,9 @@ mod tests {
             Some(0)
         );
 
-        for i in 0..3_u64 {
-            #[allow(clippy::cast_precision_loss)]
-            let value = (i as f64 * 0.1_f64).sin();
-            let event = make_obs_event(entity, value, i);
+        for i in 0..3_u32 {
+            let value = (f64::from(i) * 0.1_f64).sin();
+            let event = make_obs_event(entity, value, u64::from(i));
             reducer.apply(&mut state, &event);
         }
 
@@ -355,9 +344,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_skips_invalid_cbor_payload() {
-        // Covers the outer `if let Ok(payload)` else branch (line 175):
-        // when the CBOR can't be decoded, the block is skipped silently.
+    fn invalid_payload_increments_count_and_preserves_last_value() {
         use pos_core::{
             clock::{Seq, WallTime},
             crypto::Hash,
@@ -367,6 +354,7 @@ mod tests {
         let reducer = SyntheticReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
+        state.set("last_value", serde_json::json!(0.75));
 
         let bad_event = Event {
             id: EventId::new(),
@@ -384,19 +372,21 @@ mod tests {
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         reducer.apply(&mut state, &bad_event);
-        // observations is incremented even though payload decode failed
         assert_eq!(
             state
                 .get("observations")
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
+        assert!(state
+            .get("last_value")
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|value| (value - 0.75).abs() < f64::EPSILON));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducer_ignores_non_matching_event_type() {
-        // Covers the early `return;` in reducer.apply when event_type != EVENT_TYPE
         use pos_core::{
             clock::{Seq, WallTime},
             crypto::Hash,

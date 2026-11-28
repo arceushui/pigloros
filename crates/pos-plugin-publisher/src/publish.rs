@@ -143,14 +143,20 @@ pub fn sign_plugin_release_v1<R: KeyRegistrySigningPortV1>(
     draft: &PluginReleaseDraftV1<'_>,
 ) -> Result<PluginReleaseSignatureV1, PluginReleasePublishErrorV1> {
     let unsigned = draft.unsigned()?;
-    // This placeholder assembly copies every artifact once more; that cost is
-    // deliberate, because it is what guarantees an unpublishable draft is never
-    // signed. The composite path therefore assembles twice (pre-sign, final).
-    assemble(draft, &unsigned.with_signature(epoch, [0; 64])?)?;
+    validate_pre_sign_closure(draft, &unsigned, epoch)?;
     let identity = signing_identity(&unsigned, epoch);
     let payload = digest_payload(&unsigned.release_digest());
     let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
     Ok(PluginReleaseSignatureV1 { epoch, signature })
+}
+
+fn validate_pre_sign_closure(
+    draft: &PluginReleaseDraftV1<'_>,
+    unsigned: &UnsignedPluginReleaseV1,
+    epoch: u64,
+) -> Result<(), PluginReleasePublishErrorV1> {
+    let placeholder_signature = unsigned.with_signature(epoch, [0; 64])?;
+    assemble(draft, &placeholder_signature).map(|_| ())
 }
 
 /// Publish one release whose signature was already made.

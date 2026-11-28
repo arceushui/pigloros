@@ -243,9 +243,13 @@ const fn kind_code(kind: ForkArtifactKindV1) -> u64 {
     }
 }
 
-/// The authoritative and public record of one artifact kind: its artifacts'
-/// exact bytes, and the `[ordinal, size, digest]` of each.
-fn kind_records(export: &ForkArtifactExportV1, kind: ForkArtifactKindV1) -> (Vec<u8>, Vec<u8>) {
+struct KindRecordsV1 {
+    authoritative: Vec<u8>,
+    public: Vec<u8>,
+}
+
+/// Encode exact artifact bytes and the public `[ordinal, size, digest]` rows.
+fn kind_records(export: &ForkArtifactExportV1, kind: ForkArtifactKindV1) -> KindRecordsV1 {
     let artifacts = export
         .artifacts
         .iter()
@@ -263,10 +267,10 @@ fn kind_records(export: &ForkArtifactExportV1, kind: ForkArtifactKindV1) -> (Vec
             ])
         })
         .collect();
-    (
-        encode(&Value::Array(authoritative)),
-        encode(&Value::Array(public)),
-    )
+    KindRecordsV1 {
+        authoritative: encode(&Value::Array(authoritative)),
+        public: encode(&Value::Array(public)),
+    }
 }
 
 /// Capture the nine `NI-FORK-008` surfaces of one export.
@@ -329,30 +333,30 @@ pub fn g_fork_capture_v1(
                 .collect(),
         ));
         let records = |kind| kind_records(export, kind);
-        let (plan_record, plan_public) = records(ForkArtifactKindV1::CounterfactualPlan);
-        let (frontier, frontier_public) = records(ForkArtifactKindV1::RecomputationFrontier);
-        let (invalidation, invalidation_public) = records(ForkArtifactKindV1::SuffixInvalidation);
-        let (checkpoints, checkpoints_public) = records(ForkArtifactKindV1::Checkpoint);
-        let (result, result_public) = records(ForkArtifactKindV1::Result);
+        let plan = records(ForkArtifactKindV1::CounterfactualPlan);
+        let frontier = records(ForkArtifactKindV1::RecomputationFrontier);
+        let invalidation = records(ForkArtifactKindV1::SuffixInvalidation);
+        let checkpoints = records(ForkArtifactKindV1::Checkpoint);
+        let result = records(ForkArtifactKindV1::Result);
         let authoritative = vec![
             parent_cut,
-            plan_record,
-            frontier,
-            invalidation,
+            plan.authoritative,
+            frontier.authoritative,
+            invalidation.authoritative,
             empty.clone(),
-            checkpoints,
-            result,
+            checkpoints.authoritative,
+            result.authoritative,
             empty.clone(),
             stream,
         ];
         let public = vec![
             world_cut,
-            plan_public,
-            frontier_public,
-            invalidation_public,
+            plan.public,
+            frontier.public,
+            invalidation.public,
             empty.clone(),
-            checkpoints_public,
-            result_public,
+            checkpoints.public,
+            result.public,
             empty,
             listed,
         ];

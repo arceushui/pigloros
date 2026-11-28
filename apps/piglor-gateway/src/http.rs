@@ -20,7 +20,7 @@ use crate::{
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{DefaultBodyLimit, FromRequestParts, MatchedPath, RawQuery, Request, State},
+    extract::{DefaultBodyLimit, FromRequestParts, RawQuery, Request, State},
     http::{
         header::{self, CONTENT_SECURITY_POLICY},
         request::Parts,
@@ -120,7 +120,7 @@ pub fn router(state: AppState) -> Router {
 fn router_with_owntracks(state: AppState) -> Router {
     let gateway = state.gateway.clone();
     finish(
-        loopback_routes().route(
+        loopback_routes(&state).route(
             "/v1/bridges/owntracks",
             post(move |headers, body| {
                 crate::owntracks_http::post_owntracks(gateway, headers, body)
@@ -142,21 +142,22 @@ pub fn router_for_addr(addr: SocketAddr, state: AppState) -> Router {
     }
 }
 
-/// Build the public spectator router for a non-loopback Gateway deployment.
-///
-/// Until #68 adds an authentication boundary, this exposes only the public
-/// Prediction Ledger surfaces from ADR-017 and ADR-020. Timeline and Ledger
-/// mutation routes remain available only on a loopback-bound Gateway.
+/// Build the spectator surface: GET `/`, `/health`, `/ledger`, and `/v1/ledger`.
+/// Timeline and Ledger mutation routes are available only on a loopback Gateway.
 pub fn spectator_router(state: AppState) -> Router {
     finish(spectator_routes(), state, MAX_HTTP_BODY_BYTES)
 }
 
 fn build_router(state: AppState, max_body_bytes: usize) -> Router {
-    finish(loopback_routes(), state, max_body_bytes)
+    finish(loopback_routes(&state), state, max_body_bytes)
 }
 
-fn loopback_routes() -> Router<AppState> {
-    spectator_routes()
+fn loopback_routes(state: &AppState) -> Router<AppState> {
+    spectator_routes().merge(protected_loopback_routes(state))
+}
+
+fn protected_loopback_routes(state: &AppState) -> Router<AppState> {
+    Router::new()
         .route("/v1/ledger/predictions", post(post_ledger_prediction))
         .route("/v1/timelines", post(create_timeline))
         .route("/v1/timelines/{timeline_id}/events", get(list_events))
@@ -190,6 +191,10 @@ fn loopback_routes() -> Router<AppState> {
             "/v1/decision-previews/{preview_id}",
             get(get_decision_preview),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            reject_unprovisioned,
+        ))
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -199,20 +204,12 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
         .fallback(not_routed)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(max_body_bytes))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            reject_unprovisioned,
-        ))
         .layer(middleware::from_fn(problem_instance))
         .layer(middleware::map_response(no_store))
         .with_state(state)
 }
 
-/// The supported client-cache rule (ADR-136 follow-up F2, #1407): the outermost layer of every
-/// router marks every answer, problems, redirects and the non-v1 routes included,
-/// `Cache-Control: no-store`, so no answer a client or intermediary receives may be stored. A
-/// managed representation can expose data a later erasure redacts, and RFC 9111 §5.2.2.5 leaves
-/// privacy to the client: the contract's client rule carries that guarantee.
+/// Set `Cache-Control: no-store` on every answer, including failures and redirects.
 fn no_store(mut response: Response) -> std::future::Ready<Response> {
     response
         .headers_mut()
@@ -220,7 +217,8 @@ fn no_store(mut response: Response) -> std::future::Ready<Response> {
     std::future::ready(response)
 }
 
-/// The protected loopback routes, by method and route template.
+/// Route cases used by the protected-route behavior test.
+#[cfg(test)]
 const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
@@ -248,19 +246,13 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/decision-previews/{preview_id}"),
 ];
 
-/// Answer every protected route of an unprovisioned host `401` before its
-/// body is read (D1 on #302): no malformed or oversized body reaches a
-/// handler the host could never authorize.
+/// Refuse requests to the protected loopback router before reading their bodies.
 async fn reject_unprovisioned(
     State(state): State<AppState>,
     request: Request,
     next: middleware::Next,
 ) -> Response {
-    let protected = request
-        .extensions()
-        .get::<MatchedPath>()
-        .is_some_and(|path| PROTECTED_ROUTES.contains(&(request.method().as_str(), path.as_str())));
-    if protected && state.gateway.is_unprovisioned() {
+    if state.gateway.is_unprovisioned() {
         return GatewayError::AuthorizationUnavailable.into_response();
     }
     next.run(request).await
@@ -672,17 +664,20 @@ async fn post_signal(
     authority: OperationAuthority<AppendSignalOperation>,
     ContractJson(body): ContractJson<SignalRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let entity_id = body.entity_id.clone();
+    let timeline_id = crate::parse_timeline_id(&id)?;
+    let entity_id = crate::parse_entity_id(&body.entity_id)?;
     let signal = body.into_signal();
-    // A malformed Timeline ID binds no target and is refused by the append.
-    // The signal acts as its own entity, which must be the header actor.
-    let target = crate::parse_timeline_id(&id).ok();
-    let event = authority
-        .acting_as(crate::parse_entity_id(&entity_id).ok())
-        .run(&state.gateway, target, move |gateway| async move {
-            gateway.append_signal(&id, &entity_id, &signal).await
-        })
-        .await?;
+    let event =
+        authority
+            .acting_as(Some(entity_id))
+            .run(
+                &state.gateway,
+                Some(timeline_id),
+                move |gateway| async move {
+                    gateway.append_signal(timeline_id, entity_id, &signal).await
+                },
+            )
+            .await?;
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
@@ -1395,41 +1390,6 @@ mod tests {
         }
         gateway.shutdown().await.test_ok();
         drop(gateway);
-    }
-
-    #[test]
-    fn the_protected_route_table_is_every_loopback_route() {
-        let source = include_str!("http.rs");
-        let body = source
-            .split("fn loopback_routes() -> Router<AppState> {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .unwrap_or_default();
-        // Whitespace is removed first, so a `.route(` call split across
-        // lines is still found. Only routes registered in
-        // `loopback_routes` itself are seen; a route added through another
-        // helper would escape this check.
-        let compact = body
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>();
-        let mut served = compact
-            .split(".route(\"")
-            .skip(1)
-            .filter_map(|rest| {
-                let route = rest.split('"').next()?;
-                let method = if rest.contains(",get(") {
-                    "GET"
-                } else {
-                    "POST"
-                };
-                Some((method, route))
-            })
-            .collect::<Vec<_>>();
-        served.sort_unstable();
-        let mut table = PROTECTED_ROUTES.to_vec();
-        table.sort_unstable();
-        assert_eq!(served, table);
     }
 
     fn world_action_payload(actor: &str, body: &str, marker: u8) -> serde_json::Value {

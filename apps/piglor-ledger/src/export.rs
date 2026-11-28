@@ -358,23 +358,6 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn collect_toml_hashes_skips_unreadable_subdirs() -> Result<(), Box<dyn std::error::Error>> {
-        // With the simplified collect_toml_hashes (any read_dir error → skip),
-        // an empty ledger dir produces an empty file list.
-        let tmp = TempDir::new().test_ok()?;
-        let dir = tmp.path().join("ledger");
-        std::fs::create_dir_all(&dir).test_ok()?;
-        let manifest = build(&Source::Toml(dir), "2026-07-25", None).test_ok()?;
-        // Check via JSON to avoid unreachable pattern-match branches.
-        let json = serde_json::to_string_pretty(&manifest).test_ok()?;
-        assert!(json.contains("\"tier\": \"toml\""), "{json}");
-        assert!(json.contains("\"files\": []"), "{json}");
-
-        Ok(())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
     fn collect_toml_hashes_skips_unreadable_file() -> Result<(), Box<dyn std::error::Error>> {
         // Exercises the `continue` on L113 in collect_toml_hashes when the
         // file is listed by read_dir but unreadable (permissions removed).
@@ -398,21 +381,18 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn hex_decode_odd_length_is_error() {
-        // Exercises the odd-length branch in hex_decode_local (line 358).
         assert!(hex_decode("a").is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_rejects_invalid_hex_char() {
-        // Exercises the `_` (error) arm of nib in this test module.
         assert!(nib('g').is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn nib_covers_uppercase() -> Result<(), Box<dyn std::error::Error>> {
-        // Exercises the 'A'..='F' arm of nib.
         assert_eq!(nib('A').test_ok()?, 10);
         assert_eq!(nib('F').test_ok()?, 15);
 
@@ -450,8 +430,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_source_store_dispatches_to_build_store() -> Result<(), Box<dyn std::error::Error>> {
-        // Exercises the `Source::Store(db) => build_store(...)` arm (line 79)
-        // of the public `build()` function.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
@@ -498,8 +476,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_invalid_sqlite_path_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L133: `format!("open sqlite: {e}")` in build_store when the
-        // sqlite path is invalid (parent directory doesn't exist).
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
         let err = build_store(&bad_db, "2026-07-25", None).test_err()?;
@@ -512,13 +488,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_corrupted_db_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L136: `format!("list timelines: {e}")` in build_store when
-        // the DB file is not a valid SQLite database.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
         std::fs::write(&bad_db, b"this is not a sqlite file at all\n").test_ok()?;
         let err = build_store(&bad_db, "2026-07-25", None);
-        // Either open fails (L133) or list_timelines fails (L136).
         assert!(err.is_err(), "expected error for corrupted DB");
 
         Ok(())
@@ -541,7 +514,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_toml_with_invalid_today_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L86: `?` on store.load(today) in build_toml when today is invalid.
         let tmp = TempDir::new().test_ok()?;
         let dir = tmp.path().join("ledger");
         std::fs::create_dir_all(&dir).test_ok()?;
@@ -585,7 +557,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_with_invalid_today_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L152: `?` on ledger_store.load(today) in build_store.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
@@ -628,8 +599,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L136: `?` on list_timelines in build_store when timeline
-        // id is corrupt (same SQLite injection technique as pos-cli).
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("corrupt.db");
         {
@@ -654,7 +623,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn build_store_read_fails_on_corrupt_events() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L141: `?` on store.read when an Event identifier is corrupt.
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[

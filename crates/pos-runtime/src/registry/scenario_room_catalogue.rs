@@ -39,24 +39,16 @@ impl PluginRegistry {
 }
 
 impl<F: InstalledPluginFactoryV1> HostCatalogueEntryV1<F> {
-    /// The Scenario Room catalogue of this reviewed host catalogue entry
-    /// (#303 owner decision of 2026-11-15): the one Plugin its factory
-    /// builds from `frozen_configuration`, by name and version, with its
-    /// `capability_set_hash`. It builds the reviewed product only to read
-    /// its descriptor, after the same Plugin and approver link checks as
-    /// registration. It never registers, admits or runs the product, so it
-    /// needs no installed EPF1.
+    /// Build a Scenario Room catalogue from the reviewed factory's Plugin
+    /// product. This checks the Plugin and approver links before reading its
+    /// name, version, and capability-set hash. It does not register, admit, or
+    /// run the product.
     ///
-    /// Like registration, it builds the factory's product before the link
-    /// checks, so a foreign factory's `build` runs and is then refused.
+    /// The factory builds its product before the link checks.
     ///
     /// # Errors
-    /// Returns the registration's link error when the built Plugin or
-    /// approver is not the entry's reviewed product. Only the Gateway entry
-    /// has a reviewed spec today, and its Plugin and approver types live in
-    /// the Gateway crate, so an accepted Plugin with a refused approver
-    /// (`CallbackMismatch`) cannot be built in this crate's tests; the
-    /// Gateway exercises the accepted pair.
+    /// Returns a link error when the built Plugin or approver does not match
+    /// the reviewed entry.
     pub fn scenario_room_catalogue_v1(
         &self,
         frozen_configuration: &F::Configuration,

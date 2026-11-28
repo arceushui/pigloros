@@ -1401,11 +1401,6 @@ fn gateway_action_registry_with_authority(
     Arc::new(gateway_action_registry_builder_for_test(bodies, authority))
 }
 
-// The production registry selects the reviewed Gateway entry with installed
-// evidence for the profile the bound execution mode selects (ADR-134 §7,
-// field 9: Local `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135).
-// No installed Gateway EPF1 exists, so it fails closed; #461 owns positive
-// activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1416,9 +1411,6 @@ fn gateway_action_registry_builder(
     })
 }
 
-// Behavior fixtures have no installed profile, session pin, or production
-// registration authority. They exist only in unit tests, so they never enter
-// the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -3807,20 +3799,18 @@ impl Gateway {
         }
     }
 
-    /// Append one `society.signal` (fan-out convenience for #71).
+    /// Append one `society.signal` event.
     ///
     /// # Errors
-    /// Returns store / id errors.
+    /// Returns a store error.
     pub async fn append_signal(
         &self,
-        timeline_id: &str,
-        entity_id: &str,
+        timeline_id: TimelineId,
+        entity_id: EntityId,
         signal: &SocietySignal,
     ) -> Result<Event, GatewayError> {
-        let timeline =
-            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
-        let entity = parse_entity_id(entity_id)?;
-        let draft = draft_signal(entity, signal);
+        let timeline = self.client_timeline(timeline_id)?;
+        let draft = draft_signal(entity_id, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
         self.append_draft(timeline, draft).await
     }
@@ -4495,9 +4485,6 @@ mod tests {
         drop(gateway);
     }
 
-    /// ADR-134 §7: registration follows the bound mode's selection (Local
-    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135) and fails
-    /// closed in both modes until #461 installs an EPF1.
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
         for mode in [
@@ -7921,7 +7908,7 @@ mod tests {
             object: None,
         };
         let event = gw
-            .append_signal(&tl.id().to_string(), &EntityId::new().to_string(), &signal)
+            .append_signal(tl.id(), EntityId::new(), &signal)
             .await
             .test_ok();
         let notice = rx.try_recv().test_ok();
@@ -7953,34 +7940,6 @@ mod tests {
                 "not-a-ulid",
                 EVENT_TYPE_ACTION,
                 &serde_json::json!({}),
-            )
-            .await
-            .test_err();
-        assert!(matches!(err, GatewayError::InvalidId(_)));
-        let err = gw
-            .append_signal(
-                &tl.id().to_string(),
-                "not-a-ulid",
-                &SocietySignal {
-                    dimension: SocietyDimension::Trust,
-                    value: 0.1,
-                    subject: None,
-                    object: None,
-                },
-            )
-            .await
-            .test_err();
-        assert!(matches!(err, GatewayError::InvalidId(_)));
-        let err = gw
-            .append_signal(
-                "not-a-ulid",
-                &EntityId::new().to_string(),
-                &SocietySignal {
-                    dimension: SocietyDimension::Trust,
-                    value: 0.1,
-                    subject: None,
-                    object: None,
-                },
             )
             .await
             .test_err();

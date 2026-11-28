@@ -324,14 +324,17 @@ fn edge_record(edge: &InputDependencyV1) -> Option<DependencyEdgeRecordV1> {
         })
 }
 
-/// The nodes and edges one Tick declares.
-type DeclarationV1 = (Vec<DependencyNodeRecordV1>, Vec<DependencyEdgeRecordV1>);
+#[derive(Clone, Default)]
+struct TickDeclarationsV1 {
+    nodes: Vec<DependencyNodeRecordV1>,
+    edges: Vec<DependencyEdgeRecordV1>,
+}
 
 /// The stager of the records form: for every Tick it stages one draft per
 /// lane and declares the nodes and edges the provisional graph assigns to
 /// the Tick.
 pub(super) struct RecordsFormStagerV1 {
-    declarations: BTreeMap<u64, DeclarationV1>,
+    declarations: BTreeMap<u64, TickDeclarationsV1>,
     lanes: Vec<LaneV1>,
 }
 
@@ -346,13 +349,13 @@ impl RecordsFormStagerV1 {
             .iter()
             .map(|node| (node.node.artifact_digest, node.node.tick))
             .collect();
-        let mut declarations: BTreeMap<u64, DeclarationV1> = BTreeMap::new();
+        let mut declarations: BTreeMap<u64, TickDeclarationsV1> = BTreeMap::new();
         let nodes = graph.nodes.iter().try_for_each(|node| {
             node_record(node).map(|record| {
                 declarations
                     .entry(node.node.tick)
                     .or_default()
-                    .0
+                    .nodes
                     .push(record);
             })
         });
@@ -360,17 +363,17 @@ impl RecordsFormStagerV1 {
             graph.edges.iter().try_for_each(|edge| {
                 let tick = ticks.get(&edge.consumer.artifact_digest).copied();
                 tick.zip(edge_record(edge)).map(|(tick, record)| {
-                    declarations.entry(tick).or_default().1.push(record);
+                    declarations.entry(tick).or_default().edges.push(record);
                 })
             })
         });
         edges.map(|()| {
-            for (nodes, edges) in declarations.values_mut() {
-                nodes.sort_by(|left, right| {
+            for declaration in declarations.values_mut() {
+                declaration.nodes.sort_by(|left, right| {
                     let left = left.coordinate().position_key();
                     left.cmp(&right.coordinate().position_key())
                 });
-                edges.sort_by(DependencyEdgeRecordV1::order_cmp);
+                declaration.edges.sort_by(DependencyEdgeRecordV1::order_cmp);
             }
             Self {
                 declarations,
@@ -386,11 +389,11 @@ impl CounterfactualDeclaringTickStagerV1 for RecordsFormStagerV1 {
         inputs: &CounterfactualTickInputsV1<'_>,
     ) -> Result<CounterfactualStagedTickV1, CounterfactualTickFailureV1> {
         let tick = inputs.tick();
-        let (nodes, edges) = self.declarations.get(&tick).cloned().unwrap_or_default();
+        let declaration = self.declarations.get(&tick).cloned().unwrap_or_default();
         Ok(CounterfactualStagedTickV1 {
             drafts: staged_drafts(tick, &self.lanes),
-            nodes,
-            edges,
+            nodes: declaration.nodes,
+            edges: declaration.edges,
         })
     }
 }
