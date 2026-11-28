@@ -10,11 +10,20 @@
 
 use super::*;
 
+use pos_core::community_lifecycle::COMMUNITY_ERASURE_TARGET_LINE_V1;
 use pos_core::{
     ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
     ArtifactRegistrationCatalogRowV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationV1,
     ArtifactTransitionRuleV1,
 };
+
+/// The artifact class of every catalogue row of this file.
+const ROW_CLASS: ErasureArtifactClassV1 = ErasureArtifactClassV1::TimelineReplay;
+
+/// The artifact digest of the catalogue row `budget_row` builds for `seed`.
+fn row_digest(seed: u64) -> Hash {
+    ArtifactRegistrationV1::artifact_digest(ROW_CLASS, &seed.to_le_bytes())
+}
 
 /// A `TimelineReplay` catalogue row of `owner` and `data_class` with
 /// `role_7` community key dependencies, unique to `seed`.
@@ -25,9 +34,9 @@ fn budget_row(
     seed: u64,
 ) -> TestResult<ArtifactRegistrationCatalogRowV1> {
     let owner = OwnerIdV1::from_static(owner);
-    let class = ErasureArtifactClassV1::TimelineReplay;
+    let class = ROW_CLASS;
     let bytes = seed.to_le_bytes().to_vec();
-    let digest = ArtifactRegistrationV1::artifact_digest(class, &bytes);
+    let digest = row_digest(seed);
     let registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
         artifact_class: class,
         artifact_digest: digest,
@@ -169,44 +178,52 @@ fn the_counted_targets_are_the_closure_the_authority_admits() -> TestResult {
     Ok(())
 }
 
-/// The artifact digest of the catalogue row `budget_row` builds for `seed`.
-fn row_digest(seed: u64) -> ErasureReferenceV1 {
-    let digest = ArtifactRegistrationV1::artifact_digest(
-        ErasureArtifactClassV1::TimelineReplay,
-        &seed.to_le_bytes(),
-    );
-    ErasureReferenceV1::from_digest(*digest.as_bytes())
-}
+/// The no-component reference of an Artifact target, as `freeze.rs` builds it.
+const NO_COMPONENT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0; 32]);
 
 /// R13, I138, **bound-rows form**: with the community line reached
-/// (`targets(A)` at 4,096 - `R_other`, which is where the community planner
-/// stops with every reserve held), an ADR-136 request of the actor still
-/// freezes, and every private row of its affected scope is an obligation of
-/// the receipt.
+/// (`targets(A)` at `COMMUNITY_ERASURE_TARGET_LINE_V1`, 4,096 less the 128
+/// targets `R_other` that R13.1(6) keeps for other writers, which is where the
+/// community planner stops with every reserve held), an ADR-136 request of
+/// the actor still freezes and finalizes, and every private row of its
+/// affected scope is an Artifact obligation of the receipt.
 ///
-/// The rows are bound through `bind_erasure_rows_for_test`, not by passes: no
-/// pass can commit before A5, so the full form of I138 (a request after
-/// passes up to the first refusal, 14 or 19) remains an obligation of the
-/// A5 Commit slice.
+/// Only the requesting actor's closure is exercised at the line: the other
+/// actor's `targets(A)` is far below it here, and the parity of every
+/// actor's counted closure with `closure_fits` is I130 and I132 above. The
+/// rows are bound through `bind_erasure_rows_for_test`, not by passes: no
+/// pass can commit before A5, so the full form of I138 (a request of every
+/// actor in scope after passes up to the first refusal, 14 or 19) remains an
+/// obligation of the A5 Commit slice.
+///
+/// This is the slowest test of the file: the drive signs one
+/// acknowledgement step per obligation, about 4,000 of them.
 #[test]
 fn a_request_freezes_at_the_community_line_and_lists_every_private_row() -> TestResult {
-    let mut host = memory_host(budget_store(4_096 - 128)?, &driver_case()?)?;
+    let mut host = memory_host(
+        budget_store(COMMUNITY_ERASURE_TARGET_LINE_V1)?,
+        &driver_case()?,
+    )?;
     submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
     let receipt = finalized(driver().drive(&mut host, request_of(1)?)?)?;
+    // The Artifact targets only: a role-7 key target carries its row's
+    // digest too, with the key's digest in `key_digest`.
     let listed = receipt
         .acknowledgements()
         .iter()
+        .filter(|acknowledgement| acknowledgement.target.key_digest == NO_COMPONENT)
         .map(|acknowledgement| acknowledgement.target.artifact_digest)
         .collect::<Vec<_>>();
+    let target = |seed: u64| ErasureReferenceV1::from_digest(*row_digest(seed).as_bytes());
     // Every private row bound to the actor's root, its Fork or the nested
     // Fork: the community rows 1 to 3, the shared row 10, the crossing row
     // 11 and the nested Fork's row 12, and the other owner's private rows 4
     // and 5. Not the consented row 6, nor row 13 of the other actor's root.
     for seed in [1, 2, 3, 4, 5, 10, 11, 12] {
-        assert!(listed.contains(&row_digest(seed)), "row {seed}");
+        assert!(listed.contains(&target(seed)), "row {seed}");
     }
     for seed in [6, 13] {
-        assert!(!listed.contains(&row_digest(seed)), "row {seed}");
+        assert!(!listed.contains(&target(seed)), "row {seed}");
     }
     Ok(())
 }
