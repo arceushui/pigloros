@@ -9,6 +9,15 @@
 //! predicts every refusal and the pending ledger. The domain's own constants
 //! are not used for the bounds.
 //!
+//! Interleavings covered: Reserve, Abort and Commit across the two Timelines.
+//! Not covered here: `fork_current` (no implementation exists yet), and
+//! `SetReason` and reset, whose `F_q` spend and re-arm are the failure-path
+//! tests (the I136 PR on the reset's 14, #1589 and its follow-up). At the
+//! writer level an Abort or Commit replaces the pending entry by the rows it
+//! registers or binds, and those rows are the pipeline's: the committed rows
+//! do not change, so the edge sizes exercise the entry-size compare (3), not
+//! the ledger.
+//!
 //! Not here: the 14 at step 5g after the first Reserve commits (the planner
 //! owns it, `pass_planner/tests/erasure.rs`), two owned root Timelines (the
 //! scope walk is the store's, `every_actor_of_the_scope_must_fit`), and a row
@@ -31,8 +40,8 @@ const RESERVE_ROWS: u64 = 4 * MEMBERS;
 /// rows (no targets).
 const COMMUNITY_ROWS: u64 = 1_000;
 const CONSENTED_ROWS: u64 = 2_800;
-/// `F_p` of the fixture's two-member pass: `2 * (2 + 1)` targets less the
-/// two members' rows, as the entry holds it: 4 targets and 2 rows.
+/// `F_p` of the fixture's pass of one due member: `2 * (n_due + 1)` = 4
+/// targets, which the entry holds as 4 targets and 2 rows.
 const PASS_RESERVE_TARGETS: u64 = 4;
 const PASS_RESERVE_ROWS: u64 = 2;
 
@@ -218,10 +227,12 @@ fn seeded() -> Result<(MemoryCommunityDomainV1, Model), Box<dyn std::error::Erro
     domain
         .store
         .bind_erasure_rows_for_test(id(1), community_rows(10_000, COMMUNITY_ROWS)?);
-    let committed = [
-        committed_of(&domain, id(1), 10)?,
-        committed_of(&domain, id(2), 11)?,
-    ];
+    // R13.1(1): one store target, one `timeline-payload` per affected
+    // Timeline (T's owner holds T and its child, the child's owner its own)
+    // and two targets per community row: 1 + 2 + 2,000 and 1 + 1.
+    let committed = [2_003, 2];
+    assert_eq!(committed[0], committed_of(&domain, id(1), 10)?);
+    assert_eq!(committed[1], committed_of(&domain, id(2), 11)?);
     Ok((
         domain,
         Model {
@@ -287,41 +298,57 @@ const fn edge(draw: u64, rows: u64) -> u64 {
     }
 }
 
+/// Take the pending reservation a draw picks out of the model.
+fn take(model: &mut Model, draw: u64) -> Result<Option<Held>, Box<dyn std::error::Error>> {
+    let at = usize::try_from(draw >> 32)?.checked_rem(model.pending.len());
+    Ok(at.map(|at| model.pending.remove(at)))
+}
+
+/// Abort the reservation `held`, registering `rows` rows.
+fn finish_abort(domain: &mut MemoryCommunityDomainV1, held: Held, rows: u64) -> TestResult {
+    let staged = domain.stage_abort(timeline_of(held.timeline), held.operation, rows)?;
+    domain.apply_abort(&SEAL, &staged)?;
+    Ok(())
+}
+
+/// Commit the reservation `held`, binding `rows` rows; the Timeline's head
+/// stays, so a later 6 is the budget's.
+fn finish_commit(domain: &mut MemoryCommunityDomainV1, held: Held, rows: u64) -> TestResult {
+    let timeline = timeline_of(held.timeline);
+    let before = domain.pass_states.get(&timeline).map(|state| state.head);
+    let staged = domain.stage_commit(commit_of(domain, timeline, held.operation, rows)?)?;
+    domain.apply_commit(&SEAL, staged)?;
+    assert_eq!(
+        domain.pass_states.get(&timeline).map(|state| state.head),
+        before
+    );
+    Ok(())
+}
+
 /// Resolve the pending reservation a draw picks by an Abort, or by a Commit
 /// when `commit`, registering or binding an edge of its entry's rows. One
-/// more row than the entry holds is refused (3), and a Commit leaves the
-/// head and counters alone, so a later 6 is the budget's.
+/// more row than the entry holds is refused (3) first.
 fn resolve(
     domain: &mut MemoryCommunityDomainV1,
     model: &mut Model,
     draw: u64,
     commit: bool,
 ) -> TestResult {
-    let Some(at) = usize::try_from(draw >> 32)?.checked_rem(model.pending.len()) else {
+    let Some(held) = take(model, draw)? else {
         return Ok(());
     };
-    let held = model.pending.remove(at);
-    let timeline = timeline_of(held.timeline);
-    let rows = edge(draw, held.rows);
     assert_eq!(
         domain
-            .stage_abort(timeline, held.operation, held.rows + 1)
+            .stage_abort(timeline_of(held.timeline), held.operation, held.rows + 1)
             .err(),
         Some(Error::InvalidBinding)
     );
-    let before = domain.pass_states.get(&timeline).map(|state| state.head);
+    let rows = edge(draw, held.rows);
     if commit {
-        let staged = domain.stage_commit(commit_of(domain, timeline, held.operation, rows)?)?;
-        domain.apply_commit(&SEAL, staged)?;
-        assert_eq!(
-            domain.pass_states.get(&timeline).map(|state| state.head),
-            before
-        );
+        finish_commit(domain, held, rows)
     } else {
-        let staged = domain.stage_abort(timeline, held.operation, rows)?;
-        domain.apply_abort(&SEAL, &staged)?;
+        finish_abort(domain, held, rows)
     }
-    Ok(())
 }
 
 /// A Commit binding `rows` rows with no additions and the head the Timeline
@@ -351,11 +378,26 @@ fn commit_of(
     })
 }
 
-/// The domain's ledger is the model's, and the model is within the spec
-/// bounds.
-fn assert_model(domain: &MemoryCommunityDomainV1, model: &Model) {
+/// The domain's ledger is the model's, the model is within the spec bounds,
+/// and so is what the domain itself reports: every owner's committed targets
+/// with its quarantine reserve and pending reservations within 3,968, and
+/// every Timeline's rows with its pending and quarantine rows within 4,096.
+fn assert_model(domain: &MemoryCommunityDomainV1, model: &Model) -> TestResult {
     assert_eq!(domain_ledger(domain), model.ledger());
     assert!(model.within_bounds());
+    for timeline in [id(1), id(2)] {
+        let budget = domain.erasure_budget(timeline)?;
+        for owner in &budget.actors {
+            let pending = domain.pending_erasure_demand(owner.actor);
+            assert!(owner.targets + owner.quarantine_reserve + pending.targets <= LINE);
+            for (affected, committed) in &budget.rows {
+                let held = pending.rows.get(affected).copied().unwrap_or(0);
+                let reserve = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
+                assert!(committed + held + reserve <= ROW_BOUND);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// R13.7 I134, the writer's part: a parent and its Fork child each plan a
@@ -384,14 +426,13 @@ fn the_second_reserve_waits_for_the_first_to_resolve() -> TestResult {
         modeled_reserve(&mut domain, &mut model, 1, [4; 16], child)?,
         Some(Error::StaleFrontier)
     );
-    assert_model(&domain, &model);
+    assert_model(&domain, &model)?;
     resolve(&mut domain, &mut model, 0, false)?;
     assert_eq!(
         modeled_reserve(&mut domain, &mut model, 1, [5; 16], child)?,
         None
     );
-    assert_model(&domain, &model);
-    Ok(())
+    assert_model(&domain, &model)
 }
 
 /// R13.7 I146: over random interleavings of Reserve, Abort and Commit across
@@ -419,19 +460,24 @@ fn random_interleavings_never_exceed_the_bounds() -> TestResult {
                 let timeline = usize::from((draw >> 8) & 1 == 1);
                 let rows = sizes[usize::try_from((draw >> 16) % 6)?];
                 let refusal = modeled_reserve(&mut domain, &mut model, timeline, [step; 16], rows)?;
-                outcomes[match refusal {
-                    None => 0,
-                    Some(Error::StaleFrontier) => 1,
-                    Some(_) => 2,
-                }] += 1;
+                tally(&mut outcomes, refusal);
             } else {
                 resolve(&mut domain, &mut model, draw, draw % 4 == 3)?;
             }
-            assert_model(&domain, &model);
+            assert_model(&domain, &model)?;
         }
     }
     assert!(outcomes.iter().all(|count| *count > 0), "{outcomes:?}");
     Ok(())
+}
+
+/// Count an accepted Reserve, a 6 and any other refusal.
+fn tally(outcomes: &mut [u32; 3], refusal: Option<Error>) {
+    outcomes[match refusal {
+        None => 0,
+        Some(Error::StaleFrontier) => 1,
+        Some(_) => 2,
+    }] += 1;
 }
 
 /// The next pseudo-random value of a xorshift sequence.

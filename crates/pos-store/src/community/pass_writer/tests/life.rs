@@ -96,6 +96,8 @@ fn an_owner_horizon_at_the_decision_bound_gives_13() -> TestResult {
     let mut domain = domain()?;
     set_recording(&mut domain, 2 * GENERATION_HORIZON)?;
     let bound = decision_bound(SAMPLE);
+    // The decision deadline is 27 s (R10.7 4f), from the sample.
+    assert_eq!(bound, SAMPLE + 27_000_000);
     for (evidence, refused) in [(bound - 1, true), (bound, true), (bound + 1, false)] {
         set_evidence(&mut domain, evidence)?;
         let refusal = domain.stage_reserve(at(SAMPLE, [3; 16])?).err();
@@ -104,6 +106,8 @@ fn an_owner_horizon_at_the_decision_bound_gives_13() -> TestResult {
             refused,
             "{evidence}"
         );
+        // A pass past the bound is accepted, not merely not 13.
+        assert_eq!(refusal.is_none(), !refused, "{evidence}");
     }
     assert_eq!(domain.retained_pass_outcomes(id(1), GENERATION), 0);
     Ok(())
