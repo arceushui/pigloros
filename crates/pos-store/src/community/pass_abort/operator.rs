@@ -14,13 +14,14 @@
 //!    for a first Abort, the live-call refusal (15);
 //! 4. for a first Abort, after the live-call refusal (15): the installed
 //!    CDP1 must be the Reserve's, that is its digest must equal the pass's
-//!    `profile_digest` (3); then the generation (5) and head (6) fences, the
-//!    guard that the head is still the initialization head (12, until A5
-//!    commits a pass) and the metadata horizon (13);
-//! 5. the records: the CAB1, the CAV1 (whose one authority row is the abort
-//!    decision's chain) and the CAU1 with the abort decision and the
-//!    metadata `write` decision as its two rows (R15.1(5)), all sealed under
-//!    the pass's one metadata key, which the Abort then closes;
+//!    `profile_digest` (3); then the generation (5) and head (6) fences and
+//!    the metadata horizon (13);
+//! 5. the records: the CAB1, the CAV1 (T's frontier and head ref, R16.5(4),
+//!    and the authority rows of the abort decision's chain and the metadata
+//!    `write` decision's, one per distinct key, R16.2(4)) and the CAU1 with
+//!    the abort decision and the metadata `write` decision as its two rows
+//!    (R15.1(5)), all sealed under the pass's one metadata key, which the
+//!    Abort then closes;
 //! 6. the writer's decision-bound check, then one commit: the pending
 //!    erasure entry is replaced (an Abort registers no row), the pass moves
 //!    to Aborted and the retry index and the inventory generation advance
@@ -34,7 +35,7 @@ use pos_core::community_lifecycle::{
     CommunityClockBoundV1, CommunityCurrentViewInputV1, CommunityCurrentViewV1,
     CommunityDecisionRowV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
     CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
-    CommunityPassFrontierV1, CommunityScopeMembersV1, CommunityTrustViewRowV1,
+    CommunityScopeMembersV1, CommunityTrustViewRowV1,
 };
 use pos_core::{
     AuthorityGranteeV1, AuthorityTrustRootSealV1, AuthorizationRequestV1, Hash, TimelineId,
@@ -210,9 +211,8 @@ impl MemoryCommunityDomainV1 {
     /// In the A5.5 order: `InvalidBinding` for a reason other than 0 or 4 or
     /// a zero identity or reservation, and for a CDP1 other than the one the
     /// pass was reserved under; `EvidenceUnavailable` for every authority
-    /// failure, a pass nobody reserved, an unbootstrapped domain, a Timeline
-    /// whose head is not its initialization head, a pass record with no due
-    /// member (there is no retained TPS1 digest to use), a missing pass
+    /// failure, a pass nobody reserved, an unbootstrapped domain, a pass
+    /// record with no due member (there is no retained TPS1 digest to use), a missing pass
     /// metadata key and a writer at or after the decision bound; `Conflict`
     /// for a Committed pass, a retry with other bound content or by another
     /// principal; `EvidenceExpired` for a retry at or after the pass's
@@ -370,8 +370,7 @@ impl MemoryCommunityDomainV1 {
 
     /// The fences of a first Abort and its CAB1: the installed CDP1 must be
     /// the Reserve's (3), then the generation (5), the head (6) and the
-    /// initialization-head guard (12), then the metadata horizon (13), as
-    /// A5.5 step 4 and A4e-1 order them.
+    /// metadata horizon (13), as A5.5 step 4 and A4e-1 order them.
     ///
     /// A first Abort at or after the pass's `H_r` still commits its CAB1
     /// (R15.2(3a), N17).
@@ -488,9 +487,10 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// The CAV1 of the Abort, read inside its guard (R15.1(5)): T's current
-    /// selection (the initial frontier with no head ref until A5 commits a
-    /// pass), the abort decision's authority row, the trust row of each
-    /// roster Plugin, the pass metadata key's row and the clock latch.
+    /// selection (its frontier and the head ref of the first roster
+    /// member's CSR1, R16.5(4)), the abort decision's authority row joined
+    /// by the metadata `write` decision's, the trust row of each roster
+    /// Plugin, the pass metadata key's row and the clock latch.
     fn abort_view(
         &self,
         context: CommunityQuarantineContextV1<'_>,
@@ -501,40 +501,45 @@ impl MemoryCommunityDomainV1 {
         inventory_generation: u64,
     ) -> Result<CommunityCurrentViewV1, Error> {
         let pass_key = record.reserved.reservation.pass_key;
-        self.authority_rows(inputs).and_then(|authority_rows| {
-            self.abort_trust_rows(context, lifecycle.trust_scope(), record)
-                .and_then(|trust_rows| {
-                    CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
-                        CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                            store_incarnation: self.store_incarnation,
-                            timeline: pass_key.timeline(),
-                            generation: pass_key.generation(),
-                            inventory_generation,
-                            frontier: CommunityPassFrontierV1::Initial,
-                            selected_head: None,
-                            scope_rows: vec![],
-                            authority_rows,
-                            trust_rows,
-                            key_rows: key_rows(&[key]),
-                            clock_latch,
-                        })
+        let write = inputs.write;
+        self.authority_rows(inputs)
+            .and_then(|chains| {
+                self.head_view(
+                    pass_key.timeline(),
+                    chains,
+                    (write.leaf_grant_id, &write.request),
+                )
+            })
+            .and_then(|head| {
+                self.abort_trust_rows(context, lifecycle.trust_scope(), record)
+                    .map(|trust_rows| (head, trust_rows))
+            })
+            .and_then(|(head, trust_rows)| {
+                CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
+                    CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                        store_incarnation: self.store_incarnation,
+                        timeline: pass_key.timeline(),
+                        generation: pass_key.generation(),
+                        inventory_generation,
+                        frontier: head.frontier,
+                        selected_head: head.selected_head,
+                        scope_rows: vec![],
+                        authority_rows: head.authority_rows,
+                        trust_rows,
+                        key_rows: key_rows(&[key]),
+                        clock_latch,
                     })
                 })
-        })
+            })
     }
 
     /// The administrative decision's authority row, at the head and epoch
     /// its decision read.
     ///
-    /// The metadata decision's chain is not a second row. A CAV1 holds
-    /// strictly ascending `(authority_timeline, head_seq, epoch)` rows, so
-    /// two chains read at one head cannot both be in it. This is the first
-    /// operation whose CAU1 decision rows are a strict superset of its CAV1
-    /// authority rows: in an initialization the two come from the same list
-    /// of decisions, and the metadata `write` decision appears in neither (it
-    /// enters through the key's `authority_request_digest`). R15.1(5) puts
-    /// the metadata `write` decision in this CAU1's rows, so the CAU1 holds
-    /// both decisions and the CAV1 only the abort decision's chain.
+    /// The metadata `write` decision's chain joins it in the CAV1 through
+    /// [`MemoryCommunityDomainV1::head_view`], which keeps one row per
+    /// distinct `(authority_timeline, head_seq, epoch)` (R16.2(4)). The CAU1
+    /// holds both decisions (R15.1(5)).
     fn authority_rows(
         &self,
         inputs: &StageInputsV1<'_>,

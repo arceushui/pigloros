@@ -25,6 +25,7 @@ use super::{
     CommunityPassAbortFailureCallV1, CommunityPassAbortFailureV1, CommunityPassAbortScopeV1,
     PreparedFailureV1, StagedFailureAbortV1,
 };
+use crate::community::current_view_head::tests::state_revisions;
 use crate::community::pass_abort::failure::{
     derive_failure, CommunityObservedFailureV1 as Observed,
     CommunityPassAbortFailureInputV1 as Input,
@@ -472,6 +473,8 @@ fn a_trap_seals_its_records_under_the_pass_key() -> TestResult {
     let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
     let read = view.as_input();
     assert!(matches!(read.frontier, CommunityPassFrontierV1::Initial));
+    let refs = state_revisions(scene.case.domain())?;
+    assert!(read.selected_head == Some(refs[0]));
     assert!(read.scope_rows.is_empty());
     assert_eq!(read.authority_rows.len(), 1);
     assert_eq!(read.key_rows.len(), 2);

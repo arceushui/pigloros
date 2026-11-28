@@ -7,12 +7,12 @@ use std::time::Duration;
 use pos_core::community_lifecycle::{
     CommunityAbortReasonV1 as Reason, CommunityAbortV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1,
-    CommunityCurrentViewV1, CommunityDurableProfileV1, CommunityKeyIntentInputV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityMetadataPolicyV1,
-    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
-    CommunityPassFrontierV1, CommunityPassKeyV1, CommunityProfileMemberV1, CommunityRecordKindsV1,
-    CommunityReservationInputV1, CommunityReservationV1, CommunityScopeMembersV1,
-    CommunitySharedCountsV1,
+    CommunityAuthorityViewRowV1, CommunityCurrentViewV1, CommunityDurableProfileV1,
+    CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1,
+    CommunityMetadataPolicyV1, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
+    CommunityMetadataScopeV1, CommunityPassFrontierV1, CommunityPassKeyV1,
+    CommunityProfileMemberV1, CommunityRecordKindsV1, CommunityReservationInputV1,
+    CommunityReservationV1, CommunityScopeMembersV1, CommunitySharedCountsV1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
@@ -20,6 +20,8 @@ use zeroize::Zeroizing;
 use super::{
     CommunityPassAbortCallV1, CommunityPassAbortReceiptV1, PreparedAbortV1, StagedPassAbortV1,
 };
+use crate::community::current_view_head::tests::state_revisions;
+use crate::community::current_view_head::CommunitySelectedViewV1;
 use crate::community::erasure_budget::CommunityPendingReservationV1;
 use crate::community::pass_record::{
     CommunityPassMemberDigestsV1, CommunityPassRecordV1, CommunityPassStatusV1,
@@ -546,6 +548,116 @@ fn an_abort_commits_its_records_in_one_transaction() -> TestResult {
     Ok(())
 }
 
+/// I235: the Abort's CAV1 states the initialization head's frontier and the
+/// CMI1 reference of the first roster member's CSR1, which the sealed
+/// initialization records name independently of the domain's selected view.
+#[test]
+fn an_abort_states_the_first_members_state_revision() -> TestResult {
+    let mut case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    assert_eq!(refs.len(), 2);
+    assert!(refs[0] != refs[1]);
+    let selected = case
+        .domain()
+        .selected_views
+        .get(&target())
+        .ok_or("no selected view")?;
+    assert!(matches!(
+        selected.frontier,
+        CommunityPassFrontierV1::Initial
+    ));
+    assert!(selected.head_ref == refs[0]);
+    case.reserve(false)?;
+    case.abort(Reason::AuthenticatedCancellation)??;
+    let records = case.records()?;
+    let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
+    assert!(matches!(
+        view.as_input().frontier,
+        CommunityPassFrontierV1::Initial
+    ));
+    assert!(view.as_input().selected_head == Some(refs[0]));
+    Ok(())
+}
+
+/// I235: an operator Abort on a committed head succeeds, and its CAV1 states
+/// that head's frontier and ref. A Commit does not exist yet, so the head is
+/// the selected view a Commit will install: the second member's CSR1 under a
+/// committed frontier.
+#[test]
+fn an_abort_on_a_committed_head_succeeds() -> TestResult {
+    let mut case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    let key = pass_key()?;
+    case.domain_mut().selected_views.insert(
+        target(),
+        CommunitySelectedViewV1 {
+            frontier: CommunityPassFrontierV1::Committed(key),
+            head_ref: refs[1],
+        },
+    );
+    case.reserve(false)?;
+    case.abort(Reason::AuthenticatedCancellation)??;
+    let records = case.records()?;
+    let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
+    assert!(matches!(
+        view.as_input().frontier,
+        CommunityPassFrontierV1::Committed(committed) if committed == key
+    ));
+    assert!(view.as_input().selected_head == Some(refs[1]));
+    Ok(())
+}
+
+/// A Timeline with no selected view has no head ref to state: the Abort
+/// stages nothing.
+#[test]
+fn an_abort_without_a_selected_view_is_refused() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    case.domain_mut().selected_views.clear();
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        case.domain().pass_status(target(), OPERATION),
+        Some(CommunityPassStatusV1::Reserved)
+    );
+    Ok(())
+}
+
+/// R16.2(4): the CAV1 carries the metadata `write` decision's chain row
+/// whenever its key is not another row's. The administrative and metadata
+/// chains share a key in this fixture, so one row stands; a chain row at
+/// another head gives two, ascending.
+#[test]
+fn the_metadata_chain_row_joins_a_distinct_chain_row() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let (alone, joined) = case.with_call(
+        OPERATION,
+        Reason::AuthenticatedCancellation,
+        DATA_LEAF,
+        |domain, context, _, metadata, _| -> Fallible<_> {
+            let write = domain.abort_metadata_write(context, metadata)?;
+            let metadata = (write.leaf_grant_id, &write.request);
+            let alone = domain.head_view(target(), vec![], metadata)?;
+            let chain = alone.authority_rows[0];
+            let later = CommunityAuthorityViewRowV1 {
+                head_seq: chain.head_seq + 1,
+                ..chain
+            };
+            let joined = domain.head_view(target(), vec![later], metadata)?;
+            Ok((alone.authority_rows, joined.authority_rows))
+        },
+    )??;
+    assert_eq!(alone.len(), 1);
+    assert_eq!(alone[0].authority_timeline, authority_timeline());
+    assert_eq!(joined.len(), 2);
+    assert!(joined[0] == alone[0]);
+    assert_eq!(joined[1].head_seq, alone[0].head_seq + 1);
+    Ok(())
+}
+
 /// Reason 4 is the same Abort with its own code.
 #[test]
 fn a_reason_four_abort_records_its_reason() -> TestResult {
@@ -732,8 +844,7 @@ fn an_authority_failure_gives_12_with_no_effect() -> TestResult {
     Ok(())
 }
 
-/// The generation (5) and head (6) fences, and the guard that the head is
-/// still the initialization head (12).
+/// The generation (5) and head (6) fences.
 #[test]
 fn a_moved_generation_or_head_is_refused() -> TestResult {
     let mut case = Case::new()?;
@@ -768,11 +879,7 @@ fn a_moved_generation_or_head_is_refused() -> TestResult {
         .get_mut(&(target(), OPERATION))
         .ok_or("no pass")?;
     record.reserved.reservation = reservation;
-    case.domain_mut().initializations.clear();
-    assert_eq!(
-        case.abort(Reason::AuthenticatedCancellation)?.err(),
-        Some(Error::EvidenceUnavailable)
-    );
+    assert!(case.abort(Reason::AuthenticatedCancellation)?.is_ok());
     Ok(())
 }
 

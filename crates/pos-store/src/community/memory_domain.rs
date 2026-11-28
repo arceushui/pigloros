@@ -20,6 +20,8 @@ use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
+use super::current_view_head::CommunitySelectedViewV1;
+#[cfg(target_os = "linux")]
 use super::erasure_budget::{CommunityErasureContextV1, CommunityPendingReservationV1};
 #[cfg(target_os = "linux")]
 use super::initialize::CommittedInitializationV1;
@@ -195,6 +197,11 @@ pub struct MemoryCommunityDomainV1 {
     /// R10.3(6) and R10.4(4)).
     #[cfg(target_os = "linux")]
     pub(super) pass_states: BTreeMap<TimelineId, CommunityPassStateV1>,
+    /// Each initialized Timeline's selected head as a CAV1 reads it: the
+    /// frontier and the head ref of the first roster member's CSR1
+    /// (ADR-129 R16.5(4)). It moves with `pass_states[T].head`.
+    #[cfg(target_os = "linux")]
+    pub(super) selected_views: BTreeMap<TimelineId, CommunitySelectedViewV1>,
     /// The ledger of unresolved reservations by `(T, reservation
     /// operation ID)`, each holding its worst-case demand (ADR-129 revision
     /// 13, R13.1(4)).
@@ -269,6 +276,8 @@ impl MemoryCommunityDomainV1 {
                 erasure_contexts: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 pass_states: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                selected_views: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 pending_reservations: BTreeMap::new(),
                 #[cfg(target_os = "linux")]

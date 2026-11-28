@@ -517,7 +517,24 @@ impl MemoryCommunityDomainV1 {
                 .retry_set_reason(original, &bound)
                 .map(SetReasonPreparedV1::Original);
         }
-        let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
+        let operation = self.operation(lifecycle, context, call, (key, write))?;
+        let bound = operation.authority.bound;
+        self.stage_set_reason(seal, lifecycle, &operation)
+            .map(|staged| SetReasonPreparedV1::Staged(Box::new(staged), reservation, bound))
+    }
+
+    /// The facts of a new `SetReason` once the retry lookup found nothing:
+    /// the failure's re-verification (A5.5 step 3) and the premises of step
+    /// 4 under `key` and the metadata `write` decision.
+    fn operation<'c>(
+        &self,
+        lifecycle: &CommunityLifecycleAuthorityV1,
+        context: CommunityQuarantineContextV1<'c>,
+        call: CommunitySetReasonCallV1<'c>,
+        (key, write): (Hash, MetadataWriteV1),
+    ) -> Result<OperationV1<'c>, Error> {
+        let trust_snapshot_digest =
+            self.verify_failure(lifecycle.trust_scope(), &call.failure.0)?;
         let authority = write.with_trust(trust_snapshot_digest);
         let member = self.member(context, &call)?;
         let current = self.quarantine_index.get(&key);
@@ -525,7 +542,7 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::Conflict);
         }
         let retention = context.profile.as_input().retention;
-        let operation = OperationV1 {
+        Ok(OperationV1 {
             context,
             call,
             key,
@@ -538,10 +555,7 @@ impl MemoryCommunityDomainV1 {
                     .as_input()
                     .metadata_not_after_micros,
             ),
-        };
-        let bound = operation.authority.bound;
-        self.stage_set_reason(seal, lifecycle, &operation)
-            .map(|staged| SetReasonPreparedV1::Staged(Box::new(staged), reservation, bound))
+        })
     }
 
     /// Step 3, after the step-2 reservation: its bound and the metadata

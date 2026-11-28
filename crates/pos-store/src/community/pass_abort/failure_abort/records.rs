@@ -11,12 +11,12 @@ use pos_core::community_lifecycle::{
     CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyIntentV1,
     CommunityLifecycleErrorV1 as Error, CommunityMaterializationInputV1,
     CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityObjectBindingV1,
-    CommunityPassFrontierV1, CommunityPassKeyV1, CommunityProducerBindingV1,
-    CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
-    CommunityQuarantineControlV1, CommunityQuarantineDeltaRowV1, CommunityQuarantineDispositionV1,
-    CommunityQuarantineKeyV1, CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
-    CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1, CommunityQuarantineReasonsV1,
-    CommunityQuarantineRevisionInputV1, CommunityQuarantineRevisionV1,
+    CommunityPassKeyV1, CommunityProducerBindingV1, CommunityQuarantineControlInputV1,
+    CommunityQuarantineControlKindV1, CommunityQuarantineControlV1, CommunityQuarantineDeltaRowV1,
+    CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1, CommunityQuarantineOutcomeInputV1,
+    CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
+    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    CommunityQuarantineRevisionV1,
 };
 use pos_core::{ArtifactChildEdgeV1, AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -230,9 +230,10 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// The CAV1 of the failure Abort, read inside its guard (R15.1(5)):
-    /// T's current selection (the initial frontier with no head ref until A5
-    /// commits a pass), no scope rows, the metadata chain's authority row,
-    /// the roster's trust rows, both pass keys and the clock latch.
+    /// T's current selection (its frontier and the head ref of the first
+    /// roster member's CSR1, R16.5(4)), no scope rows, the metadata chain's
+    /// authority row, the roster's trust rows, both pass keys and the clock
+    /// latch.
     pub(super) fn failure_view(
         &self,
         context: CommunityQuarantineContextV1<'_>,
@@ -242,28 +243,32 @@ impl MemoryCommunityDomainV1 {
         keys: &[&CommunityKeyIntentV1],
     ) -> Result<CommunityCurrentViewV1, Error> {
         let pass_key = record.reserved.reservation.pass_key;
-        CommunityStoreDomainV1::authority_row(self, write.leaf_grant_id, &write.request)
-            .and_then(|authority_row| {
-                self.abort_trust_rows(context, lifecycle.trust_scope(), record)
-                    .map(|trust_rows| (authority_row, trust_rows))
-            })
-            .and_then(|(authority_row, trust_rows)| {
-                CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
-                    CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                        store_incarnation: self.store_incarnation,
-                        timeline: pass_key.timeline(),
-                        generation: pass_key.generation(),
-                        inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
-                        frontier: CommunityPassFrontierV1::Initial,
-                        selected_head: None,
-                        scope_rows: vec![],
-                        authority_rows: vec![authority_row],
-                        trust_rows,
-                        key_rows: key_rows(keys),
-                        clock_latch,
-                    })
+        self.head_view(
+            pass_key.timeline(),
+            vec![],
+            (write.leaf_grant_id, &write.request),
+        )
+        .and_then(|head| {
+            self.abort_trust_rows(context, lifecycle.trust_scope(), record)
+                .map(|trust_rows| (head, trust_rows))
+        })
+        .and_then(|(head, trust_rows)| {
+            CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
+                CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                    store_incarnation: self.store_incarnation,
+                    timeline: pass_key.timeline(),
+                    generation: pass_key.generation(),
+                    inventory_generation: CommunityStoreDomainV1::inventory_generation(self),
+                    frontier: head.frontier,
+                    selected_head: head.selected_head,
+                    scope_rows: vec![],
+                    authority_rows: head.authority_rows,
+                    trust_rows,
+                    key_rows: key_rows(keys),
+                    clock_latch,
                 })
             })
+        })
     }
 }
 
