@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Enforce workspace line and region coverage floors from llvm-cov export JSON.
-
-Replaces a second ``cargo llvm-cov report`` invocation over every instrumented
-binary by reading the already-exported ``coverage.json`` produced by
-``cargo llvm-cov nextest --json``. Fails closed on missing, empty, or malformed
-totals and lists files with uncovered lines or regions when a threshold fails.
-"""
 
 from __future__ import annotations
 
@@ -17,14 +10,14 @@ import sys
 from typing import Any
 
 
-class CoverageFloorError(ValueError):
-    """The coverage export is malformed or below a required threshold."""
+class CoverageExportError(ValueError):
+    """The llvm-cov export JSON is malformed or inconsistent."""
 
 
 def _require_metric(totals: dict[str, Any], name: str) -> tuple[int, int, float]:
     metric = totals.get(name)
     if not isinstance(metric, dict):
-        raise CoverageFloorError(f"missing {name} coverage totals")
+        raise CoverageExportError(f"missing {name} coverage totals")
     count = metric.get("count")
     covered = metric.get("covered")
     percent = metric.get("percent")
@@ -36,16 +29,16 @@ def _require_metric(totals: dict[str, Any], name: str) -> tuple[int, int, float]
         or isinstance(percent, bool)
         or not isinstance(percent, (int, float))
     ):
-        raise CoverageFloorError(f"malformed {name} coverage totals")
+        raise CoverageExportError(f"malformed {name} coverage totals")
     if count <= 0 or covered < 0 or covered > count:
-        raise CoverageFloorError(
+        raise CoverageExportError(
             f"invalid {name} coverage counts: covered={covered}, count={count}"
         )
     if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
-        raise CoverageFloorError(f"invalid {name} coverage percent: {percent!r}")
+        raise CoverageExportError(f"invalid {name} coverage percent: {percent!r}")
     computed = (covered / count) * 100.0
     if abs(percent - computed) > 1e-4:
-        raise CoverageFloorError(
+        raise CoverageExportError(
             f"inconsistent {name} coverage percent: reported={percent}, computed={computed}"
         )
     return covered, count, min(float(percent), computed)
@@ -103,14 +96,14 @@ def check_coverage_data(
 ) -> tuple[str, list[str]]:
     """Validate workspace totals and return ``(summary_line, failure_details)``."""
     if not isinstance(payload, dict):
-        raise CoverageFloorError("coverage JSON root must be an object")
+        raise CoverageExportError("coverage JSON root must be an object")
     data = payload.get("data")
     if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
-        raise CoverageFloorError("coverage JSON must contain exactly one data entry")
+        raise CoverageExportError("coverage JSON must contain exactly one data entry")
     entry = data[0]
     totals = entry.get("totals")
     if not isinstance(totals, dict):
-        raise CoverageFloorError("coverage JSON data[0] is missing totals")
+        raise CoverageExportError("coverage JSON data[0] is missing totals")
 
     lines_covered, lines_count, lines_pct = _require_metric(totals, "lines")
     regions_covered, regions_count, regions_pct = _require_metric(totals, "regions")
@@ -186,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             fail_under_lines=args.fail_under_lines,
             fail_under_regions=args.fail_under_regions,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, CoverageFloorError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError, CoverageExportError) as error:
         print(f"ERROR: workspace coverage floor check failed: {error}", file=sys.stderr)
         return 1
 

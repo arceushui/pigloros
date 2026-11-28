@@ -34,12 +34,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
-        with:
-          # Restore main's feature-matrix cache without writing PR-scoped
-          # caches into the shared 10 GB repository budget.
-          shared-key: feature-matrix
-          save-if: 'false'
       - name: Install heap profiler
         run: |
           bash scripts/prepare-ubuntu-package-mirror.sh --no-install-recommends valgrind

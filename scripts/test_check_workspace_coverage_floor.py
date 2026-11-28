@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Unit tests for scripts/check_workspace_coverage_floor.py."""
 
 from __future__ import annotations
 
@@ -44,6 +43,18 @@ def make_payload(
     }
 
 
+def make_segment(
+    line: int,
+    col: int,
+    count: int,
+    *,
+    has_count: bool = True,
+    is_entry: bool = True,
+    is_gap: bool = False,
+) -> list[int | bool]:
+    return [line, col, count, has_count, is_entry, is_gap]
+
+
 class WorkspaceCoverageFloorTests(unittest.TestCase):
     def test_accepts_totals_at_or_above_floors(self) -> None:
         summary, failures = floor.check_coverage_data(
@@ -71,14 +82,14 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
                         "regions": {"count": 120, "covered": 115},
                     },
                     "segments": [
-                        [10, 1, 5, True, True, False],
-                        [12, 1, 0, True, True, False],
-                        [13, 1, 0, True, False, False],
-                        [14, 1, 0, True, False, False],
-                        [15, 1, 0, True, False, True],  # gap region ignored
-                        [20, 1, 0, True, True, False],
-                        [20, 8, 2, True, True, False],  # covered later on same line
-                        [25, 1, 0, True, True, False],
+                        make_segment(10, 1, count=5),
+                        make_segment(12, 1, count=0),
+                        make_segment(13, 1, count=0, is_entry=False),
+                        make_segment(14, 1, count=0, is_entry=False),
+                        make_segment(15, 1, count=0, is_entry=False, is_gap=True),
+                        make_segment(20, 1, count=0),
+                        make_segment(20, 8, count=2),
+                        make_segment(25, 1, count=0),
                     ],
                 }
             ],
@@ -100,8 +111,6 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
             regions_covered=1000,
             regions_count=1000,
         )
-        # Reported percent rounded up to 99.0 within 1e-4 tolerance, but exact
-        # ratio is 98.99995% — must still fail closed.
         payload["data"][0]["totals"]["lines"]["percent"] = 99.0
         _summary, failures = floor.check_coverage_data(
             payload, fail_under_lines=99.0, fail_under_regions=99.0
@@ -125,7 +134,7 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
                                   "regions": {"count": 1, "covered": 1, "percent": 100.0}}}]},
         ]
         for payload in bad_payloads:
-            with self.subTest(payload=payload), self.assertRaises(floor.CoverageFloorError):
+            with self.subTest(payload=payload), self.assertRaises(floor.CoverageExportError):
                 floor.check_coverage_data(
                     payload, fail_under_lines=99.0, fail_under_regions=99.0
                 )

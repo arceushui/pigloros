@@ -35,10 +35,7 @@ RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec1
 TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
 RESTORE_ONLY_SAVE_IF = "false"
 ALLOWED_NON_PR_SAVE_IFS = frozenset({TRUSTED_MAIN_SAVE_IF, RESTORE_ONLY_SAVE_IF})
-# Workflows that run on main (push or schedule) own main-written caches, and
-# sim1-proof-risk restores main's feature-matrix cache without PR writes. The
-# pull-request-only mutation baseline keeps its own PR-scoped key.
-MAIN_WRITER_WORKFLOW_PATHS = (
+NO_PR_CACHE_WRITE_WORKFLOW_PATHS = (
     CI_WORKFLOW_PATH,
     ROOT / ".github" / "workflows" / "fuzz.yml",
     ROOT / ".github" / "workflows" / "memory-store-benchmark.yml",
@@ -844,7 +841,6 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 
 
 def assert_workspace_coverage_floor_contract(workflow: dict) -> None:
-    """Require the coverage job to enforce both 99% workspace floors from coverage.json."""
     steps = workflow["jobs"]["coverage"]["steps"]
     matches = [
         step
@@ -3620,7 +3616,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     assert_standard_stage_runner_cap(mutated)
 
     def test_pull_requests_never_write_caches(self) -> None:
-        for workflow_path in MAIN_WRITER_WORKFLOW_PATHS:
+        for workflow_path in NO_PR_CACHE_WRITE_WORKFLOW_PATHS:
             with self.subTest(workflow=workflow_path.name):
                 assert_pull_requests_never_write_caches(load_workflow(workflow_path))
 
