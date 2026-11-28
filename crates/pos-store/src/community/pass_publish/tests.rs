@@ -492,18 +492,18 @@ fn the_original_reserve_reads_back_its_cri1_and_cpr1() -> TestResult {
     let publication = publication(&case.profile, &case.policy);
     let domain = &mut case.domain.world.domain;
     assert_eq!(
-        domain.original_reserve(target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     domain.publish_reserved_pass(&SEAL, staged, publication)?;
-    let original = domain.original_reserve(target(), OPERATION)?;
+    let original = domain.original_reserve(target(), OPERATION, SAMPLE)?;
     assert_eq!(original.request(), request.as_slice());
     assert_eq!(original.reservation(), reservation.as_slice());
     assert_ne!(original.request(), original.reservation());
 
     // Another identity of T was not reserved here.
     assert_eq!(
-        domain.original_reserve(target(), SECOND).err(),
+        domain.original_reserve(target(), SECOND, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     // A record that no longer opens, a missing record and a missing key
@@ -511,24 +511,24 @@ fn the_original_reserve_reads_back_its_cri1_and_cpr1() -> TestResult {
     for index in [0, 1] {
         flip(domain, index)?;
         assert_eq!(
-            domain.original_reserve(target(), OPERATION).err(),
+            domain.original_reserve(target(), OPERATION, SAMPLE).err(),
             Some(Error::EvidenceUnavailable)
         );
         flip(domain, index)?;
     }
-    assert!(domain.original_reserve(target(), OPERATION).is_ok());
+    assert!(domain.original_reserve(target(), OPERATION, SAMPLE).is_ok());
     let record = domain
         .reserve_publications
         .get_mut(&(target(), OPERATION))
         .ok_or("publication")?;
     record.records.truncate(1);
     assert_eq!(
-        domain.original_reserve(target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     domain.keys.remove(&METADATA);
     assert_eq!(
-        domain.original_reserve(target(), OPERATION).err(),
+        domain.original_reserve(target(), OPERATION, SAMPLE).err(),
         Some(Error::EvidenceUnavailable)
     );
     Ok(())
@@ -749,7 +749,7 @@ fn a_reused_key_id_refuses_without_overwriting() -> TestResult {
             .domain
             .world
             .domain
-            .original_reserve(target(), OPERATION)
+            .original_reserve(target(), OPERATION, SAMPLE)
             .is_ok());
     }
     Ok(())
@@ -851,5 +851,154 @@ fn two_keys_of_one_id_refuse() -> TestResult {
         domain.check_fresh_keys(&prepared).err(),
         Some(Error::Conflict)
     );
+    Ok(())
+}
+
+/// R13.2(4), R10.7 step 4a: discovery of the original Reserve at or after
+/// the pass's `H_r` gives 13, and before it returns the records; a pass
+/// nobody reserved is 12 at any sample.
+#[test]
+fn discovery_of_expired_original_evidence_gives_13() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    // The tests' sample is before `H_r`, so `H_r - 1` is a live sample.
+    assert!(horizon > SAMPLE + 1);
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    assert!(domain
+        .original_reserve(target(), OPERATION, horizon - 1)
+        .is_ok());
+    for sample in [horizon, horizon + 1, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), OPERATION, sample).err(),
+            Some(Error::EvidenceExpired)
+        );
+    }
+    assert_eq!(
+        domain.original_reserve(target(), SECOND, u64::MAX).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// R10.7 4a ("disposed or expired original evidence 12 or 13"): a resolved
+/// pass is discovered like an unresolved one: its records before `H_r`, 13
+/// at or after it. Only a pass nobody reserved is 12.
+#[test]
+fn a_resolved_pass_is_discovered_by_the_same_horizon() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    let abort = domain.stage_abort(target(), OPERATION, 0)?;
+    domain.apply_abort(&SEAL, &abort)?;
+    assert!(domain.original_reserve(target(), OPERATION, SAMPLE).is_ok());
+    assert_eq!(
+        domain.original_reserve(target(), OPERATION, horizon).err(),
+        Some(Error::EvidenceExpired)
+    );
+    // Only a pass nobody reserved is 12, at any sample.
+    for sample in [SAMPLE, horizon, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), SECOND, sample).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    Ok(())
+}
+
+/// R13.2(4): the horizon a Reserve keeps with its sealed records is the
+/// CPR1's own `evidence_not_after_micros`, decoded from the sealed CPR1.
+#[test]
+fn the_kept_horizon_is_the_sealed_cpr1_horizon() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    let original = domain.original_reserve(target(), OPERATION, SAMPLE)?;
+    let sealed = CommunityReservationV1::from_canonical_cbor(original.reservation())?;
+    let kept = domain
+        .reserve_publications
+        .get(&(target(), OPERATION))
+        .ok_or("publication")?
+        .evidence_not_after_micros;
+    assert_eq!(kept, sealed.as_input().evidence_not_after_micros);
+    assert!(kept > SAMPLE);
+    Ok(())
+}
+
+/// R10.7 4a: a truncated or a flipped record is disposed evidence, 12, at
+/// and after `H_r` as before it; intact evidence at `H_r` is 13.
+#[test]
+fn an_unopenable_record_is_12_past_the_horizon() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    assert_eq!(
+        domain.original_reserve(target(), OPERATION, horizon).err(),
+        Some(Error::EvidenceExpired)
+    );
+    for index in [0, 1] {
+        flip(domain, index)?;
+        for sample in [SAMPLE, horizon, u64::MAX] {
+            assert_eq!(
+                domain.original_reserve(target(), OPERATION, sample).err(),
+                Some(Error::EvidenceUnavailable)
+            );
+        }
+        flip(domain, index)?;
+    }
+    domain
+        .reserve_publications
+        .get_mut(&(target(), OPERATION))
+        .ok_or("publication")?
+        .records
+        .truncate(1);
+    for sample in [SAMPLE, horizon, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), OPERATION, sample).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    Ok(())
+}
+
+/// R10.7 4a ("disposed or expired original evidence 12 or 13"): evidence
+/// that is gone is 12 whatever the sample, and only evidence that is there
+/// and past `H_r` is 13: a pass whose metadata key is missing is 12 before
+/// and after `H_r`.
+#[test]
+fn disposed_evidence_is_12_before_it_is_13() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    domain.keys.remove(&METADATA);
+    for sample in [SAMPLE, horizon, u64::MAX] {
+        assert_eq!(
+            domain.original_reserve(target(), OPERATION, sample).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
     Ok(())
 }
