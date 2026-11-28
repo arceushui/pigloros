@@ -373,13 +373,17 @@ fn resolve(
             .err(),
         Some(Error::InvalidBinding)
     );
-    let rows = edge(draw, held.rows);
-    if commit {
-        finish_commit(domain, held, rows)?;
-    } else {
-        finish_abort(domain, held, rows)?;
-    }
+    finish(domain, held, edge(draw, held.rows), commit)?;
     Ok(Some(variant(draw)))
+}
+
+/// Resolve `held` by a Commit when `commit`, else by an Abort, with `rows`.
+fn finish(domain: &mut MemoryCommunityDomainV1, held: Held, rows: u64, commit: bool) -> TestResult {
+    if commit {
+        finish_commit(domain, held, rows)
+    } else {
+        finish_abort(domain, held, rows)
+    }
 }
 
 /// A Commit binding `rows` rows with no additions and the head the Timeline
