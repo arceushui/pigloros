@@ -54,8 +54,9 @@ use super::registry_durability::{
 };
 use super::SqliteStore;
 use crate::plugin_trust_registry::logic::{
-    plan_admit, plan_advance, plan_evaluate, plan_provision, plan_rollback, AdmitPlanV1,
-    AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1, RetainedScopeV1, RollbackPlanV1,
+    plan_admit, plan_advance, plan_evaluate, plan_evaluate_retained, plan_provision, plan_rollback,
+    AdmitPlanV1, AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1, RetainedScopeV1,
+    RollbackPlanV1,
 };
 use crate::plugin_trust_registry::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
@@ -367,15 +368,13 @@ impl SqliteStore {
 
     fn evaluate_in_read(
         &self,
-        input: &PolicyInputV1<'_>,
-        projection: &ValidatedPluginManifestProjectionV1,
+        plan: impl FnOnce(&SqliteTransactionV1<'_>) -> RegistryResult<CurrentReleaseEvaluationV1>,
     ) -> RegistryResult<CurrentReleaseEvaluationV1> {
         let connection = &self.conn;
         schema::require_present(connection)?;
         #[cfg(test)]
         seam::snapshot_probe();
-        let transaction = SqliteTransactionV1 { connection };
-        plan_evaluate(&transaction, input, projection)
+        plan(&SqliteTransactionV1 { connection })
     }
 
     /// Run a read on the validated schema; a poisoned handle fails first.
@@ -547,7 +546,31 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
             utc: trusted_utc,
             tick,
         };
-        self.plugin_trust_read_transaction(|| self.evaluate_in_read(&input, projection))
+        self.plugin_trust_read_transaction(|| {
+            self.evaluate_in_read(|transaction| plan_evaluate(transaction, &input, projection))
+        })
+    }
+
+    fn evaluate_retained_release(
+        &self,
+        scope: &str,
+        ptr1_histories: &[&[u8]],
+        prv1_histories: &[&[u8]],
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> RegistryResult<CurrentReleaseEvaluationV1> {
+        self.plugin_trust_read_transaction(|| {
+            self.evaluate_in_read(|transaction| {
+                plan_evaluate_retained(
+                    transaction,
+                    scope,
+                    (ptr1_histories, prv1_histories),
+                    (trusted_utc, tick),
+                    projection,
+                )
+            })
+        })
     }
 }
 

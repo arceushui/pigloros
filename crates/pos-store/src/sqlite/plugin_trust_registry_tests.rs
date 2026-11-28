@@ -1251,6 +1251,32 @@ fn a_failing_read_statement_or_schema_probe_fails_an_evaluation_cleanly() -> Tes
     Ok(())
 }
 
+// EV2, faults for the retained path: its first read is the scope row, so a failing read statement
+// is `StorageFailed` there as well and ends through `ROLLBACK`.
+#[test]
+fn a_failing_scope_read_fails_a_retained_evaluation_cleanly() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let (ptr1, prv1) = genesis.histories();
+    let one = release_one();
+    let retained = || -> TestResult<_> {
+        Ok(h.store.evaluate_retained_release(
+            "scope",
+            &ptr1,
+            &prv1,
+            &one.projection()?,
+            genesis.trusted()?,
+            genesis.tick,
+        ))
+    };
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 12)?;
+    assert_eq!(retained()?, Err(Error::StorageFailed));
+    assert!(h.store.conn.is_autocommit());
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 2000)?;
+    assert!(retained()?.is_ok());
+    Ok(())
+}
+
 #[test]
 fn a_locked_rollback_journal_store_is_busy_at_the_first_read_and_needs_no_wal() -> TestResult {
     let h = admitted()?;
@@ -1390,6 +1416,60 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), two.pmf1_digest()?);
     assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::ReleaseNotActive));
     assert!(h.evaluate(&genesis, &two)?.is_ok());
+    Ok(())
+}
+
+// EV10 for the retained path: the scope row, its anchor and TPS1 and the release rows are one
+// committed snapshot. A second handle commits a successor release after the schema check; the
+// retained evaluation does not observe it, and the next one finds the predecessor not active.
+#[test]
+fn a_retained_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let (one, two) = (release_one(), release_two());
+    let writer = RefCell::new(open_gated(&path_of(&h.guard)?)?);
+    let env = Env::new("scope")?;
+    let material = env.genesis()?;
+    let projection = two.projection()?;
+    let proof = two.release_proof()?;
+    let content = two.content_proof()?;
+    let timeline = h.timeline;
+    let committed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&committed);
+    let probe = Probe::set(move || {
+        let admitted = material.trusted().is_ok_and(|utc| {
+            writer
+                .borrow_mut()
+                .admit(
+                    &env.anchor,
+                    &material.tps1,
+                    &material.evidence,
+                    &projection,
+                    (&proof, &content),
+                    TrustEvaluationPointV1::new(utc, material.tick),
+                    activation(timeline, 2),
+                )
+                .is_ok()
+        });
+        flag.store(admitted, Ordering::SeqCst);
+    });
+    let (ptr1, prv1) = genesis.histories();
+    let retained = |manifest: &ManifestSpec| -> TestResult<_> {
+        Ok(h.store.evaluate_retained_release(
+            "scope",
+            &ptr1,
+            &prv1,
+            &manifest.projection()?,
+            genesis.trusted()?,
+            genesis.tick,
+        ))
+    };
+    let evaluation = retained(&one)??;
+    drop(probe);
+    assert!(committed.load(Ordering::SeqCst));
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest()?);
+    assert_eq!(retained(&one)?, Err(Error::ReleaseNotActive));
+    assert!(retained(&two)?.is_ok());
     Ok(())
 }
 
