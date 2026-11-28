@@ -84,7 +84,16 @@ fn a_context_passes_again_beyond_one_recovery_window() -> TestResult {
             GENERATION_HORIZON.min(later + window)
         );
         assert!(outcome_horizon(&domain, [2; 16])? > first);
+        // Both passes are retained as resolved outcomes, the first beyond
+        // its own `H_r`: they count toward the retained outcomes.
         assert_eq!(domain.retained_pass_outcomes(id(1), GENERATION), 2);
+        assert_eq!(domain.pass_records.len(), 2);
+        for operation in [[1; 16], [2; 16]] {
+            assert_eq!(
+                domain.pass_status(id(1), operation),
+                Some(CommunityPassStatusV1::Aborted)
+            );
+        }
     }
     Ok(())
 }

@@ -6,8 +6,10 @@
 //! domain is seeded with committed rows and a quarantine context, and a
 //! shadow model written from the spec literals (the `4,096 - 128` targets
 //! line, 4,096 rows, two targets per row, `F_p` of 4 targets, `F_q` of `8n`)
-//! predicts every refusal and the pending ledger. The domain's own constants
-//! are not used for the bounds.
+//! predicts every refusal and the pending ledger. The bounds are the spec's
+//! literals, not the domain's constants; the committed values are checked
+//! against literals too, and the domain's own budget is asserted within the
+//! bounds after every step.
 //!
 //! Interleavings covered: Reserve, Abort and Commit across the two Timelines.
 //! Not covered here: `fork_current` (no implementation exists yet), and
@@ -288,19 +290,30 @@ fn modeled_reserve(
     Ok(actual)
 }
 
-/// An edge of `0..=rows` a draw picks: none, all, the middle or any.
+/// Which edge of `0..=rows` a draw picks, from bits the action and the
+/// pick do not use: 0 none, 1 all, 2 the middle, 3 any.
+const fn variant(draw: u64) -> usize {
+    match (draw >> 40) & 3 {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 3,
+    }
+}
+
+/// The edge of `0..=rows` a draw picks.
 const fn edge(draw: u64, rows: u64) -> u64 {
-    match draw & 3 {
+    match variant(draw) {
         0 => 0,
         1 => rows,
         2 => rows / 2,
-        _ => (draw >> 8) % (rows + 1),
+        _ => (draw >> 44) % (rows + 1),
     }
 }
 
 /// Take the pending reservation a draw picks out of the model.
 fn take(model: &mut Model, draw: u64) -> Result<Option<Held>, Box<dyn std::error::Error>> {
-    let at = usize::try_from(draw >> 32)?.checked_rem(model.pending.len());
+    let at = usize::try_from((draw >> 32) & 0xff)?.checked_rem(model.pending.len());
     Ok(at.map(|at| model.pending.remove(at)))
 }
 
@@ -326,16 +339,17 @@ fn finish_commit(domain: &mut MemoryCommunityDomainV1, held: Held, rows: u64) ->
 }
 
 /// Resolve the pending reservation a draw picks by an Abort, or by a Commit
-/// when `commit`, registering or binding an edge of its entry's rows. One
-/// more row than the entry holds is refused (3) first.
+/// when `commit`, registering or binding an edge of its entry's rows; the
+/// edge variant used, if a reservation was pending. One more row than the
+/// entry holds is refused (3) first.
 fn resolve(
     domain: &mut MemoryCommunityDomainV1,
     model: &mut Model,
     draw: u64,
     commit: bool,
-) -> TestResult {
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
     let Some(held) = take(model, draw)? else {
-        return Ok(());
+        return Ok(None);
     };
     assert_eq!(
         domain
@@ -345,10 +359,11 @@ fn resolve(
     );
     let rows = edge(draw, held.rows);
     if commit {
-        finish_commit(domain, held, rows)
+        finish_commit(domain, held, rows)?;
     } else {
-        finish_abort(domain, held, rows)
+        finish_abort(domain, held, rows)?;
     }
+    Ok(Some(variant(draw)))
 }
 
 /// A Commit binding `rows` rows with no additions and the head the Timeline
@@ -427,7 +442,7 @@ fn the_second_reserve_waits_for_the_first_to_resolve() -> TestResult {
         Some(Error::StaleFrontier)
     );
     assert_model(&domain, &model)?;
-    resolve(&mut domain, &mut model, 0, false)?;
+    assert!(resolve(&mut domain, &mut model, 0, false)?.is_some());
     assert_eq!(
         modeled_reserve(&mut domain, &mut model, 1, [5; 16], child)?,
         None
@@ -443,6 +458,7 @@ fn the_second_reserve_waits_for_the_first_to_resolve() -> TestResult {
 #[test]
 fn random_interleavings_never_exceed_the_bounds() -> TestResult {
     let mut outcomes = [0_u32; 3];
+    let mut edges = [[0_u32; 4]; 2];
     for seed in [0x9e37_79b9_7f4a_7c15_u64, 0x1234_5678_9abc_def1, 7] {
         let (mut domain, mut model) = seeded()?;
         let sizes = [
@@ -461,13 +477,15 @@ fn random_interleavings_never_exceed_the_bounds() -> TestResult {
                 let rows = sizes[usize::try_from((draw >> 16) % 6)?];
                 let refusal = modeled_reserve(&mut domain, &mut model, timeline, [step; 16], rows)?;
                 tally(&mut outcomes, refusal);
-            } else {
-                resolve(&mut domain, &mut model, draw, draw % 4 == 3)?;
+            } else if let Some(used) = resolve(&mut domain, &mut model, draw, draw % 4 == 3)? {
+                edges[usize::from(draw % 4 == 3)][used] += 1;
             }
             assert_model(&domain, &model)?;
         }
     }
     assert!(outcomes.iter().all(|count| *count > 0), "{outcomes:?}");
+    // Every edge of an entry's rows is reached by an Abort and by a Commit.
+    assert!(edges.iter().flatten().all(|count| *count > 0), "{edges:?}");
     Ok(())
 }
 
