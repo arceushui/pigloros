@@ -288,7 +288,8 @@ fn staged(case: &mut QuarantineCase, setup: &Setup) -> Fallible<StagedResetV1> {
 }
 
 /// The reset of the seeded claim, with `seam` run on the domain and the
-/// staged reset between its last step before the writer and the writer.
+/// staged reset after `prepare_reset` (every step before the writer) and
+/// before `commit_reset` (the writer).
 fn reset_between(
     case: &mut QuarantineCase,
     seam: impl FnOnce(&mut MemoryCommunityDomainV1, &mut StagedResetV1),
