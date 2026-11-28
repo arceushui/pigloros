@@ -28,8 +28,8 @@ pub const CHALLENGE_TTL: Duration = Duration::from_secs(150);
 /// Release window after the release CAS (or the illegal-state exit).
 pub const RELEASE_WINDOW: Duration = Duration::from_secs(2);
 
-/// Exit window after `Controller::Close` returns.
-pub const EXIT_WINDOW: Duration = Duration::from_secs(5);
+/// Exit window after `Controller::Close` returns (ADR-110 §6, amended by E21).
+pub const EXIT_WINDOW: Duration = Duration::from_secs(15);
 
 /// Total enrollment budget: it starts when the Create ceremony returns and ends at E4 host
 /// verification.

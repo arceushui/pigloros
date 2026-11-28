@@ -22,7 +22,7 @@ fn the_bounds_are_the_adr_values() {
     assert_eq!(INTERACTION, Duration::from_mins(2));
     assert_eq!(CHALLENGE_TTL, Duration::from_secs(150));
     assert_eq!(RELEASE_WINDOW, Duration::from_secs(2));
-    assert_eq!(EXIT_WINDOW, Duration::from_secs(5));
+    assert_eq!(EXIT_WINDOW, Duration::from_secs(15));
     assert_eq!(ENROLLMENT_BUDGET, Duration::from_mins(5));
     assert_eq!(
         (FAST_POLL, SLOW_POLL, FAST_POLL_SPAN),
@@ -291,7 +291,7 @@ fn every_phase_of_a_ceremony_ends_by_its_own_timer() -> TestResult {
     );
     let released = INTERACTION + RELEASE_WINDOW;
     assert!(elapsed >= released && elapsed < released + Duration::from_secs(2));
-    // Exit: the browser never exits, so the five-second window quarantines the surface.
+    // Exit: the browser never exits, so the fifteen-second window quarantines the surface.
     let never_exits = SurfaceConfig {
         exit_delay: None,
         ..SurfaceConfig::default()

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use pos_owner_bridge::ceremony::plan::Verified;
-use pos_owner_bridge::ceremony::timing::READINESS;
+use pos_owner_bridge::ceremony::timing::{EXIT_WINDOW, READINESS};
 use pos_owner_bridge::fake::buffers::{Actor, LogEntry, Pair, Role};
 use pos_owner_bridge::fake::clock::{FakeClock, FakeRandom};
 use pos_owner_bridge::fake::honest::POLL;
@@ -194,8 +194,8 @@ fn sample_surface(rng: &mut Rng) -> Result<SurfaceConfig, AnyError> {
     let exit_delay = rng.pick(&[
         Some(Duration::ZERO),
         Some(Duration::from_millis(180)),
-        Some(Duration::from_millis(4_900)),
-        Some(Duration::from_millis(5_100)),
+        Some(EXIT_WINDOW.saturating_sub(Duration::from_millis(100))),
+        Some(EXIT_WINDOW.saturating_add(Duration::from_millis(100))),
         None,
     ])?;
     let mut surface = SurfaceConfig {
@@ -1359,7 +1359,7 @@ fn is_clean_apart_from_tweak(sc: &Scenario) -> bool {
         && sc
             .surface
             .exit_delay
-            .is_some_and(|delay| delay <= Duration::from_millis(4_900))
+            .is_some_and(|delay| delay <= EXIT_WINDOW.saturating_sub(Duration::from_millis(100)))
 }
 
 /// The one ADR-110 §11 error a scenario must report when a reply tweak is its only defect.
