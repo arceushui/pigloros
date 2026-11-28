@@ -172,5 +172,8 @@ fn hardening_value(value: &SystemdHardeningReadbackValue) -> DbusValue {
         SystemdHardeningReadbackValue::StringArray(values) => {
             DbusValue::StringArray(values.clone())
         }
+        SystemdHardeningReadbackValue::ExitStatuses(statuses, signals) => {
+            DbusValue::ExitStatusSet(statuses.clone(), signals.clone())
+        }
     }
 }

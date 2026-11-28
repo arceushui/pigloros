@@ -43,6 +43,10 @@ use erasure_support::{
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::{SqliteStore, SqliteStoreOpenOptionsV1};
 
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[path = "erasure_persistence/fence_writers.rs"]
+mod fence_writers;
+
 fn admission(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,

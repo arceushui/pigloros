@@ -470,16 +470,17 @@ impl TerminationEvidenceFields {
             && self.adapter_input.is_none()
     }
 
-    /// Progress 2: a done start job, the unit, both snapshots, an ending and
+    /// Progress 2: a done start job, the unit, the baseline snapshot, an ending and
     /// a capture; no launch or barrier failure. A null `adapter-input` is
     /// missing evidence, not a shape error (R10 §4.8), and so is a null
-    /// start job (owner reading G1, Redmine #443 journal 22723).
+    /// start job (owner reading G1, Redmine #443 journal 22723) and a null
+    /// `terminal` snapshot: the cgroup of the exited unit may be gone before its counters
+    /// can be read (ADR-069 R17-E6), and the classifier selects code 2 for it.
     const fn released_shape(&self) -> bool {
         self.launch_failure.is_none()
             && matches!(self.start_job, None | Some(StartJobResult::Done))
             && self.unit.is_some()
             && self.baseline.is_some()
-            && self.terminal.is_some()
             && self.ending.is_some()
             && self.barrier_failure.is_none()
             && self.output_capture.is_some()
@@ -522,7 +523,7 @@ impl TerminationEvidenceFields {
             && self
                 .terminal
                 .as_ref()
-                .is_some_and(|terminal| feed.finish <= terminal.observed_at)
+                .is_none_or(|terminal| feed.finish <= terminal.observed_at)
     }
 }
 
