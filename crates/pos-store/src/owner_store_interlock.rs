@@ -9,7 +9,8 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::path::{Component, Path};
+use std::os::fd::AsRawFd;
+use std::path::{Component, Path, PathBuf};
 
 use pos_core::CoreError;
 use rustix::fd::OwnedFd;
@@ -36,7 +37,7 @@ const LOCK_FLAGS: OFlags = OFlags::RDWR
 #[must_use = "retain the interlock through all lower native work and cleanup"]
 pub struct OwnerStoreFileInterlockV1<'operation> {
     _admission: PhantomData<&'operation ()>,
-    _namespace: CheckedNamespace,
+    namespace: CheckedNamespace,
     _coordination_directory: OwnedFd,
     _lock: OwnedFd,
 }
@@ -91,7 +92,7 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
                     open_lock(&coordination, &name).and_then(|lock| {
                         namespace.recheck().map(|()| Self {
                             _admission: PhantomData,
-                            _namespace: namespace,
+                            namespace,
                             _coordination_directory: coordination,
                             _lock: lock,
                         })
@@ -99,6 +100,22 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
                 })
             })
             .map_err(|_| CoreError::Storage("protected store interlock unavailable".to_owned()))
+    }
+
+    /// The device and inode of the main file this interlock is keyed on, as
+    /// read when it was taken.
+    pub(crate) const fn main_key(&self) -> [u64; 2] {
+        file_id(&self.namespace.main.stat)
+    }
+
+    /// A path naming the directory object this interlock holds through its own
+    /// descriptor, valid while the interlock lives. It is transport for an
+    /// identity proof, not identity.
+    pub(crate) fn directory_path(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            self.namespace.directory.as_raw_fd()
+        ))
     }
 }
 
@@ -120,7 +137,7 @@ pub(crate) struct CheckedNamespace {
     pub(crate) directory: OwnedFd,
     main_basename: String,
     pub(crate) main: FileWitness,
-    companions: [Option<FileWitness>; 2],
+    pub(crate) companions: [Option<FileWitness>; 2],
 }
 
 impl CheckedNamespace {
