@@ -184,10 +184,11 @@ fn readback_value(value: &SystemdTransientUnitReadbackValue) -> DbusValue {
     }
 }
 
+/// The values as bytes; `representable` has refused any other value before this runs.
 fn bytes(values: &[i32]) -> Vec<u8> {
     values
         .iter()
-        .filter_map(|value| u8::try_from(*value).ok())
+        .map(|value| u8::try_from(*value).unwrap_or_default())
         .collect()
 }
 

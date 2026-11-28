@@ -214,8 +214,8 @@ impl SystemdUnitOutcome {
 ///
 /// The attempt unit lists the exit statuses `1..=199` and every signal as a success (ADR-069
 /// R17-E6), so that a failed main exit leaves the unit `active (exited)` with its cgroup, and
-/// systemd reports
-/// `success` whatever the main process did. The broker records the result of its own rule instead,
+/// systemd reports `success` whatever the main process did. The broker records the result of its
+/// own rule instead,
 /// which is systemd's `is_clean_exit` for a non-oneshot service: a nonzero exit status is
 /// `exit-code`, a signal other than the clean ones is `signal`, and a dump is `core-dump`. Every
 /// other result, and `success` for a clean exit, is systemd's own.
