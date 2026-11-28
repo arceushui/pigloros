@@ -639,7 +639,9 @@ fn tme1_rule_2_shape_at_progress_2() -> TestResult {
             (vec![change(&[8], integer(1))], false),
             (vec![change(&[9], null()), change(&[24, 1], null())], false),
             (vec![change(&[10], null())], false),
-            (vec![change(&[11], null())], false),
+            // A null terminal snapshot is missing evidence (code 2), not a shape error: the
+            // cgroup may be gone before its counters can be read (R17-E6).
+            (vec![change(&[11], null())], true),
             (vec![change(&[14], null())], false),
             (vec![change(&[15], integer(0))], false),
             (vec![change(&[17], null())], false),

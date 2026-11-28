@@ -21,7 +21,7 @@ const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
-const EXPECTED_PROPERTY_NAMES: [&str; 50] = [
+const EXPECTED_PROPERTY_NAMES: [&str; 52] = [
     "Type",
     "RootDirectory",
     "BindReadOnlyPaths",
@@ -58,6 +58,8 @@ const EXPECTED_PROPERTY_NAMES: [&str; 50] = [
     "StandardInput",
     "StandardOutput",
     "StandardError",
+    "RemainAfterExit",
+    "SuccessExitStatus",
     "MemoryMax",
     "MemorySwapMax",
     "TasksMax",
@@ -93,11 +95,11 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(properties[2].dbus_signature(), "a(ssbt)");
     assert_eq!(properties[28].dbus_signature(), "(bas)");
     assert_eq!(properties[29].dbus_signature(), "(bas)");
-    for property in &properties[36..43] {
+    for property in &properties[38..45] {
         assert_eq!(property.dbus_signature(), "t");
     }
-    assert_eq!(properties[43].dbus_signature(), "u");
-    assert_eq!(properties[44].dbus_signature(), "a(hs)");
+    assert_eq!(properties[45].dbus_signature(), "u");
+    assert_eq!(properties[46].dbus_signature(), "a(hs)");
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {
@@ -147,7 +149,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
-    match properties[43].value() {
+    match properties[45].value() {
         SystemdTransientUnitValue::Numeric(
             SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
         ) => {
@@ -159,7 +161,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("FileDescriptorStoreMax must have a u value".into()),
     }
-    match properties[44].value() {
+    match properties[46].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             assert_eq!(
                 <Vec<(OwnedFd, String)> as Type>::SIGNATURE.to_string(),
@@ -184,8 +186,8 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
 fn work_mount_property_has_the_exact_dbus_encoding() -> Result<(), Box<dyn Error>> {
     let request = request(LaunchMode::AirGapped)?;
     let properties = request.requested_properties();
-    assert_eq!(properties[45].dbus_signature(), "a(ss)");
-    match properties[45].value() {
+    assert_eq!(properties[47].dbus_signature(), "a(ss)");
+    match properties[47].value() {
         SystemdTransientUnitValue::TemporaryFileSystem(value) => {
             assert_eq!(
                 <Vec<(String, String)> as Type>::SIGNATURE.to_string(),
@@ -229,7 +231,7 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 #[test]
 fn exec_start_is_the_last_property_with_its_dbus_signature() -> Result<(), Box<dyn Error>> {
     let request = request(LaunchMode::AirGapped)?;
-    let property = &request.requested_properties()[46];
+    let property = &request.requested_properties()[48];
     assert_eq!(property.name(), "ExecStart");
     assert_eq!(property.dbus_signature(), "a(sasb)");
     let commands = exec_start(&request);
@@ -291,7 +293,7 @@ fn verifier_rejects_a_substituted_exec_start() -> Result<(), Box<dyn Error>> {
     tolerant[0].2 = true;
     for substituted in [other_argument, other_path, tolerant, Vec::new()] {
         let mut readback = exact.clone();
-        readback[46] = SystemdTransientUnitReadback::new(
+        readback[48] = SystemdTransientUnitReadback::new(
             "ExecStart",
             SystemdTransientUnitReadbackValue::ExecStart(substituted),
         );
@@ -328,7 +330,7 @@ fn work_mount_is_sized_by_elm1_work_bytes_and_absent_at_zero() -> Result<(), Box
         let mut limits = complete_effective_limits();
         limits[9].value = work_bytes;
         let request = request_with_limits(LaunchMode::AirGapped, &limits)?;
-        match request.requested_properties()[45].value() {
+        match request.requested_properties()[47].value() {
             SystemdTransientUnitValue::TemporaryFileSystem(value) => assert_eq!(value, &expected),
             _value => return Err("TemporaryFileSystem must have an a(ss) value".into()),
         }
@@ -362,7 +364,7 @@ fn verifier_rejects_a_substituted_work_mount() -> Result<(), Box<dyn Error>> {
         ],
     ] {
         let mut readback = exact.clone();
-        readback[45] = SystemdTransientUnitReadback::new(
+        readback[47] = SystemdTransientUnitReadback::new(
             "TemporaryFileSystem",
             SystemdTransientUnitReadbackValue::TemporaryFileSystem(substituted),
         );
@@ -372,7 +374,7 @@ fn verifier_rejects_a_substituted_work_mount() -> Result<(), Box<dyn Error>> {
         );
     }
     let mut mistyped = exact;
-    mistyped[45] = SystemdTransientUnitReadback::new(
+    mistyped[47] = SystemdTransientUnitReadback::new(
         "TemporaryFileSystem",
         SystemdTransientUnitReadbackValue::StringArray(vec!["/work".to_owned()]),
     );
@@ -388,7 +390,7 @@ fn elm1_service_limit_values_have_exact_dbus_encoding() -> Result<(), Box<dyn Er
     let request = request(LaunchMode::AirGapped)?;
     let properties = request.requested_properties();
     for (property, expected) in
-        properties[36..43]
+        properties[38..45]
             .iter()
             .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
     {
@@ -424,7 +426,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
             }
             _value => return Err("RestrictAddressFamilies must have a (bas) value".into()),
         }
-        match properties[44].value() {
+        match properties[46].value() {
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                 assert_eq!(value.len(), 1);
                 assert_eq!(value[0].1, "piglor-release-v1");
@@ -529,17 +531,17 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
     );
     let mut nonzero_descriptor_store =
         exact_readback(&request, &authority.expected_effective_names);
-    nonzero_descriptor_store[43] = SystemdTransientUnitReadback::new(
+    nonzero_descriptor_store[45] = SystemdTransientUnitReadback::new(
         "FileDescriptorStoreMax",
         SystemdTransientUnitReadbackValue::U32(1),
     );
     let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    missing_descriptor[44] = SystemdTransientUnitReadback::new(
+    missing_descriptor[46] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(Vec::new()),
     );
     let mut extra_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    extra_descriptor[44] = SystemdTransientUnitReadback::new(
+    extra_descriptor[46] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-host-service-v1".to_owned(),
@@ -548,7 +550,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         ]),
     );
     let mut reordered_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    reordered_descriptor[44] = SystemdTransientUnitReadback::new(
+    reordered_descriptor[46] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-release-v1".to_owned(),
@@ -732,7 +734,7 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
     let mut missing = exact_readback(&request, &authority.expected_effective_names);
     missing.remove(33);
     let mut extra = exact_readback(&request, &authority.expected_effective_names);
-    let duplicated = extra[36].clone();
+    let duplicated = extra[38].clone();
     extra.insert(34, duplicated);
     let mut reordered = exact_readback(&request, &authority.expected_effective_names);
     reordered.swap(33, 34);
@@ -742,7 +744,7 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
             Err(TransientUnitRequestError::ReadbackMismatch)
         );
     }
-    for index in 36..43 {
+    for index in 38..45 {
         let mut readback = exact_readback(&request, &authority.expected_effective_names);
         readback[index] = SystemdTransientUnitReadback::new(
             EXPECTED_PROPERTY_NAMES[index],
@@ -754,7 +756,7 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
         );
     }
     let mut mistyped = exact_readback(&request, &authority.expected_effective_names);
-    mistyped[36] = SystemdTransientUnitReadback::new(
+    mistyped[38] = SystemdTransientUnitReadback::new(
         "MemoryMax",
         SystemdTransientUnitReadbackValue::U32(134_217_728),
     );
@@ -1098,7 +1100,7 @@ fn the_requested_configuration_is_the_submitted_values_with_descriptor_names_onl
         assert_eq!(*recorded.value(), expected, "{}", recorded.name());
     }
     assert_eq!(
-        configuration[44].value(),
+        configuration[46].value(),
         &crate::RequestedConfigurationValue::DescriptorNames(vec![
             "piglor-host-service-v1".to_owned(),
             "piglor-release-v1".to_owned(),
@@ -1231,7 +1233,7 @@ fn a_start_with_no_requested_properties_is_no_rqe1() -> Result<(), Box<dyn Error
 fn the_standard_descriptors_move_into_the_one_submission() -> Result<(), Box<dyn Error>> {
     let mut request = request(LaunchMode::AirGapped)?;
     let standard = |properties: &[SystemdTransientUnitProperty]| {
-        properties[47..]
+        properties[49..]
             .iter()
             .map(|property| match property.value() {
                 SystemdTransientUnitValue::StandardDescriptor(descriptor) => {
@@ -1242,7 +1244,7 @@ fn the_standard_descriptors_move_into_the_one_submission() -> Result<(), Box<dyn
             .collect::<Vec<_>>()
     };
     assert_eq!(standard(request.requested_properties()), [Some(true); 3]);
-    for property in &request.requested_properties()[47..] {
+    for property in &request.requested_properties()[49..] {
         assert_eq!(property.dbus_signature(), "h");
     }
     let submitted = request.requested_properties_for_submission()?;
@@ -1253,7 +1255,7 @@ fn the_standard_descriptors_move_into_the_one_submission() -> Result<(), Box<dyn
     assert_eq!(standard(&again), [Some(false); 3]);
     // The other descriptors are still duplicated for every submission.
     assert!(matches!(
-        again[44].value(),
+        again[46].value(),
         SystemdTransientUnitValue::ExtraFileDescriptors(descriptors) if descriptors.len() == 1
     ));
     Ok(())
@@ -1287,7 +1289,7 @@ fn the_verifier_rejects_any_other_stdio_readback() -> Result<(), Box<dyn Error>>
             );
         }
     }
-    for index in 47..50 {
+    for index in 49..52 {
         let name = exact[index].name().to_owned();
         let mut named = exact.clone();
         named[index] = SystemdTransientUnitReadback::new(

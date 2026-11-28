@@ -289,9 +289,6 @@ pub struct BoundAttemptCgroup {
     events: File,
     identity: BoundCgroupIdentity,
     invocation: Option<[u8; 16]>,
-    /// The limit-event counters read when the cgroup was first observed empty: systemd removes the
-    /// cgroup of an exited unit, so a later read can find it gone (see `freeze_when_empty`).
-    emptied: Option<AttemptLimitEventSnapshot>,
 }
 
 /// Read one byte of the retained events file at offset zero.
@@ -369,7 +366,6 @@ impl BoundAttemptCgroup {
             directory,
             events,
             invocation: None,
-            emptied: None,
             identity: BoundCgroupIdentity {
                 unit_name,
                 unit_path,
@@ -469,7 +465,6 @@ impl BoundAttemptCgroup {
             },
             BoundCgroupPath::Present => self.present_basis(read_events)?,
         };
-        self.freeze_when_empty(basis_and_raw.0);
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptCgroupEmptyObservation {
             identity: self.identity.clone(),
@@ -478,17 +473,6 @@ impl BoundAttemptCgroup {
             monotonic_seconds: observed.tv_sec,
             monotonic_nanoseconds: observed.tv_nsec,
         })
-    }
-
-    /// Read the limit-event counters the moment the cgroup is first observed empty through its
-    /// events, and keep them for [`Self::capture_limit_events`]. The unit has exited then, but
-    /// systemd removes its cgroup within milliseconds, after which no counter can be read (a
-    /// retained descriptor answers `ENODEV`), and the terminal snapshot of the evidence would be
-    /// missing. A failed read keeps nothing: a later capture fails as it would have.
-    fn freeze_when_empty(&mut self, basis: AttemptCgroupEmptyBasis) {
-        if basis == AttemptCgroupEmptyBasis::Events && self.emptied.is_none() {
-            self.emptied = self.capture_limit_events().ok();
-        }
     }
 
     /// The basis of a cgroup whose path is still present: the events file says it is empty, or the

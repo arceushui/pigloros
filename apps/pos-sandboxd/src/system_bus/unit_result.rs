@@ -12,6 +12,10 @@ const UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
 const SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
 /// The `ActiveState` values in which systemd has finished with a unit run.
 const SETTLED_STATES: [&str; 2] = ["inactive", "failed"];
+/// A unit with `RemainAfterExit=yes` whose main process exited successfully stays `active` with
+/// this `SubState` until it is stopped (ADR-069 R17-E6): its run is finished.
+const ACTIVE: &str = "active";
+const EXITED: &str = "exited";
 
 /// `ExecMainCode` when systemd recorded no main exit, and the `waitid`
 /// `si_code` values it reports for a recorded one.
@@ -205,6 +209,31 @@ impl SystemdUnitOutcome {
     }
 }
 
+/// The `Result` systemd would have reported for `main` without `SuccessExitStatus=`.
+///
+/// The attempt unit lists every exit status and signal as a success (ADR-069 R17-E6), so that a
+/// failed main exit leaves the unit `active (exited)` with its cgroup, and systemd reports
+/// `success` whatever the main process did. The broker records the result of its own rule instead,
+/// which is systemd's `is_clean_exit` for a non-oneshot service: a nonzero exit status is
+/// `exit-code`, a signal other than the clean ones is `signal`, and a dump is `core-dump`. Every
+/// other result, and `success` for a clean exit, is systemd's own.
+fn derived(result: SystemdServiceResult, main: SystemdMainExit) -> SystemdServiceResult {
+    match (result, main) {
+        (SystemdServiceResult::Success, SystemdMainExit::Exited { status }) if status != 0 => {
+            SystemdServiceResult::ExitCode
+        }
+        (SystemdServiceResult::Success, SystemdMainExit::Killed { signal })
+            if !is_daemon_clean_signal(signal) =>
+        {
+            SystemdServiceResult::Signal
+        }
+        (SystemdServiceResult::Success, SystemdMainExit::Dumped { .. }) => {
+            SystemdServiceResult::CoreDump
+        }
+        _ => result,
+    }
+}
+
 fn is_daemon_clean_signal(signal: u8) -> bool {
     DAEMON_CLEAN_SIGNALS
         .iter()
@@ -231,7 +260,7 @@ pub enum SystemdUnitResultError {
     /// check, so a malformed ID is reported as `InvocationIdMalformed` even
     /// for an unsettled unit. `NotSettled` therefore does not imply that the
     /// ID was well formed or matched.
-    #[error("systemd unit is {active_state:?}, not inactive or failed")]
+    #[error("systemd unit is {active_state:?}, not inactive, failed or active and exited")]
     NotSettled { active_state: String },
     /// `ActiveState` or `InvocationID` changed while the result was read.
     #[error("systemd unit state changed while its result was read")]
@@ -266,10 +295,18 @@ pub enum SystemdUnitResultError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UnitState {
     active_state: String,
+    sub_state: String,
     invocation_id: [u8; 16],
 }
 
 impl UnitState {
+    /// Whether systemd has finished with the unit's run: it is `inactive` or `failed`, or it is
+    /// `active (exited)` after a successful main exit under `RemainAfterExit=yes`.
+    fn finished(&self) -> bool {
+        SETTLED_STATES.contains(&self.active_state.as_str())
+            || (self.active_state == ACTIVE && self.sub_state == EXITED)
+    }
+
     /// Check, in order: a settled `ActiveState`, an identical state in both
     /// snapshots, and the attempt's `InvocationID`.
     ///
@@ -280,7 +317,7 @@ impl UnitState {
         after: &Self,
         invocation_id: [u8; 16],
     ) -> Result<Self, SystemdUnitResultError> {
-        if !SETTLED_STATES.contains(&self.active_state.as_str()) {
+        if !self.finished() {
             return Err(SystemdUnitResultError::NotSettled {
                 active_state: self.active_state,
             });
@@ -328,6 +365,7 @@ impl SystemdUnitResultObservation {
         let result = SystemdServiceResult::parse(result)
             .ok_or_else(|| SystemdUnitResultError::UnknownResult(result.to_owned()))?;
         let main = SystemdMainExit::decode(code, status)?;
+        let result = derived(result, main);
         SystemdUnitOutcome::combine(result, main)
             .map(|outcome| Self {
                 unit_name: started.unit_name.clone(),
@@ -352,6 +390,7 @@ impl SystemdUnitResultObservation {
     ) -> Result<Self, SystemdUnitResultError> {
         let state = UnitState {
             active_state: "failed".to_owned(),
+            sub_state: "failed".to_owned(),
             invocation_id: [0x11; 16],
         };
         Self::decode(started, state, result, code, status)
@@ -468,9 +507,11 @@ async fn read_unit_state(
     let mut unit = snapshot(properties, UNIT_INTERFACE).await?;
     let active_state = take(&mut unit, "ActiveState")?;
     let raw: Vec<u8> = take(&mut unit, "InvocationID")?;
+    let invocation_id = invocation_id(&raw)?;
     Ok(UnitState {
         active_state,
-        invocation_id: invocation_id(&raw)?,
+        sub_state: take(&mut unit, "SubState")?,
+        invocation_id,
     })
 }
 
@@ -538,6 +579,7 @@ mod tests {
         states: Vec<(String, Vec<u8>)>,
         state_reads: AtomicUsize,
         invocation_reads: AtomicUsize,
+        sub_state: &'static str,
         failing: Option<&'static str>,
     }
 
@@ -547,8 +589,15 @@ mod tests {
                 states,
                 state_reads: AtomicUsize::new(0),
                 invocation_reads: AtomicUsize::new(0),
+                sub_state: "dead",
                 failing: None,
             }
+        }
+
+        /// The same unit, reporting `sub_state` as its `SubState`.
+        fn with_sub_state(mut self, sub_state: &'static str) -> Self {
+            self.sub_state = sub_state;
+            self
         }
 
         fn state(&self, reads: &AtomicUsize) -> &(String, Vec<u8>) {
@@ -577,6 +626,11 @@ mod tests {
         fn invocation_id(&self) -> fdo::Result<Vec<u8>> {
             self.check("InvocationID")
                 .map(|()| self.state(&self.invocation_reads).1.clone())
+        }
+
+        #[zbus(property, name = "SubState")]
+        fn sub_state(&self) -> fdo::Result<String> {
+            self.check("SubState").map(|()| self.sub_state.to_owned())
         }
     }
 
@@ -863,18 +917,56 @@ mod tests {
         Ok(())
     }
 
+    /// The attempt unit lists every exit status and signal as a success (ADR-069 R17-E6), so
+    /// systemd reports `success` for a main process that failed, was killed or dumped core: the
+    /// result is derived from the main exit by the rule systemd applies without the list.
+    #[tokio::test]
+    async fn a_success_with_a_failed_main_exit_is_reported_as_its_derived_result() -> TestResult {
+        let exit_code = |status| SystemdUnitOutcome::ExitCode { status };
+        let clean = |signal| SystemdUnitOutcome::CleanSignal { signal };
+        for (code, status, result, outcome) in [
+            // A failed exit.
+            (CLD_EXITED, 1, "exit-code", exit_code(1)),
+            (CLD_EXITED, 255, "exit-code", exit_code(255)),
+            // A signal, a signal systemd treats as clean, and the file-size ceiling.
+            (CLD_KILLED, 9, "signal", signaled(9, false)),
+            (CLD_KILLED, 3, "signal", signaled(3, false)),
+            (CLD_KILLED, 14, "signal", signaled(14, false)),
+            (CLD_KILLED, 25, "signal", file_size(false)),
+            (CLD_KILLED, 15, "success", clean(15)),
+            (CLD_KILLED, 1, "success", clean(1)),
+            // A dump, whatever the signal.
+            (CLD_DUMPED, 6, "core-dump", signaled(6, true)),
+            (CLD_DUMPED, 15, "core-dump", signaled(15, true)),
+            (CLD_DUMPED, 25, "core-dump", file_size(true)),
+            // A clean exit stays a success.
+            (CLD_EXITED, 0, "success", SystemdUnitOutcome::Success),
+        ] {
+            let observed = read("success", code, status).await??;
+            assert_eq!(observed.result().as_str(), result, "{code} {status}");
+            assert_eq!(observed.outcome(), outcome, "{code} {status}");
+            assert_eq!(observed.main_exit(), main_of(code, u8::try_from(status)?));
+        }
+        // No main exit recorded is still a contradiction for a success.
+        assert!(matches!(
+            read("success", CLD_NONE, 0).await?,
+            Err(SystemdUnitResultError::Inconsistent { .. })
+        ));
+        // A result other than `success` is systemd's own, whatever the main exit.
+        for result in ["timeout", "oom-kill", "resources"] {
+            let observed = read(result, CLD_EXITED, 3).await??;
+            assert_eq!(observed.result().as_str(), result);
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn every_contradictory_result_and_main_exit_is_refused() -> TestResult {
+        // `success` with a failed main exit is not a contradiction: it is how systemd reports any
+        // exit of the attempt unit, and `derived` turns it into the result systemd would have
+        // reported (`a_success_with_a_failed_main_exit_is_reported_as_its_derived_result`).
         let cases = [
             ("success", CLD_NONE, 0),
-            ("success", CLD_EXITED, 1),
-            ("success", CLD_KILLED, 3),
-            ("success", CLD_KILLED, 9),
-            ("success", CLD_KILLED, 14),
-            ("success", CLD_KILLED, 16),
-            ("success", CLD_KILLED, 25),
-            ("success", CLD_DUMPED, 15),
-            ("success", CLD_DUMPED, 6),
             ("exit-code", CLD_NONE, 0),
             ("exit-code", CLD_EXITED, 0),
             ("exit-code", CLD_KILLED, 9),
@@ -968,6 +1060,40 @@ mod tests {
             read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await??;
         assert_eq!(observed.active_state(), "inactive");
         assert_eq!(observed.invocation_id(), INVOCATION);
+        Ok(())
+    }
+
+    /// A unit under `RemainAfterExit=yes` stays `active (exited)` after a main exit: its run is
+    /// finished. Any other `active` unit is still running or being stopped.
+    #[tokio::test]
+    async fn an_active_unit_that_exited_is_settled() -> TestResult {
+        let unit = UnitFixture::new(vec![("active".to_owned(), INVOCATION.to_vec())])
+            .with_sub_state("exited");
+        let observed =
+            read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await??;
+        assert_eq!(observed.active_state(), "active");
+        assert_eq!(observed.invocation_id(), INVOCATION);
+        for sub_state in ["running", "start", "stop-sigterm", "dead", "failed", ""] {
+            let unit = UnitFixture::new(vec![("active".to_owned(), INVOCATION.to_vec())])
+                .with_sub_state(sub_state);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(&observed, Err(SystemdUnitResultError::NotSettled { .. })),
+                "{sub_state}: {observed:?}"
+            );
+        }
+        // `exited` settles nothing but an `active` unit.
+        for state in ["activating", "deactivating", "reloading", "maintenance"] {
+            let unit = UnitFixture::new(vec![(state.to_owned(), INVOCATION.to_vec())])
+                .with_sub_state("exited");
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(&observed, Err(SystemdUnitResultError::NotSettled { .. })),
+                "{state}: {observed:?}"
+            );
+        }
         Ok(())
     }
 
@@ -1068,7 +1194,7 @@ mod tests {
             let observed = read_from(UnitFixture::new(failed()), Some(service)).await?;
             assert_property(&observed, property);
         }
-        for property in ["ActiveState", "InvocationID"] {
+        for property in ["ActiveState", "InvocationID", "SubState"] {
             let mut unit = UnitFixture::new(failed());
             unit.failing = Some(property);
             let observed =
