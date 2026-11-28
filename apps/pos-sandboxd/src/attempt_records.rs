@@ -509,6 +509,12 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
         )
         .and_then(|observed| {
             let fields = self.termination_fields(&reached, observed.digest())?;
+            // DIAGNOSTIC: the TME1 fields before classification, for the guest journal.
+            std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("pos-sandboxd diag: TME1 fields: {fields:?}\n"),
+            )
+            .ok();
             classified(requested, observed, fields)
         })
     }
