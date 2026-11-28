@@ -4,20 +4,22 @@
 
 use std::collections::BTreeMap;
 
-use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::community_lifecycle::{
-    ArtifactRefV1, CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1,
-    CommunityPassKeyV1, CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
-    CommunityQuarantineOutcomeV1, CommunityQuarantineReasonEvidenceV1 as Evidence,
-    CommunityQuarantineReasonV1 as Reason, CommunityReservationInputV1, CommunitySharedCountsV1,
-    COMMUNITY_ERASURE_TARGET_LINE_V1,
+    CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1, CommunityPassKeyV1,
+    CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1, CommunityQuarantineOutcomeV1,
+    CommunityQuarantineReasonEvidenceV1 as Evidence, CommunityQuarantineReasonV1 as Reason,
+    CommunityReservationInputV1, CommunitySharedCountsV1, COMMUNITY_ERASURE_TARGET_LINE_V1,
 };
 use pos_core::{ArtifactDataClassV1, AuthorityTrustRootSealV1, Hash};
-use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 
-use super::CommunityQuarantineResetCallV1;
+use super::{
+    CommunityQuarantineResetCallV1, CommunityResetTrustEvidenceV1, ResetPreparedV1, StagedResetV1,
+};
 use crate::community::erasure_budget::{
     CommunityErasureBudgetPortV1, CommunityPendingReservationV1,
+};
+use crate::community::lifecycle_authority::{
+    CommunityAdministrativeOperationV1, CommunityAdministrativeRequestV1,
 };
 use crate::community::pass_record::{
     CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1,
@@ -26,14 +28,16 @@ use crate::community::quarantine::{
     CommunityQuarantineReceiptV1, QuarantineLedgerV1, QuarantineReasonStateV1, RetainedControlV1,
 };
 use crate::community::{
-    CommunityDomainBindingV1, CommunityPreExecutionTrustV1, CommunityQuarantineContextV1,
+    CommunityDomainBindingV1, CommunityLifecycleAuthorityV1, CommunityMetadataAuthorityV1,
+    CommunityQuarantineContextV1, MemoryCommunityDomainV1,
 };
 use crate::community_initialization_fixture::{
-    hash, profile_until, target, Fallible, QuarantineCase, Revocation, Roster, ENTRIES, GENERATION,
-    HORIZON, INSTALLED_CATALOGUE, NATIVE_PROFILE,
+    hash, profile_until, target, Fallible, QuarantineCase, Revocation, DATA_LEAF, ENTRIES, EXPIRES,
+    GENERATION, HORIZON, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE,
 };
 use crate::erasure_budget_rows::{community_rows, erasure_row};
-use crate::plugin_trust_registry_fixtures::{release_one, Material};
+use crate::plugin_trust_registry::PluginTrustPolicyRegistryV1;
+use crate::plugin_trust_registry_fixtures::{release_one, spec, tps_after};
 
 /// The trust-root seal of the test composition.
 const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
@@ -54,9 +58,31 @@ struct Claim {
     reasons: Vec<Evidence>,
     generation: [u8; 16],
     head: Option<Hash>,
-    tps1: Option<Hash>,
-    principal: u32,
-    deadline: u64,
+}
+
+/// What one reset call varies besides its claim: the administrative leaf,
+/// the FAE1 expiry and whether the trust histories are the member's.
+#[derive(Clone)]
+struct Setup {
+    leaf: Hash,
+    expires: u64,
+    histories: bool,
+}
+
+impl Setup {
+    /// The call of the reset grant's holder with the member's histories.
+    const fn standard() -> Self {
+        Self {
+            leaf: DATA_LEAF,
+            expires: EXPIRES,
+            histories: true,
+        }
+    }
+
+    fn with(mut self, change: impl FnOnce(&mut Self)) -> Self {
+        change(&mut self);
+        self
+    }
 }
 
 /// The reasons the seeded ledger holds: a trap, then a revocation.
@@ -82,9 +108,6 @@ impl Claim {
             reasons: held(),
             generation: GENERATION,
             head: None,
-            tps1: None,
-            principal: 7,
-            deadline: HORIZON,
         }
     }
 
@@ -101,9 +124,10 @@ fn member_key(case: &QuarantineCase) -> Fallible<Hash> {
 
 /// An initialized domain with the first member's ledger seeded: both
 /// reasons, evidence that expired long ago, and the revocation's `F_q` share
-/// spent.
+/// spent. The registry is evaluated at UTC second 0 and Tick 0, the
+/// coordinates a reset evaluates at under the fixture's wall.
 fn seeded(revocation: Revocation) -> Fallible<QuarantineCase> {
-    let mut case = QuarantineCase::new(&SEAL, revocation)?;
+    let mut case = QuarantineCase::at(&SEAL, (revocation, true))?;
     let key = member_key(&case)?;
     let domain = &mut case.domain.world.domain;
     domain.quarantine_index.insert(
@@ -139,19 +163,62 @@ fn seeded(revocation: Revocation) -> Fallible<QuarantineCase> {
     Ok(case)
 }
 
-/// The reset of `claim` through the public entry.
-fn reset(
+/// The FAE1 of `claim`'s reset, or none for a control identity the request
+/// derivation refuses.
+fn credential(case: &QuarantineCase, claim: &Claim, setup: &Setup) -> Fallible<Vec<u8>> {
+    Ok(CommunityAdministrativeRequestV1::derive(
+        &CommunityAdministrativeOperationV1::QuarantineReset {
+            timeline: target(),
+            control_operation_id: claim.control,
+        },
+    )
+    .ok()
+    .map(|request| case.domain.world.credential_until(request, setup.expires))
+    .transpose()?
+    .unwrap_or_default())
+}
+
+/// Run `run` with the installed composition and the call of `claim` under
+/// `setup`.
+fn with_call<T>(
     case: &mut QuarantineCase,
     claim: &Claim,
-) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
+    setup: &Setup,
+    run: impl FnOnce(
+        &mut MemoryCommunityDomainV1,
+        CommunityQuarantineContextV1<'_>,
+        &mut CommunityLifecycleAuthorityV1,
+        &mut CommunityMetadataAuthorityV1,
+        &CommunityQuarantineResetCallV1<'_>,
+    ) -> T,
+) -> Fallible<T> {
     let rows = case.roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
-    let (projection, policy) = release_and_policy(case)?;
-    let trust = trust_of(
-        (&case.domain.harness.env.anchor, &case.material),
-        &projection,
-    )?;
-    let call = call_of((&case.roster, &case.material, case.head), claim, trust);
+    let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
+    let projection = release_one().projection()?;
+    let credential = credential(case, claim, setup)?;
+    let (ptr1, prv1) = if setup.histories {
+        case.material.histories()
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let call = CommunityQuarantineResetCallV1 {
+        credential: &credential,
+        administrative_leaf: setup.leaf,
+        timeline: target(),
+        stable_entry: ENTRIES[0],
+        implementation: &case.roster.implementation,
+        control_operation_id: claim.control,
+        expected_ledger_digest: claim.ledger,
+        expected_reasons: &claim.reasons,
+        expected_generation: claim.generation,
+        expected_state_head_digest: claim.head.unwrap_or(case.head),
+        trust_evidence: CommunityResetTrustEvidenceV1 {
+            ptr1_histories: &ptr1,
+            prv1_histories: &prv1,
+            projection: &projection,
+        },
+    };
     let context = CommunityQuarantineContextV1 {
         profile: &profile,
         binding: CommunityDomainBindingV1 {
@@ -161,69 +228,75 @@ fn reset(
         },
     };
     let world = &mut case.domain.world;
-    Ok(world
-        .domain
-        .reset_quarantine(&SEAL, context, &world.authority, &call))
-}
-
-/// The member release's projection and the installed metadata policy.
-fn release_and_policy(
-    case: &QuarantineCase,
-) -> Fallible<(
-    ValidatedPluginManifestProjectionV1,
-    CommunityMetadataPolicyV1,
-)> {
-    Ok((
-        release_one().projection()?,
-        CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?,
+    Ok(run(
+        &mut world.domain,
+        context,
+        &mut world.authority,
+        &mut case.domain.metadata,
+        &call,
     ))
 }
 
-/// The trust evidence of the case's gate for the release `projection`.
-fn trust_of<'a>(
-    (anchor, material): (&'a PluginTrustPolicyAnchorV1, &'a Material),
-    projection: &'a ValidatedPluginManifestProjectionV1,
-) -> Fallible<CommunityPreExecutionTrustV1<'a>> {
-    Ok(CommunityPreExecutionTrustV1 {
-        anchor,
-        tps1_bytes: &material.tps1,
-        evidence: &material.evidence,
-        projection,
-        trusted_utc: material.trusted()?,
-        tick: material.tick,
-    })
+/// The reset of `claim` through the public entry.
+fn reset(
+    case: &mut QuarantineCase,
+    claim: &Claim,
+) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
+    reset_with(case, claim, &Setup::standard())
 }
 
-/// The call of `claim` over `trust`.
-fn call_of<'a>(
-    (roster, material, head): (&'a Roster, &'a Material, Hash),
-    claim: &'a Claim,
-    trust: CommunityPreExecutionTrustV1<'a>,
-) -> CommunityQuarantineResetCallV1<'a> {
-    let retained = Hash::from_bytes(material.tps1_digest());
-    CommunityQuarantineResetCallV1 {
-        timeline: target(),
-        stable_entry: ENTRIES[0],
-        implementation: &roster.implementation,
-        control_operation_id: claim.control,
-        expected_ledger_digest: claim.ledger,
-        expected_reasons: &claim.reasons,
-        expected_generation: claim.generation,
-        expected_state_head_digest: claim.head.unwrap_or(head),
-        trust_snapshot_digest: claim.tps1.unwrap_or(retained),
-        trust,
-        principal_ref: ArtifactRefV1 {
-            schema_id: claim.principal,
-            byte_length: 10,
-            digest: [0x51; 32],
+/// The reset of `claim` through the public entry under `setup`.
+fn reset_with(
+    case: &mut QuarantineCase,
+    claim: &Claim,
+    setup: &Setup,
+) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
+    with_call(
+        case,
+        claim,
+        setup,
+        |domain, context, authority, metadata, call| {
+            domain.reset_quarantine(&SEAL, context, authority, metadata, call)
         },
-        authorization_ref: ArtifactRefV1 {
-            schema_id: 8,
-            byte_length: 11,
-            digest: [0x52; 32],
+    )
+}
+
+/// Every step before the writer, whose staged commit is returned.
+fn staged(case: &mut QuarantineCase, setup: &Setup) -> Fallible<StagedResetV1> {
+    with_call(
+        case,
+        &Claim::of_seeded(),
+        setup,
+        |domain, context, authority, metadata, call| match domain
+            .prepare_reset(context, authority, metadata, call)?
+        {
+            ResetPreparedV1::Staged(staged, _) => Ok(*staged),
+            ResetPreparedV1::Original(_) => Err(Error::InvalidBinding),
         },
-        authorization_not_after_micros: claim.deadline,
-    }
+    )?
+    .map_err(Into::into)
+}
+
+/// The reset of the seeded claim, with `seam` run on the domain between its
+/// last step before the writer and the writer.
+fn reset_between(
+    case: &mut QuarantineCase,
+    seam: impl FnOnce(&mut MemoryCommunityDomainV1),
+) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
+    with_call(
+        case,
+        &Claim::of_seeded(),
+        &Setup::standard(),
+        |domain, context, authority, metadata, call| match domain
+            .prepare_reset(context, authority, metadata, call)?
+        {
+            ResetPreparedV1::Staged(staged, authenticated) => {
+                seam(domain);
+                domain.commit_reset(context, authority, metadata, (*staged, authenticated))
+            }
+            ResetPreparedV1::Original(receipt) => Ok(receipt),
+        },
+    )
 }
 
 /// The seeded ledger as the index holds it now.
@@ -357,9 +430,6 @@ fn a_retry_returns_the_original_or_conflicts() -> TestResult {
         }),
         Claim::of_seeded().with(|c| c.generation = [0x21; 16]),
         Claim::of_seeded().with(|c| c.head = Some(hash(0x72))),
-        Claim::of_seeded().with(|c| c.tps1 = Some(hash(0x73))),
-        Claim::of_seeded().with(|c| c.principal = 9),
-        Claim::of_seeded().with(|c| c.deadline += 1),
     ] {
         assert_eq!(reset(&mut case, &changed)?.err(), Some(Error::Conflict));
     }
@@ -367,13 +437,68 @@ fn a_retry_returns_the_original_or_conflicts() -> TestResult {
     Ok(())
 }
 
+/// I239: a retry is answered before the trust evaluation, so it returns the
+/// original receipt although its evidence no longer verifies. Another
+/// principal (the retained leaf's grantee is not the decision's) gives 4,
+/// and a caller without the grant gets 12.
+#[test]
+fn a_retry_is_answered_from_the_retained_reset_and_its_principal() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let receipt = reset(&mut case, &Claim::of_seeded())??;
+    let blind = Setup::standard().with(|s| s.histories = false);
+    assert_eq!(
+        reset_with(&mut case, &Claim::of_seeded(), &blind)??,
+        receipt
+    );
+    let outsider = Setup::standard().with(|s| s.leaf = hash(0x7f));
+    assert_eq!(
+        reset_with(&mut case, &Claim::of_seeded(), &outsider)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let retained = case
+        .domain
+        .world
+        .domain
+        .quarantine_controls
+        .get_mut(&(target(), CONTROL))
+        .ok_or("no retained reset")?;
+    let RetainedControlV1::Reset(held) = &mut retained.kind else {
+        return Err("not a reset".into());
+    };
+    held.leaf_grant_id = METADATA_LEAF;
+    assert_eq!(
+        reset(&mut case, &Claim::of_seeded())?.err(),
+        Some(Error::Conflict)
+    );
+    Ok(())
+}
+
+/// R9.7, I245: a control identity that is a committed materialization's
+/// `M_id` of T gives 4 before any premise, and nothing changes.
+#[test]
+fn a_materialization_identity_conflicts() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    case.domain
+        .world
+        .domain
+        .materialization_ids
+        .insert((target(), CONTROL));
+    assert_eq!(
+        reset(&mut case, &Claim::of_seeded())?.err(),
+        Some(Error::Conflict)
+    );
+    assert_eq!(ledger(&case)?.head, HEAD);
+    assert!(case.domain.world.domain.quarantine_controls.is_empty());
+    Ok(())
+}
+
 /// The premises, each refused with its code and nothing changed: another
 /// ledger digest or reason set (4), another generation (5) and head (6),
-/// another TPS1 digest (12), no index row (12).
+/// no index row (12).
 #[test]
 fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
     let mut case = seeded(Revocation::None)?;
-    let refused: [(Claim, Error); 8] = [
+    let refused: [(Claim, Error); 7] = [
         (
             Claim::of_seeded().with(|c| c.ledger = hash(0x70)),
             Error::Conflict,
@@ -404,10 +529,6 @@ fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
             Claim::of_seeded().with(|c| c.head = Some(hash(0x72))),
             Error::StaleFrontier,
         ),
-        (
-            Claim::of_seeded().with(|c| c.tps1 = Some(hash(0x73))),
-            Error::EvidenceUnavailable,
-        ),
     ];
     for (claim, error) in refused {
         assert_eq!(reset(&mut case, &claim)?.err(), Some(error));
@@ -420,6 +541,155 @@ fn a_premise_that_does_not_hold_refuses_the_reset() -> TestResult {
         reset(&mut case, &Claim::of_seeded())?.err(),
         Some(Error::EvidenceUnavailable)
     );
+    Ok(())
+}
+
+/// I237: a caller without the reset grant gets 12 whatever the premise:
+/// an existing control identity, an absent one, a CQK1 with no index row
+/// and a T with an unresolved pass. It learns nothing about the state.
+#[test]
+fn a_caller_without_the_grant_gets_12_for_every_premise() -> TestResult {
+    let outsider = Setup::standard().with(|s| s.leaf = hash(0x7f));
+    let mut case = seeded(Revocation::None)?;
+    reset(&mut case, &Claim::of_seeded())??;
+    let existing = Claim::of_seeded();
+    let absent = Claim::of_seeded().with(|c| c.control = [0x51; 16]);
+    for claim in [&existing, &absent] {
+        assert_eq!(
+            reset_with(&mut case, claim, &outsider)?.err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    case.domain.world.domain.quarantine_index.clear();
+    assert_eq!(
+        reset_with(&mut case, &absent, &outsider)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let mut busy = seeded(Revocation::None)?;
+    let pass = unresolved_pass(busy.head)?;
+    busy.domain
+        .world
+        .domain
+        .pass_records
+        .insert((target(), [9; 16]), pass);
+    assert_eq!(
+        reset_with(&mut busy, &Claim::of_seeded(), &outsider)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A zero control identity is a shape refusal (3) before any authority; a
+/// credential that does not verify, or expired at the sample, gives 12.
+#[test]
+fn the_shape_precedes_the_authority_and_a_bad_credential_gives_12() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let zero = Claim::of_seeded().with(|c| c.control = [0; 16]);
+    assert_eq!(reset(&mut case, &zero)?.err(), Some(Error::InvalidBinding));
+    let expired = Setup::standard().with(|s| s.expires = 400);
+    assert_eq!(
+        reset_with(&mut case, &Claim::of_seeded(), &expired)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(ledger(&case)?.head, HEAD);
+    Ok(())
+}
+
+/// I238: the host derives the refs from the administrative decision, the
+/// deadline `B` as the earlier of the decision bound, the FAE1 expiry and the
+/// metadata owner's expiry, and the TPS1 digest the registry retains.
+#[test]
+fn the_host_derives_the_refs_the_deadline_and_the_trust_snapshot() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let request = CommunityAdministrativeRequestV1::derive(
+        &CommunityAdministrativeOperationV1::QuarantineReset {
+            timeline: target(),
+            control_operation_id: CONTROL,
+        },
+    )?;
+    let (_, admission) = case.domain.world.call_and_admit(request, DATA_LEAF)?;
+    let ready = staged(&mut case, &Setup::standard())?;
+    assert_eq!(ready.authority.leaf_grant_id, DATA_LEAF);
+    assert_eq!(ready.authority.principal_ref, admission.principal_ref());
+    assert_eq!(
+        ready.authority.authorization_ref,
+        admission.authorization_ref()
+    );
+    assert_eq!(ready.authority.bound_micros, EXPIRES);
+    assert_eq!(
+        ready.premises.trust_snapshot_digest,
+        Hash::from_bytes(case.material.tps1_digest())
+    );
+    let short = Setup::standard().with(|s| s.expires = 10_000_000);
+    assert_eq!(
+        staged(&mut case, &short)?.authority.bound_micros,
+        10_000_000
+    );
+    Ok(())
+}
+
+/// Evidence the registry cannot verify at the host's coordinates gives 12,
+/// and the quarantine stays.
+#[test]
+fn histories_that_do_not_verify_refuse_the_reset() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let blind = Setup::standard().with(|s| s.histories = false);
+    assert_eq!(
+        reset_with(&mut case, &Claim::of_seeded(), &blind)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(ledger(&case)?.head, HEAD);
+    Ok(())
+}
+
+/// I241: the writer refuses (12) when the inventory generation or the CSI1
+/// the operation read moved, and writes nothing.
+#[test]
+fn a_moved_inventory_generation_or_selection_refuses_the_writer() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let before = untouched(&case)?;
+    let result = reset_between(&mut case, |domain| domain.inventory_generation += 1)?;
+    assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
+    assert_eq!(untouched(&case)?.0, before.0);
+    let result = reset_between(&mut case, |domain| {
+        if let Some((_, sealed)) = domain.selection.as_mut() {
+            sealed.address = hash(0x99);
+        } else if let Some(record) = domain.bootstrap.as_mut() {
+            record.selection.address = hash(0x99);
+        }
+    })?;
+    assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
+    assert_eq!(untouched(&case)?.0, before.0);
+    assert!(case.domain.world.domain.quarantine_controls.is_empty());
+    Ok(())
+}
+
+/// I241b: a TPS1 the registry adopts between the evaluation and the writer
+/// gives 12 and writes nothing.
+#[test]
+fn a_changed_trust_snapshot_refuses_the_writer() -> TestResult {
+    let mut case = seeded(Revocation::None)?;
+    let newer = case
+        .domain
+        .harness
+        .env
+        .material(&spec(2, 2).at(0, 0), &tps_after(&case.material))?;
+    let anchor = case.domain.harness.env.anchor.clone();
+    let trusted = newer.trusted()?;
+    let before = untouched(&case)?;
+    let result = reset_between(&mut case, |domain| {
+        let advanced = PluginTrustPolicyRegistryV1::advance_policy(
+            &mut domain.store,
+            &anchor,
+            &newer.tps1,
+            &newer.evidence,
+            trusted,
+            newer.tick,
+        );
+        assert!(advanced.is_ok());
+    })?;
+    assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
+    assert_eq!(untouched(&case)?, before);
     Ok(())
 }
 

@@ -669,15 +669,21 @@ pub enum Revocation {
 
 /// A harness store whose `scope` has `release_one` admitted and revoked.
 ///
-/// For a revocation, an adopted policy revokes it at UTC 51, Tick 6. The
+/// For a revocation, an adopted policy revokes it at UTC 51, Tick 6. With `origin` every chain is
+/// instead evaluated at UTC second 0 and Tick 0 and a revocation is effective from Tick 0: the
+/// coordinates a reset evaluates at under the fixture's wall (500 microseconds) while no Commit
+/// exists. The
 /// policy material the trust gate evaluates is returned with it (the
 /// genesis material for [`Revocation::None`]). Keep the harness alive while
 /// the store is used.
 ///
 /// # Errors
 /// Returns the fixture construction or registry error.
-pub fn revoked_store(revocation: Revocation) -> Fallible<(MemoryStore, Harness, Material)> {
-    let (mut harness, material) = revoked_harness(revocation)?;
+pub fn revoked_store(
+    revocation: Revocation,
+    origin: bool,
+) -> Fallible<(MemoryStore, Harness, Material)> {
+    let (mut harness, material) = revoked_harness(revocation, origin)?;
     let store = std::mem::replace(&mut harness.store, MemoryStore::new());
     Ok((store, harness, material))
 }
@@ -709,9 +715,18 @@ pub fn foreign_scope(harness: &mut Harness) -> Fallible<(Env, Material)> {
     Ok((foreign, material))
 }
 
-fn revoked_harness(revocation: Revocation) -> Fallible<(Harness, Material)> {
+fn revoked_harness(revocation: Revocation, origin: bool) -> Fallible<(Harness, Material)> {
     let mut harness = Harness::new()?;
-    let genesis = harness.env.genesis()?;
+    let (utc, tick) = if origin { (0, 0) } else { (51, 6) };
+    let base = Spec {
+        revocation_tick: if origin { 0 } else { Spec::default().tick },
+        ..Spec::default()
+    };
+    let genesis = if origin {
+        harness.env.material(&base.at(0, 0), &TpsSpec::default())?
+    } else {
+        harness.env.genesis()?
+    };
     harness.admit(&genesis, &release_one(), 1)??;
     let release = release_one().release_digest()?;
     let adopted = match revocation {
@@ -720,7 +735,7 @@ fn revoked_harness(revocation: Revocation) -> Fallible<(Harness, Material)> {
             Spec {
                 epochs: 2,
                 revoked_artifacts: vec![release],
-                ..Spec::default().at(51, 6)
+                ..base.at(utc, tick)
             },
             tps_after(&genesis),
         )),
@@ -728,12 +743,12 @@ fn revoked_harness(revocation: Revocation) -> Fallible<(Harness, Material)> {
             Spec {
                 epochs: 2,
                 revoked_publisher_epochs: vec![1],
-                ..Spec::default().at(51, 6)
+                ..base.at(utc, tick)
             },
             tps_after(&genesis),
         )),
         Revocation::OperatorDenial => Some((
-            spec(1, 2).at(51, 6),
+            spec(1, 2).at(utc, tick),
             TpsSpec {
                 extra_artifacts: vec![release],
                 ..tps_after(&genesis)
@@ -862,8 +877,11 @@ pub fn member_resource(
     ))
 }
 
-/// One grant that admits every decision of a code-0 initialize of `timeline`
-/// and the administrative decision of a pass Abort (`community.pass.abort.v1`).
+/// One grant that admits every decision of a code-0 initialize of `timeline`.
+///
+/// It also admits the administrative decisions of a pass Abort
+/// (`community.pass.abort.v1`) and of a quarantine reset
+/// (`community.quarantine.reset.v1`).
 ///
 /// It covers the administrative request, `roster`'s initializer `read` and
 /// every member's `execute`. The CAV1 has one authority row per chain
@@ -897,6 +915,7 @@ pub fn data_grant(
             actions: vec![
                 "community.initialize.v1".to_owned(),
                 "community.pass.abort.v1".to_owned(),
+                "community.quarantine.reset.v1".to_owned(),
                 "execute".to_owned(),
                 "read".to_owned(),
             ],
@@ -1051,7 +1070,19 @@ impl Bootstrapped {
         roster: &Roster,
         revocation: Revocation,
     ) -> Fallible<(Self, Material)> {
-        let (store, harness, material) = revoked_store(revocation)?;
+        Self::revoked_at(seal, roster, (revocation, false))
+    }
+
+    /// [`Bootstrapped::revoked`] with `origin` per [`revoked_store`].
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn revoked_at(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+        (revocation, origin): (Revocation, bool),
+    ) -> Fallible<(Self, Material)> {
+        let (store, harness, material) = revoked_store(revocation, origin)?;
         Self::over(seal, roster, store, harness, true, HORIZON).map(|domain| (domain, material))
     }
 
@@ -1065,7 +1096,7 @@ impl Bootstrapped {
         seal: &'static AuthorityTrustRootSealV1,
         roster: &Roster,
     ) -> Fallible<(Self, Material, Env, Material)> {
-        let (mut harness, material) = revoked_harness(Revocation::Artifact)?;
+        let (mut harness, material) = revoked_harness(Revocation::Artifact, false)?;
         let (env, foreign) = foreign_scope(&mut harness)?;
         let store = std::mem::replace(&mut harness.store, MemoryStore::new());
         Self::over(seal, roster, store, harness, true, HORIZON)
@@ -1300,8 +1331,20 @@ impl QuarantineCase {
     /// # Errors
     /// Returns the fixture construction or initialization error.
     pub fn new(seal: &'static AuthorityTrustRootSealV1, revocation: Revocation) -> Fallible<Self> {
+        Self::at(seal, (revocation, false))
+    }
+
+    /// [`QuarantineCase::new`] with the registry evaluated at the origin
+    /// coordinates of [`revoked_store`] when `origin`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or initialization error.
+    pub fn at(
+        seal: &'static AuthorityTrustRootSealV1,
+        (revocation, origin): (Revocation, bool),
+    ) -> Fallible<Self> {
         let roster = Roster::release_one()?;
-        let (mut domain, material) = Bootstrapped::revoked(seal, &roster, revocation)?;
+        let (mut domain, material) = Bootstrapped::revoked_at(seal, &roster, (revocation, origin))?;
         let rows = roster.rows()?;
         let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
         let receipt = initialize_target(seal, &mut domain, &roster, &profile)??;
