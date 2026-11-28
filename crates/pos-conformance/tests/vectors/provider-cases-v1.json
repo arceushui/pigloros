@@ -1,0 +1,300 @@
+{
+  "version": 1,
+  "ceilings": {
+    "memory_bytes": 67108864,
+    "tasks": 64,
+    "watchdog_ms": 30000,
+    "output_bytes": 1048576,
+    "work_bytes": 16777216
+  },
+  "cases": [
+    {
+      "id": "filesystem-escape",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "filesystem-escape"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    },
+    {
+      "id": "read-only-root-write",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "read-only-root-write"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    },
+    {
+      "id": "work-area-exhaustion",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "work-area-exhaustion",
+        "33554432"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    },
+    {
+      "id": "network-escape",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "network-escape"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    },
+    {
+      "id": "foreign-signals",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "foreign-signals"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    },
+    {
+      "id": "orphaned-child",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "orphaned-child"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    },
+    {
+      "id": "task-exhaustion",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "task-exhaustion",
+        "128"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          5
+        ]
+      }
+    },
+    {
+      "id": "memory-exhaustion",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "memory-exhaustion",
+        "134217728"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          3,
+          4
+        ]
+      }
+    },
+    {
+      "id": "watchdog-expiry",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "watchdog-expiry",
+        "60000"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          6
+        ]
+      }
+    },
+    {
+      "id": "oversized-output",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "oversized-output",
+        "2097152"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          7
+        ]
+      }
+    },
+    {
+      "id": "adapter-crash",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "adapter-crash"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          8
+        ]
+      }
+    },
+    {
+      "id": "malformed-output",
+      "attempts": 1,
+      "driver": "single-execute",
+      "arguments": [
+        "malformed-output"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          10
+        ]
+      }
+    },
+    {
+      "id": "cancel-before-release",
+      "attempts": 1,
+      "driver": "control",
+      "arguments": [
+        "honest"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Cancelled",
+        "codes": [
+          1
+        ]
+      }
+    },
+    {
+      "id": "cancel-while-running",
+      "attempts": 1,
+      "driver": "control",
+      "arguments": [
+        "idle",
+        "60000"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Cancelled",
+        "codes": [
+          1
+        ]
+      }
+    },
+    {
+      "id": "broker-crash-recovery",
+      "attempts": 1,
+      "driver": "control",
+      "arguments": [
+        "idle",
+        "60000"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "UnavailableAfterAdmission",
+        "codes": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    {
+      "id": "revoked-before-admission",
+      "attempts": 1,
+      "driver": "admission",
+      "arguments": [
+        "honest"
+      ],
+      "expect": {
+        "kind": "refused",
+        "codes": [
+          "TrustRevoked",
+          "AuthorityMismatch"
+        ]
+      }
+    },
+    {
+      "id": "revoked-while-running",
+      "attempts": 1,
+      "driver": "control",
+      "arguments": [
+        "idle",
+        "60000"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Cancelled",
+        "codes": [
+          1
+        ]
+      }
+    },
+    {
+      "id": "missing-host-feature",
+      "attempts": 1,
+      "driver": "admission",
+      "arguments": [
+        "honest"
+      ],
+      "expect": {
+        "kind": "refused",
+        "codes": [
+          "SandboxUnavailable",
+          "ProviderCapabilityMissing"
+        ]
+      }
+    },
+    {
+      "id": "concurrent-attempts",
+      "attempts": 8,
+      "driver": "concurrent",
+      "arguments": [
+        "honest"
+      ],
+      "expect": {
+        "kind": "terminal",
+        "outcome": "Completed",
+        "codes": []
+      }
+    }
+  ]
+}
