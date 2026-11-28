@@ -15,7 +15,7 @@ code currently does.
 | **EntityId** | `pos-core` | A ULID that identifies a simulation entity. |
 | **EventStore** | `pos-store` | The storage interface used by the memory and SQLite adapters. |
 | **Projection** | `pos-state` | State derived by folding Events in Timeline Order. |
-| **Fork** | `pos-time`, `pos-experiment` | A copy-on-write Timeline branch used to evaluate a counterfactual history. |
+| **Fork** | `pos-time`, `pos-experiment` | A copy-on-write Timeline derived from a parent Timeline to evaluate a counterfactual history. |
 | **Tick Boundary** | `pos-experiment` | A host-owned boundary around folding and an atomic Driver step. |
 | **ObservationSnapshot** | `pos-runtime` | The projection state shared by Drivers during one scheduled step. |
 | **Simulation Time** | `pos-runtime`, `pos-experiment` | Monotonic host-supplied time used to decide Driver cadence. It is separate from Event wall time. |

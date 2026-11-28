@@ -2,8 +2,7 @@
 //!
 //! The kernel composes the existing Tick Boundary host with the versioned
 //! World plugin and two deliberately small, swappable proof Plugins. It is an
-//! engineering evaluator for the user-parameterized Wave 8 fixture contract;
-//! the public Gateway/client Scenario Room contract remains a Wave 9 concern.
+//! engineering evaluator for the user-parameterized fixture contract.
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
@@ -34,8 +33,6 @@ use pos_runtime::{HostWorldProfileV1, RuntimeError, WorldInstallationErrorV1};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-// Proof callbacks run only through generated fixture registration until
-// installed registration returns with Wave 9 (#467/#462).
 #[cfg(test)]
 use pos_conformance::PluginFailureClassV1;
 #[cfg(test)]
@@ -588,8 +585,6 @@ impl ProofTopology {
     }
 }
 
-// Proof Plugin registration targets. Installed registration has no sink
-// until Wave 9 (#467/#462) supplies an installed EPF1.
 trait ProofRegistrationSink: Sized {
     /// Register the proof Plugins under one admission mode.
     ///
@@ -690,9 +685,6 @@ impl ProofRegistrationSink for pos_runtime::PluginRegistry {
 }
 
 /// Resolve the proof's installed World, agent and Society bindings.
-///
-/// Wave 8 has no installed EPF1, so resolution fails closed before any
-/// registration can mutate a target.
 fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> RuntimeError {
     let agent_binding = proof_agent_output_binding(
         &topology.agent_plugin,
@@ -1892,9 +1884,6 @@ impl ProofAdmission {
 }
 
 /// Resolve the installed sibling and failure-probe bindings.
-///
-/// Wave 8 has no installed EPF1, so the probe fails closed before any
-/// Experiment or registration exists.
 fn installed_failure_probe_admission(
     class: &str,
     resource_limit: u64,
