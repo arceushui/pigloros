@@ -25,9 +25,12 @@
 //!
 //! Community `run_pass` authority is ADR-129 revision 8's R8.1: one FAE1 under
 //! the execution nonce, then one `execute` decision per roster member under
-//! the call's own Timeline and reservation operation. `verify_recording` and
-//! `reconcile_original` authority stay unavailable (R8.1(10), R8.1(5)); nothing
-//! here can build them.
+//! the call's own Timeline and reservation operation. ADR-129 revision 9's
+//! R9.5 adds one Event-history `read` decision per owning Timeline of a
+//! materialization ([`CommunityLifecycleAuthorityV1::authorize_event_history`]),
+//! under the same execution purpose, and the CAP1 mapping profile 9.
+//! `verify_recording` and `reconcile_original` authority stay unavailable
+//! (R8.1(10), R8.1(5)); nothing here can build them.
 
 use pos_core::community_lifecycle::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
@@ -60,6 +63,7 @@ const EXECUTION_CATEGORY: &str = "community.execution-state";
 const INITIALIZER_CATEGORY: &str = "community.initial-state";
 const PURPOSE: &str = "lifecycle-administration";
 const EXECUTION_PURPOSE: &str = "community-execution";
+const EVENT_HISTORY_CATEGORY: &str = "community.event-history";
 
 /// The six closed administrative actions (ADR-129 §1, A5.1 and R8.3) plus
 /// the `run_pass` execute marker of R8.1, which is not an administrative
@@ -723,6 +727,41 @@ impl CommunityLifecycleAuthorityV1 {
         )
     }
 
+    /// Evaluate one `run_pass` Event-history `read` request (R9.5) on
+    /// `community-events:<U32>`, where U is a Timeline whose Events appear in
+    /// the materialization: the call's own Timeline or an owning Timeline of
+    /// its Fork prefix. The category is `community.event-history`, the purpose
+    /// `community-execution`, the audience the installed member recipient and
+    /// the constraint the call's `community.operation:r:<O32>`.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for an administrative call (it has no
+    /// Event-history request) and for every failure `authorize_administrative`
+    /// refuses.
+    pub fn authorize_event_history<D: CommunityStoreDomainV1>(
+        &self,
+        call: &CommunityAuthorityCallV1,
+        owner: TimelineId,
+        domain: &D,
+        leaf_grant_id: Hash,
+    ) -> Result<CommunityAuthorityAdmissionV1, Error> {
+        let mut resource = String::with_capacity(49);
+        resource.push_str("community-events:");
+        push_hex(&mut resource, &owner.inner().to_bytes());
+        self.evaluate(
+            call,
+            domain,
+            leaf_grant_id,
+            RequestShapeV1 {
+                resource,
+                data_category: EVENT_HISTORY_CATEGORY,
+                action: "read",
+                audience: &self.member_recipient,
+                purpose: EXECUTION_PURPOSE,
+            },
+        )
+    }
+
     /// Evaluate one R6.1 initializer `read` request on
     /// `community-initializer:<D64>`, where `<D64>` is `initializer`, the
     /// `H(CSC1)` digest of an installed roster State, as lower-case hex. The
@@ -886,8 +925,8 @@ struct RequestShapeV1<'a> {
 }
 
 impl RequestShapeV1<'_> {
-    /// Whether the request is a `run_pass` member `execute`, which is the one
-    /// shape under the execution purpose.
+    /// Whether the request is a `run_pass` one (a member `execute` or an
+    /// Event-history `read`): only those shapes use the execution purpose.
     fn is_run_pass(&self) -> bool {
         self.purpose == EXECUTION_PURPOSE
     }
