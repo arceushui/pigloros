@@ -5,7 +5,7 @@ source_root="fixtures/conformance"
 temporary_base="$(mktemp -d)"
 temporary_root="${temporary_base}/providers/fixtures"
 mkdir -p "${temporary_root}"
-trap 'rm -rf -- "${temporary_base}"' EXIT
+trap 'wait 2>/dev/null || true; rm -rf -- "${temporary_base}"' EXIT
 
 max_jobs="${CONFORMANCE_VALIDATION_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 if [[ ! "${max_jobs}" =~ ^[1-9][0-9]*$ ]]; then

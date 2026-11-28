@@ -351,23 +351,17 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
             check_contract(changed)
 
     def test_rejects_missing_or_wrong_mutation_cache_policy(self) -> None:
+        def cache_step(workflow: dict, job_name: str) -> dict:
+            return next(
+                s for s in workflow["jobs"][job_name]["steps"]
+                if s.get("uses", "").startswith("Swatinem/rust-cache@")
+            )
+
         for name, mutate in (
-            ("shard saves cache", lambda w: next(
-                s for s in w["jobs"]["mutation"]["steps"]
-                if s.get("uses", "").startswith("Swatinem/rust-cache@")
-            )["with"].pop("save-if")),
-            ("shard bool save-if", lambda w: next(
-                s for s in w["jobs"]["mutation"]["steps"]
-                if s.get("uses", "").startswith("Swatinem/rust-cache@")
-            )["with"].update({"save-if": False})),
-            ("shard mismatched key", lambda w: next(
-                s for s in w["jobs"]["mutation"]["steps"]
-                if s.get("uses", "").startswith("Swatinem/rust-cache@")
-            )["with"].update({"shared-key": "other"})),
-            ("baseline save-if disabled", lambda w: next(
-                s for s in w["jobs"]["mutation-baseline"]["steps"]
-                if s.get("uses", "").startswith("Swatinem/rust-cache@")
-            )["with"].update({"save-if": "false"})),
+            ("shard saves cache", lambda w: cache_step(w, "mutation")["with"].pop("save-if")),
+            ("shard bool save-if", lambda w: cache_step(w, "mutation")["with"].update({"save-if": False})),
+            ("shard mismatched key", lambda w: cache_step(w, "mutation")["with"].update({"shared-key": "other"})),
+            ("baseline save-if disabled", lambda w: cache_step(w, "mutation-baseline")["with"].update({"save-if": "false"})),
         ):
             with self.subTest(case=name):
                 changed = copy.deepcopy(self.workflow)

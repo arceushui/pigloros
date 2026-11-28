@@ -83,7 +83,7 @@ def uncovered_lines_from_segments(segments: list[Any]) -> list[int]:
         if not isinstance(segment, list) or len(segment) < 5:
             continue
         line, col, count, has_count, _is_entry = segment[:5]
-        is_gap = bool(segment[5]) if len(segment) >= 6 else False
+        is_gap = segment[5] if len(segment) >= 6 else False
         if (
             isinstance(line, bool)
             or not isinstance(line, int)
@@ -92,6 +92,7 @@ def uncovered_lines_from_segments(segments: list[Any]) -> list[int]:
             or isinstance(count, bool)
             or not isinstance(count, int)
             or not isinstance(has_count, bool)
+            or not isinstance(is_gap, bool)
         ):
             continue
         parsed.append((line, col, count, has_count, is_gap))
@@ -132,6 +133,13 @@ def format_line_ranges(lines: list[int]) -> str:
     return ", ".join(ranges)
 
 
+def _format_below_threshold(percent: float, threshold: float) -> str:
+    formatted = f"{percent:.4f}"
+    if float(formatted) >= threshold:
+        return f"{percent:.12g}"
+    return formatted
+
+
 def check_coverage_data(
     payload: Any,
     *,
@@ -161,11 +169,13 @@ def check_coverage_data(
     failures: list[str] = []
     if lines_pct < lines_floor:
         failures.append(
-            f"line coverage {lines_pct:.4f}% is below threshold {lines_floor:.2f}%"
+            f"line coverage {_format_below_threshold(lines_pct, lines_floor)}% "
+            f"is below threshold {lines_floor:.2f}%"
         )
     if regions_pct < regions_floor:
         failures.append(
-            f"region coverage {regions_pct:.4f}% is below threshold {regions_floor:.2f}%"
+            f"region coverage {_format_below_threshold(regions_pct, regions_floor)}% "
+            f"is below threshold {regions_floor:.2f}%"
         )
 
     if failures:

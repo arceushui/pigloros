@@ -90,6 +90,7 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
                         make_segment(20, 8, count=2),
                         make_segment(25, 1, count=0),
                         make_segment(26, 1, count=0, has_count=False, is_entry=False),
+                        [30, 1, 0, True, True, "not-a-bool"],
                     ],
                 }
             ],
@@ -103,6 +104,7 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
         self.assertIn("region coverage 98.5000% is below threshold 99.00%", joined)
         self.assertIn("crates/pos-core/src/lib.rs", joined)
         self.assertIn("lines: 12-15, 25", joined)
+        self.assertNotIn("30", joined)
 
     def test_rejects_single_metric_failures_independently(self) -> None:
         _summary, line_only = floor.check_coverage_data(
@@ -142,7 +144,7 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
 
     def test_rejects_rounded_up_percent_when_computed_ratio_is_below_floor(self) -> None:
         payload = make_payload(
-            lines_covered=9899995,
+            lines_covered=9899996,
             lines_count=10000000,
             regions_covered=1000,
             regions_count=1000,
@@ -151,7 +153,11 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
         _summary, failures = floor.check_coverage_data(
             payload, fail_under_lines=99.0, fail_under_regions=99.0
         )
-        self.assertTrue(any("line coverage" in msg for msg in failures))
+        self.assertTrue(
+            any("line coverage 98.99996% is below threshold 99.00%" in msg for msg in failures),
+            failures,
+        )
+        self.assertFalse(any("99.0000%" in msg for msg in failures), failures)
 
     def test_fails_closed_on_invalid_thresholds(self) -> None:
         payload = make_payload()
