@@ -75,10 +75,6 @@ fn last_payload(h: &H) -> TestResult<Vec<u8>> {
     Ok(last.payload.as_slice().to_vec())
 }
 
-// ---------------------------------------------------------------------------
-// Provisioning and reads
-// ---------------------------------------------------------------------------
-
 #[test]
 fn an_unprovisioned_store_is_missing_state_until_provisioned() -> TestResult {
     let (mut store, _guard) = Store::build(None)?;
@@ -111,10 +107,6 @@ fn an_unprovisioned_store_is_missing_state_until_provisioned() -> TestResult {
     assert_eq!(store.declare(&request)?.row().state_revision(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// declare
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_first_declaration_commits_the_row_the_event_and_the_ledger_row() -> TestResult {
@@ -256,10 +248,6 @@ fn a_declared_primary_must_be_the_recorded_effective_implementation() -> TestRes
     let refused = h.declare(&unchanged)?;
     assert_refused(&h, &before, refused, RegistryError::PrimaryNotEffective)
 }
-
-// ---------------------------------------------------------------------------
-// activate
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_activation_opens_the_next_tenure_with_one_event_and_one_ledger_row() -> TestResult {
@@ -494,10 +482,6 @@ fn the_chain_moves_forward_and_an_owner_returns_to_the_primary() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Re-base and withdrawal
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_rebase_promotes_the_candidate_and_restarts_its_chain() -> TestResult {
     let (mut h, first) = activated()?;
@@ -553,10 +537,6 @@ fn a_withdrawal_freezes_the_entry_and_names_the_next_predecessor() -> TestResult
     assert_eq!(receipt.row().state_revision(), 4);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// The fold invariant, Forks, and the guarded append
-// ---------------------------------------------------------------------------
 
 fn forge(h: &mut H, event_type: &str, payload: Vec<u8>) -> TestResult {
     let (kind, bytes) = (Kind::new(event_type), CanonicalBytes::from_vec(payload));

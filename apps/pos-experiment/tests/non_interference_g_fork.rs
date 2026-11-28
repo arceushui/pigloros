@@ -202,10 +202,6 @@ fn fork_capture(
     )?)?)
 }
 
-// ---------------------------------------------------------------------------
-// Matrix
-// ---------------------------------------------------------------------------
-
 /// Run every G-FORK coordinate once and return the executed cases. Every
 /// Air-Gapped case must be the typed non-executed `Unavailable` with no claim.
 fn execute_every_coordinate(
@@ -312,10 +308,6 @@ fn every_g_fork_coordinate_executes_or_stays_typed_non_executed_and_matches_its_
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Fixtures: the one-delta proof
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_g_fork_pair_differs_only_in_its_declared_unauthorized_value() -> TestResult {
@@ -426,10 +418,6 @@ fn the_unauthorized_value_reaches_the_factual_timeline_and_no_fork_artifact() ->
     assert_eq!(captures[0].1, captures[1].1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Capture adapter through its public seam
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_snapshot_surfaces_are_empty_and_no_checkpoint_holds_a_snapshot() -> TestResult {
@@ -578,10 +566,6 @@ fn a_leaking_capture_diverges_at_the_first_surface_it_reaches() -> TestResult {
     assert_eq!(divergence.surface_ordinal, EXPORTS_SURFACE);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// The Local subject
-// ---------------------------------------------------------------------------
 
 /// Spawn the subject binary in `directory` with `request` on its standard
 /// input and return its exit status and standard output.

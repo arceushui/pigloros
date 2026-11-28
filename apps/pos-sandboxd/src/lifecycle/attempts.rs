@@ -1379,9 +1379,6 @@ impl<I> AttemptLifecycle<I> {
         Ok(EndedAttempt {
             attempt_id,
             admission,
-            // The first cancellation source wins (owner decision 2026-11-15,
-            // #443 journal 22319), and outranks every other outcome (ADR-069
-            // §8), even when the input fails afterwards.
             cancel_source,
             progress: AttemptProgress::InputFailed,
             cleanup: Ok(None),

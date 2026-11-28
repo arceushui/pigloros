@@ -222,10 +222,6 @@ fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     Ok(events)
 }
 
-// ---------------------------------------------------------------------------
-// Matrix
-// ---------------------------------------------------------------------------
-
 /// Run every G-PUB coordinate once and return the executed cases. Every
 /// non-executed case must carry its typed cause and no claim.
 fn execute_every_coordinate(
@@ -321,10 +317,6 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures: the one-delta proof
-// ---------------------------------------------------------------------------
-
 #[test]
 fn every_g_pub_pair_differs_only_in_its_declared_unauthorized_value() -> TestResult {
     for fixture_id in G_PUB_FIXTURE_IDS_V1 {
@@ -401,10 +393,6 @@ fn every_g_pub_pair_differs_only_in_its_declared_unauthorized_value() -> TestRes
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Capture adapters through their public seam
-// ---------------------------------------------------------------------------
 
 fn capture(
     fixture_id: &str,

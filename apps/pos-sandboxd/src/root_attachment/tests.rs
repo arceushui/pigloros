@@ -453,7 +453,6 @@ fn open_fifo_writer(barrier: &Path) -> Result<File, BoxError> {
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
 const VETO: &str = "systemd.allow_userspace_verity=0";
 
-// ---------------------------------------------------------------------------
 // Fixtures
 
 fn expected(component: &str) -> Expected {
@@ -823,7 +822,6 @@ fn the_host_kernel_reads_its_own_command_line() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Readback parsing
 
 #[test]
@@ -879,7 +877,6 @@ fn only_loop_partition_names_name_a_loop_device() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Readback verification (ADR-087 §2 step 6)
 
 #[test]
@@ -1084,7 +1081,6 @@ fn every_readback_difference_is_an_evidence_mismatch() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Host kernel readback through synthetic procfs and sysfs trees
 
 fn write(path: &Path, text: &str) -> TestResult {
@@ -1338,7 +1334,6 @@ fn host_kernel_operations_on_a_non_mount_fail_closed() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Orchestration through the attachment port
 
 #[test]
@@ -1561,7 +1556,6 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // The real admission chain in the isolated root container
 
 fn run_isolated(test_name: &str) -> TestResult {

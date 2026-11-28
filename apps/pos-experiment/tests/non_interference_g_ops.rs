@@ -227,10 +227,6 @@ fn capture(
     Ok((events, captured))
 }
 
-// ---------------------------------------------------------------------------
-// Matrix
-// ---------------------------------------------------------------------------
-
 /// Run every G-OPS coordinate once and return the executed cases. Every
 /// Air-Gapped case must carry its typed cause and no claim.
 fn execute_every_coordinate(
@@ -326,10 +322,6 @@ fn every_g_ops_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures: the one-delta proof
-// ---------------------------------------------------------------------------
-
 #[test]
 fn every_g_ops_pair_differs_only_in_its_declared_unauthorized_value() -> TestResult {
     for fixture_id in G_OPS_FIXTURE_IDS_V1 {
@@ -385,10 +377,6 @@ fn every_g_ops_pair_differs_only_in_its_declared_unauthorized_value() -> TestRes
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Captures: raw typed facets through the #181 normalizer
-// ---------------------------------------------------------------------------
 
 /// The excluded bytes of every operational facet, in surface order.
 fn excluded(capture: &NonInterferenceRawCaptureV1) -> Vec<Vec<u8>> {
@@ -592,10 +580,6 @@ fn the_cache_capture_counts_hits_and_reuses_a_warm_store() -> TestResult {
     assert!(directory.path().join(G_OPS_STORE_FILE_V1).exists());
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Watchdog and non-executed causes
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_operational_watchdog_expiry_is_non_executed_and_never_resource_exhaustion() -> TestResult {

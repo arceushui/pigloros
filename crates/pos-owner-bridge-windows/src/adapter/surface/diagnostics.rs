@@ -86,8 +86,6 @@ impl Surface {
     }
 }
 
-// Temporary hosted-hang probe. Logarithmic sampling bounds retry output without
-// adding a clock, deadline, cleanup action or permission to release an owner.
 #[derive(Default)]
 pub(super) struct CleanupTrace(RefCell<BTreeMap<&'static str, Step>>);
 
@@ -110,7 +108,6 @@ impl CleanupTrace {
                 step.attempts,
             );
         }
-        // No RefCell borrow survives the following native call or its callbacks.
     }
 
     pub(super) fn returned(&self, stage: &'static str, result: NativeResult<()>) {

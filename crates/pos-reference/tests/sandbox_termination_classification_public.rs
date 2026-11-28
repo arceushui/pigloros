@@ -275,7 +275,6 @@ const fn unstarted() -> TerminationFacts {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The independent oracle, restated from R9 with numeric codes.
 
 #[derive(Debug, Eq, PartialEq)]
@@ -532,7 +531,6 @@ fn oracle(facts: &TerminationFacts) -> Expected {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Comparison and enumeration.
 
 fn observed(classification: &TerminalClassification) -> Expected {
@@ -686,7 +684,6 @@ fn with_observation(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Exhaustive tests.
 
 /// The lifecycle dimensions with `launch` as the launch failures.
@@ -948,7 +945,6 @@ fn every_candidate_set_selects_its_strictest_code_unless_contradicted() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Property tests: concrete values, deterministic seed.
 
 struct SplitMix(u64);
@@ -1164,7 +1160,6 @@ fn random_concrete_facts_classify_as_the_oracle_and_only_by_their_class() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // R9 §7 vectors, the previously unplaced examples and named rules.
 
 #[test]

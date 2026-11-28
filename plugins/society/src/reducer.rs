@@ -60,7 +60,6 @@ impl Reducer for SocietyReducer {
             return;
         };
 
-        // Bad CBOR / non-finite samples do not bump `signals` or dimension stats.
         if !signal.value.is_finite() {
             return;
         }
@@ -71,7 +70,6 @@ impl Reducer for SocietyReducer {
             .unwrap_or(0);
         state.set("signals", serde_json::Value::Number((signals + 1).into()));
 
-        // Scaffold contract: samples are clamped to `[0.0, 1.0]`.
         let value = signal.value.clamp(0.0, 1.0);
 
         let dim = signal.dimension;
@@ -87,7 +85,7 @@ impl Reducer for SocietyReducer {
             + value;
         #[expect(
             clippy::cast_precision_loss,
-            reason = "a sample count above 2^53 loses only mean precision, as on main"
+            reason = "a sample count above 2^53 loses only mean precision"
         )]
         let mean = sum / (count as f64);
 

@@ -709,10 +709,6 @@ fn refusals_have_stable_operator_messages() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stores that already hold an erasure request.
-// ---------------------------------------------------------------------------
-
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,

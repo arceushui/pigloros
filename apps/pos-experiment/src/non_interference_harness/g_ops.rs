@@ -607,10 +607,6 @@ impl NonInterferenceSessionSubjectV1 for GOpsSessionSubjectV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Subject
-// ---------------------------------------------------------------------------
-
 struct GOpsPlugin;
 
 impl Plugin for GOpsPlugin {
@@ -782,10 +778,6 @@ fn elapsed(start: Instant) -> Vec<u8> {
     format!("{}us", start.elapsed().as_micros()).into_bytes()
 }
 
-// ---------------------------------------------------------------------------
-// Denied sibling invocations
-// ---------------------------------------------------------------------------
-
 /// One host-owned sibling invocation of the guest with `observation`, at
 /// Simulation Time `selector`, under a supervisor with `watchdog`.
 ///
@@ -863,10 +855,6 @@ impl DeclaredV1 {
         [self.messages.as_slice(), self.coordinate.as_slice()].concat()
     }
 }
-
-// ---------------------------------------------------------------------------
-// NI-CACHE-002: authorization cache and seam store
-// ---------------------------------------------------------------------------
 
 /// One cached decision: its request, authority and registry.
 struct DecisionV1 {
@@ -1247,10 +1235,6 @@ fn cache_surfaces(
         .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
 }
 
-// ---------------------------------------------------------------------------
-// NI-OBS-004: logs, metrics, traces, crash artifact and support bundle
-// ---------------------------------------------------------------------------
-
 /// The five `NI-OBS-004` surfaces.
 ///
 /// - Structured logs: `[schema, [[category, message bound]...]]` of the
@@ -1338,10 +1322,6 @@ fn observability_surfaces(
             })
     })
 }
-
-// ---------------------------------------------------------------------------
-// NI-TIME-005: Simulation Time, deterministic budget and watchdog
-// ---------------------------------------------------------------------------
 
 /// The six `NI-TIME-005` surfaces.
 ///
@@ -1438,10 +1418,6 @@ fn time_surfaces(
         surfaces(records, operational)
     })
 }
-
-// ---------------------------------------------------------------------------
-// NI-CRASH-012: failure and archive handoff
-// ---------------------------------------------------------------------------
 
 /// Run `ticks` Ticks of a host-owned denied sibling Driver over
 /// `observation` at Simulation Time `selector`, outside the subject's

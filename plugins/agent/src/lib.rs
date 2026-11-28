@@ -39,10 +39,6 @@ pub const ENTITY_KIND: &str = "ai-agent";
 /// The event type for agent actions.
 pub const EVENT_TYPE_ACTION: &str = "agent.action";
 
-// ---------------------------------------------------------------------------
-// Policy types
-// ---------------------------------------------------------------------------
-
 /// Context passed to the policy on each decision.
 #[derive(Debug, Clone)]
 pub struct AgentContext {
@@ -63,10 +59,6 @@ pub trait AgentPolicy: Send + Sync {
     fn name(&self) -> &'static str;
     fn decide(&mut self, context: &AgentContext) -> AgentAction;
 }
-
-// ---------------------------------------------------------------------------
-// Built-in policies
-// ---------------------------------------------------------------------------
 
 /// Cycles through actions in order; confidence = 1.0
 pub struct RoundRobinPolicy {
@@ -133,20 +125,12 @@ impl AgentPolicy for RandomSeedPolicy {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Payload types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ActionPayload {
     action: String,
     confidence: f64,
     tick: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Plugin descriptor
-// ---------------------------------------------------------------------------
 
 /// An AI-agent plugin with a swappable policy.
 pub struct AgentPlugin {
@@ -207,10 +191,6 @@ impl InstalledPluginFactoryV1 for AgentPlugin {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Driver
-// ---------------------------------------------------------------------------
 
 /// Produces one `agent.action` event per step, invoking the policy's `decide()` method.
 pub struct AgentDriver {
@@ -288,10 +268,6 @@ impl Driver for AgentDriver {
         Ok(StepOutput::new(vec![draft]))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

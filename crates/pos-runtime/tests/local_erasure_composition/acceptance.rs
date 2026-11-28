@@ -33,10 +33,6 @@ fn frozen_request(host: &mut ErasureExecutionHostV1, scope: ErasureScopeV1) -> T
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Acceptance test 2: the C1′ partition.
-// ---------------------------------------------------------------------------
-
 /// The Timelines a partition seed adds beside the driver fixture's.
 struct Seeded {
     /// The other actor's root, holding one Event of the actor.
@@ -327,10 +323,8 @@ fn a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope() -> 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Acceptance test 3: key binding and recipient exports (`SQLite` only:
 // Memory has no recipient-export catalog).
-// ---------------------------------------------------------------------------
 
 /// Acceptance test 3 (`SQLite` only: the recipient-export catalog): the
 /// actor's erasure destroys its own role-0 subject key and no other.
@@ -429,10 +423,8 @@ fn each_export_grantee_is_one_negative_export_recipient_obligation() -> TestResu
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Acceptance test 3b: the closure bound at freeze, and test 5: its
 // rejection and the exact retry.
-// ---------------------------------------------------------------------------
 
 /// Acceptance tests 3b and 5, on both adapters: a closure that outgrows
 /// its bound after submission commits `Rejected(ScopeInvalid)` at freeze.
@@ -497,10 +489,6 @@ fn a_closure_that_outgrows_its_bound_commits_scope_invalid_at_freeze() -> TestRe
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Acceptance test 4: the retry cap and reordered acknowledgements.
-// ---------------------------------------------------------------------------
 
 /// Acceptance test 4: the retry cap ends a transient failure in
 /// `partial-failure`.
@@ -625,10 +613,6 @@ fn reordered_or_duplicated_acknowledgements_give_identical_receipt_bytes() -> Te
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Acceptance test 6: an expired TPS1, and the TPS1 key-id codec.
-// ---------------------------------------------------------------------------
 
 /// Acceptance test 6: an expired TPS1 refuses a freeze, while a request
 /// frozen before the expiry still verifies, is projected and completes.

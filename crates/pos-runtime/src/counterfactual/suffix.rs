@@ -163,7 +163,7 @@
 //! - **`CFR1` content.** The first Tick is the receipt's first recomputation
 //!   Tick; the suffix digest is the final chained state digest; the
 //!   dependency root is the committed `RCF1` frontier digest, which binds the
-//!   dependency-graph digest (recording generated edges is deferred); the
+//!   dependency-graph digest; the
 //!   provenance root is the `SIV1` provenance digest. A completed result keeps
 //!   the plan's replay claim. An incomplete one weakens only the claims CFR1
 //!   forbids for an incomplete suffix, `Exact` and

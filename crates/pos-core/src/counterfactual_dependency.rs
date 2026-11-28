@@ -47,7 +47,7 @@
 //! proves that every conformance-encoded edge is accepted here with the
 //! extracted coordinates.
 //!
-//! # ADR gap decisions
+//! # Contract details
 //!
 //! - **Per-parent-Timeline committed prefix.** Nodes and edges whose origin is
 //!   [`RecordedNodeOriginV1::Committed`] belong to the inherited parent
@@ -64,8 +64,7 @@
 //!   holds the nodes of one origin and is recorded at one Tick, so a record
 //!   is either a parent-prefix record or a Fork-generation record, never
 //!   both. The Fork write methods accept only provisional records;
-//!   recording committed parent rows is the factual-Tick producer's write
-//!   (see Deferred).
+//!   recording committed parent rows is the factual-Tick producer's write.
 //! - **Root nodes ride the first Tick record at or after their effective
 //!   Tick.** `pos-time` requires one `InterventionAssigned` node per plan
 //!   intervention at the intervention's effective Tick, and frozen and
@@ -224,20 +223,6 @@
 //!   Ticks above `i64::MAX` (`SQLite` does: `FieldOutOfBounds` or
 //!   `BindingMismatch` before any fence or Fork lookup) and treat a
 //!   parent-prefix `through_tick` above `i64::MAX` as every row.
-//! - **Test model.** The `pos-core` fake store of the public contract test is
-//!   the reference model. Adapters mirror these obligations in their own test
-//!   suites, which add storage-, erasure-, and failure-specific tests. Each
-//!   adapter (Redmine #550 Memory, #551 `SQLite`) tags its tests with the
-//!   checklist ids C1 to C13 defined in Redmine #550 (C14, the schema
-//!   validation, is `SQLite` only).
-//!
-//! # Deferred
-//!
-//! - #550 through #553: the Memory and `SQLite` adapters of these traits, the
-//!   coordinator wiring, and the frontier source that reads them.
-//! - #554: the factual-Tick producer that records `Committed` parent-prefix
-//!   rows, which will add its own parallel write method.
-
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 

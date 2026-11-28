@@ -44,7 +44,6 @@ const COORDINATE: &[u8] = b"tick/3";
 const LOCAL: ExecutionModeV1 = ExecutionModeV1::Local;
 const AIR: ExecutionModeV1 = ExecutionModeV1::AirGapped;
 
-// ---------------------------------------------------------------------------------------------
 // Independent oracles
 
 fn encode(value: &Value) -> TestResult<Vec<u8>> {
@@ -76,7 +75,6 @@ fn oracle_entry_digest(entry: &ConformanceHistoryEntryV1) -> TestResult<[u8; 32]
     )
 }
 
-// ---------------------------------------------------------------------------------------------
 // Governance records
 
 fn ids(values: &[&str]) -> Vec<String> {
@@ -270,7 +268,6 @@ fn replay(
     Ok(history.replay(&slices).map(|state| state.lifecycle()))
 }
 
-// ---------------------------------------------------------------------------------------------
 // CHS1 history chain
 
 #[test]
@@ -689,7 +686,6 @@ fn chs1_snapshot_digest_covers_exactly_the_history_waivers_and_conflicts() -> Te
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------
 // The synthetic profile, reports and trust port of the promotion gate
 
 fn artifact(path: &str) -> ArtifactDescriptorV1 {
@@ -1096,7 +1092,6 @@ fn refused(cases: Vec<Case>) -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------
 // The promotion gate
 
 #[test]

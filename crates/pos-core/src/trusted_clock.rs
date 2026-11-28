@@ -138,10 +138,6 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-// ---------------------------------------------------------------------------
-// Outcomes
-// ---------------------------------------------------------------------------
-
 /// Phase charged when the shared 250 ms wait budget runs out.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum WaitPhaseV1 {
@@ -255,10 +251,6 @@ impl OverrunAckReasonV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Operator authority
-// ---------------------------------------------------------------------------
-
 /// Host authorization-provenance digest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct HostAuthorizationProvenanceV1([u8; 32]);
@@ -348,10 +340,6 @@ pub struct TrustedClockOverrunAcknowledgementV1<'a> {
     /// The recorded reason.
     pub reason: OverrunAckReasonV1,
 }
-
-// ---------------------------------------------------------------------------
-// Time sources
-// ---------------------------------------------------------------------------
 
 /// Convert an epoch duration to trusted wall time, rounding nanoseconds up.
 ///
@@ -720,10 +708,6 @@ impl Default for WaitBudgetV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Durable records and ports
-// ---------------------------------------------------------------------------
-
 /// Raw `trusted_clock_high_water` row as stored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustedClockHighWaterRowV1 {
@@ -1005,10 +989,6 @@ fn sample_trusted(wall: &mut dyn TrustedWallSourceV1) -> Result<i64, TrustedCloc
     }
 }
 
-// ---------------------------------------------------------------------------
-// Process-shared pending overrun flags, keyed by authority identity
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug)]
 struct PendingOverrunV1 {
     kind: TrustedClockOverrunKindV1,
@@ -1105,10 +1085,6 @@ fn charge_wait(
         .ok_or(TrustedClockErrorV1::Rollback)
         .and_then(|waited| wait.charge(phase, waited))
 }
-
-// ---------------------------------------------------------------------------
-// Reservation
-// ---------------------------------------------------------------------------
 
 /// A committed durable reservation. It cannot be cloned or forged.
 #[derive(Debug)]
@@ -1286,10 +1262,6 @@ fn migrate_missing_rows(
     }
     Ok((rows, Some(sampled)))
 }
-
-// ---------------------------------------------------------------------------
-// Guard
-// ---------------------------------------------------------------------------
 
 /// The held authority guard. Dropping it rolls back and releases the lock.
 pub struct ReleaseGuardV1<'host> {
@@ -1496,10 +1468,6 @@ fn earliest_expiry(premises: &ExpiryPremisesV1<'_>) -> Result<u64, TrustedClockE
     Ok(consent.chain(references).fold(floor, u64::min))
 }
 
-// ---------------------------------------------------------------------------
-// Handoff
-// ---------------------------------------------------------------------------
-
 /// Proof that the final trusted-time check passed. Only [`handoff_checked`]
 /// mints one, and [`ProtectedHandoffTargetV1::commit`] consumes it.
 #[derive(Debug)]
@@ -1609,10 +1577,6 @@ pub fn handoff_checked<T: ProtectedHandoffTargetV1>(
     drop(guard);
     Ok(AuthorizedArtifactUseV1 { value, overrun })
 }
-
-// ---------------------------------------------------------------------------
-// Latch commit and acknowledgement
-// ---------------------------------------------------------------------------
 
 /// Durably commit this identity's pending overrun latch after teardown.
 ///

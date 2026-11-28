@@ -3932,10 +3932,6 @@ fn sqlite_exact_fork_retry_survives_later_request_including_child(
     )
 }
 
-// ---------------------------------------------------------------------------
-// ADR-106 revision 3: admitted Forks run inside the host topology transition.
-// ---------------------------------------------------------------------------
-
 type AdmissionResult =
     Result<pos_core::ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
 
@@ -4421,10 +4417,6 @@ fn sqlite_host_stays_ready_after_a_rolled_back_marker_read_failure(
     );
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// ADR-106 revision 4 / ADR-109 revision 9: claimed deliveries through the host.
-// ---------------------------------------------------------------------------
 
 type DeliveryResult =
     Result<pos_store::ForkDeliveryExecutionV1, pos_store::ForkDeliveryJournalErrorV1>;

@@ -106,10 +106,6 @@ fn path_of(h: &H) -> TestResult<String> {
     Ok(path.to_str().ok_or("non-UTF-8 path")?.to_owned())
 }
 
-// ---------------------------------------------------------------------------
-// Durability level, WAL, and nesting
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_entry_level_is_restored_after_a_commit_and_after_a_refusal() -> TestResult {
     let (mut h, first) = declared()?;
@@ -201,10 +197,6 @@ fn a_database_locked_by_another_writer_is_busy_and_writes_nothing() -> TestResul
     assert_eq!(snapshot(&h)?, before);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Indeterminate outcomes, poison, and recovery
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_failed_set_or_read_back_of_full_is_indeterminate_and_restores() -> TestResult {
@@ -319,10 +311,6 @@ fn a_failed_commit_is_rolled_back_and_the_handle_keeps_working() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// A fault at each write
-// ---------------------------------------------------------------------------
-
 const WRITES: [(&str, &str); 6] = [
     ("INSERT", "events"),
     ("UPDATE", "composition_fallback_rows"),
@@ -372,10 +360,6 @@ fn the_ledger_and_the_retained_policies_are_append_only() -> TestResult {
     assert_eq!(h.store.fallback_ledger(SCOPE, h.timeline)?.len(), 1);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Strict schema
-// ---------------------------------------------------------------------------
 
 fn assert_corrupt_everywhere(h: &mut H, first: &DomainFallbackPolicyV1) -> TestResult {
     let corrupt = Some(Error::CorruptState);
@@ -433,10 +417,6 @@ fn a_failing_schema_creation_is_storage_failed_and_leaves_no_tables() -> TestRes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Statement failures
-// ---------------------------------------------------------------------------
-
 fn deny_reads_of(h: &mut H, denied: &'static str) -> TestResult {
     h.store
         .conn
@@ -492,10 +472,6 @@ fn a_target_timeline_that_cannot_be_read_is_unavailable() -> TestResult {
     assert_eq!(snapshot(&h)?, before);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Stored rows that diverge from their fold
-// ---------------------------------------------------------------------------
 
 fn ledger_insert(h: &H, columns: &str, values: &str) -> TestResult {
     let timeline = h.timeline;

@@ -175,10 +175,6 @@ fn tick_drafts(tick: u64) -> Vec<EventDraft> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Plan and host records
-// ---------------------------------------------------------------------------
-
 fn intervention(effective_tick: u64, id_seed: u8) -> InterventionV1 {
     InterventionV1 {
         intervention_id: [id_seed; 16],
@@ -282,10 +278,6 @@ fn host(edit: fn(&mut CounterfactualPlanV1)) -> TestResult<Host> {
 fn plan(edit: fn(&mut CounterfactualPlanV1)) -> TestResult<CounterfactualPlanV1> {
     Ok(host(edit)?.plan)
 }
-
-// ---------------------------------------------------------------------------
-// The hand-built graph and the test `Source` over it
-// ---------------------------------------------------------------------------
 
 const fn endogenous_digest(seed: u8) -> [u8; 32] {
     [0xd0 + seed; 32]
@@ -550,10 +542,6 @@ macro_rules! derivation {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Recorded rows
-// ---------------------------------------------------------------------------
-
 const fn recorded_class(class: DependencyClassV1) -> RecordedDependencyClassV1 {
     match class {
         DependencyClassV1::ExogenousFrozen => RecordedDependencyClassV1::ExogenousFrozen,
@@ -650,10 +638,6 @@ fn split_rows(graph: &Graph) -> TestResult<(Rows, Rows)> {
     }
     Ok((prefix, fork))
 }
-
-// ---------------------------------------------------------------------------
-// The scripted read port
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RowKind {
@@ -765,10 +749,6 @@ fn recorded_source(
         page_limit,
     ))
 }
-
-// ---------------------------------------------------------------------------
-// Differential scenarios
-// ---------------------------------------------------------------------------
 
 #[test]
 fn matches_the_hand_built_source_for_every_page_size() -> TestResult {
@@ -1068,10 +1048,6 @@ fn bounds_the_generation_at_the_plan_horizon() -> TestResult {
     assert_eq!(source.port().pages(true, RowKind::Edges), 2 * 13);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// End to end through the coordinator, against both adapters
-// ---------------------------------------------------------------------------
 
 /// One store shared by the coordinator, which owns one handle, and the
 /// production source, which reads through another.

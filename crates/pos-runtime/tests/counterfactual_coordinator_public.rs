@@ -168,10 +168,6 @@ fn draft(value: u8) -> EventDraft {
     typed_draft(TICK_EVENT_TYPE, value)
 }
 
-// ---------------------------------------------------------------------------
-// Backends
-// ---------------------------------------------------------------------------
-
 trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
     fn open() -> TestResult<Self>;
 
@@ -607,10 +603,6 @@ impl<const MODE: u8> Backend for Rigged<MODE> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plan, graph, and host ports
-// ---------------------------------------------------------------------------
-
 fn intervention(effective_tick: u64, intervention_id: [u8; 16]) -> InterventionV1 {
     InterventionV1 {
         intervention_id,
@@ -990,10 +982,6 @@ impl Stager {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dependency declarations
-// ---------------------------------------------------------------------------
-
 /// The declared nodes and edges of one Tick record.
 type Declaration = (Vec<DependencyNodeRecordV1>, Vec<DependencyEdgeRecordV1>);
 /// One edit of a Tick's declaration before it is staged.
@@ -1154,10 +1142,6 @@ fn recorded<B: RecordingBackend>(
     assert!(nodes.next().is_none() && edges.next().is_none());
     Ok((nodes.items().to_vec(), edges.items().to_vec()))
 }
-
-// ---------------------------------------------------------------------------
-// Fixture
-// ---------------------------------------------------------------------------
 
 /// How one fixture differs from the base scenario.
 struct Spec {
@@ -1449,10 +1433,6 @@ fn read_invalidation<B: Backend>(
     Ok(SuffixInvalidationV1::from_canonical_cbor(&bytes)?)
 }
 
-// ---------------------------------------------------------------------------
-// Classified Forks
-// ---------------------------------------------------------------------------
-
 /// Lends the live session and the host-internal permit of a classified
 /// world, and records every call.
 struct Lender<'a> {
@@ -1605,10 +1585,6 @@ fn assert_classified_provenance(
     assert_eq!(operations, expected, "the derived operation IDs");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Scenarios, each run against both backends
-// ---------------------------------------------------------------------------
 
 macro_rules! both_backends {
     ($scenario:ident) => {
@@ -2674,10 +2650,6 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Dependency records
-// ---------------------------------------------------------------------------
-
 /// Admit the base request with `stager`.
 ///
 /// A macro, not a function: the admission error is too large to return from
@@ -3014,10 +2986,6 @@ fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {
     assert_eq!(setup.source.calls, 0);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Admission preflight
-// ---------------------------------------------------------------------------
 
 type PlanEdit = fn(&mut CounterfactualPlanV1);
 

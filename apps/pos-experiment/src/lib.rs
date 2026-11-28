@@ -341,10 +341,6 @@ pub mod recorded_replay;
 pub mod replay_conformance;
 pub mod verification_execution;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 /// Stop condition for an experiment run.
 #[derive(Clone, Debug)]
 pub enum StopCondition {
@@ -770,10 +766,6 @@ type ForkRegistryFactory =
 type ForkRegistryResult = Result<PluginRegistry, pos_runtime::RuntimeError>;
 type SharedEventStore = Arc<Mutex<Box<dyn ScheduledAdmissionStoreV1>>>;
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, thiserror::Error)]
 pub enum ExperimentError {
     #[error("runtime error: {0}")]
@@ -829,10 +821,6 @@ fn map_runtime_error(error: pos_runtime::RuntimeError) -> ExperimentError {
         error => ExperimentError::Runtime(error),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Private helpers: shared tick and completion pipeline
-// ---------------------------------------------------------------------------
 
 fn capture_pending_range(
     store: &dyn pos_core::store::EventStore,
@@ -1418,10 +1406,6 @@ fn fork_eval_timeline(
         .fork(train_tl_id, train_head_seq, eval_name)
         .map_err(ExperimentError::from)
 }
-
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
 
 impl Experiment {
     /// A host in the Local Execution Mode.
@@ -3075,10 +3059,6 @@ fn recovered_revoked_subjects(events: &[pos_core::Event]) -> HashSet<EntityId> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// BacktestRunner
-// ---------------------------------------------------------------------------
-
 /// Configuration for a backtest run: a temporal split into train and eval phases.
 pub struct BacktestConfig {
     /// Base name used for both timelines (suffixed with `-train` / `-eval`).
@@ -3423,10 +3403,6 @@ impl BacktestRunner {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -7137,8 +7113,6 @@ pub mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fixed_driver_exhaust_remaining_ticks() {
-        // Drive FixedDriver.with_max_ticks(1) for 2 ticks — second tick hits the
-        // `*remaining == 0` branch (line 259) and returns empty.
         let entity = EntityId::new();
         let plugin = make_plugin("exhaust-plugin", &["exhaust.event"]);
         let driver = FixedDriver::new(entity, "exhaust.event", 1).with_max_ticks(1);
@@ -9925,8 +9899,6 @@ mod backtest_tests {
             Ok(pos_runtime::StepOutput::new(vec![draft]))
         }
     }
-
-    // --------------------------------------------------------------------------
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

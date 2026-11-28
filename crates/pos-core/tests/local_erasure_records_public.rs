@@ -1519,10 +1519,8 @@ fn the_target_and_fork_values_are_domain_tagged_digests_of_their_inputs() -> Tes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §4a owner-effect records: ELAD1, ELCG1, ELNEG1 and ELRP1 (owner
 // decision Q3 on #1412).
-// ---------------------------------------------------------------------------
 
 const ARTIFACT_CLASSES: [ErasureArtifactClassV1; 7] = [
     ErasureArtifactClassV1::TimelineReplay,

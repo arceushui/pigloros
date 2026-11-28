@@ -31,19 +31,11 @@ pub const ENTITY_KIND: &str = "rule-agent";
 /// The event type for agent decisions.
 pub const EVENT_TYPE_DECISION: &str = "agent.decision";
 
-// ---------------------------------------------------------------------------
-// Payload types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DecisionPayload {
     action: String,
     tick: u32,
 }
-
-// ---------------------------------------------------------------------------
-// Plugin descriptor
-// ---------------------------------------------------------------------------
 
 /// A deterministic rule-based agent plugin.
 pub struct RuleAgentPlugin {
@@ -129,10 +121,6 @@ impl InstalledPluginFactoryV1 for RuleAgentPlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Driver
-// ---------------------------------------------------------------------------
-
 /// Produces one `agent.decision` event per step, cycling through the action list.
 pub struct RuleAgentDriver {
     entity: EntityId,
@@ -188,10 +176,6 @@ impl Driver for RuleAgentDriver {
         Ok(StepOutput::new(vec![draft]))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

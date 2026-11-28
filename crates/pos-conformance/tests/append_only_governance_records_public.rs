@@ -93,7 +93,6 @@ record!(
 record!(ConformanceRetentionV1, b"PiglorOS.ConformanceRetention.v1");
 record!(ConformancePromotionV1, b"PiglorOS.ConformancePromotion.v1");
 
-// ---------------------------------------------------------------------------------------------
 // Fixtures
 
 fn ids(values: &[&str]) -> Vec<String> {
@@ -264,7 +263,6 @@ fn promotions() -> Vec<ConformancePromotionV1> {
     vec![stable, candidate.sealed()]
 }
 
-// ---------------------------------------------------------------------------------------------
 // Generic structural refusals
 
 fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
@@ -635,7 +633,6 @@ fn every_closed_code_round_trips_and_nothing_else_decodes() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // CWV1
 
 fn artifact(path: &str) -> ArtifactDescriptorV1 {
@@ -942,7 +939,6 @@ fn cwv1_waiver_on_a_mandatory_case_is_only_a_candidate_exception() {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // CCF1
 
 #[test]
@@ -1044,7 +1040,6 @@ fn ccf1_open_conflict_keeps_candidate() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------
 // CCR1 and CIA1
 
 #[test]
@@ -1200,7 +1195,6 @@ fn cia1_every_report_naming_the_old_digest_must_appear() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // CWD1
 
 fn report(report_id: u8) -> TestResult<ConformanceReportV1> {
@@ -1364,7 +1358,6 @@ fn cwd1_withdrawn_report_stays_readable_and_flagged() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------
 // CRT1
 
 #[test]
@@ -1514,7 +1507,6 @@ fn crt1_removal_before_both_bounds_is_refused() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------
 // CPR1
 
 #[test]

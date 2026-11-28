@@ -49,20 +49,12 @@ mod reducer;
 
 pub use reducer::EvalReducer;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 /// Event type for predictions.
 pub const EVENT_TYPE_PREDICTION: &str = "eval.prediction";
 /// Event type for outcomes.
 pub const EVENT_TYPE_OUTCOME: &str = "eval.outcome";
 /// Entity kind for eval targets.
 pub const ENTITY_KIND: &str = "eval-target";
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
 
 /// Errors from the eval plugin.
 #[derive(Debug, thiserror::Error)]
@@ -86,10 +78,6 @@ pub enum EvalError {
         coordinate: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Payload types (CBOR-serialized)
-// ---------------------------------------------------------------------------
 
 /// Payload for an `eval.prediction` event.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,10 +164,6 @@ pub fn draft_outcome(
         CanonicalBytes::from_vec(buf),
     )
 }
-
-// ---------------------------------------------------------------------------
-// EvalPlugin descriptor
-// ---------------------------------------------------------------------------
 
 /// Calibration harness plugin.
 pub struct EvalPlugin {

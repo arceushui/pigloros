@@ -78,10 +78,6 @@ impl Reducer for EntityStateProjection {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ProjectionRegistry
-// ---------------------------------------------------------------------------
-
 /// Rejection before an installed reducer slot is mutated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectionSlotErrorV1 {
@@ -1481,10 +1477,6 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
     fn make_event(entity: EntityId) -> Event {
         make_event_typed(entity, "test.tick")
     }
@@ -1745,10 +1737,6 @@ mod tests {
             authority: test_ok(state.resolve(grant_id)),
         }
     }
-
-    // ------------------------------------------------------------------
-    // ProjectionRegistry tests
-    // ------------------------------------------------------------------
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2256,10 +2244,6 @@ mod tests {
         assert_eq!(neighbours[0], source);
     }
 
-    // ------------------------------------------------------------------
-    // EntityStateProjection tests
-    // ------------------------------------------------------------------
-
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn entity_state_projection_counts_events() {
@@ -2324,10 +2308,6 @@ mod tests {
         assert_eq!(last, "second.type");
     }
 
-    // ------------------------------------------------------------------
-    // RelationshipIndex tests
-    // ------------------------------------------------------------------
-
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn relationship_index_records_and_queries() {
@@ -2388,10 +2368,6 @@ mod tests {
         assert_eq!(neighbours.len(), 1);
         assert_eq!(neighbours[0], b);
     }
-
-    // ------------------------------------------------------------------
-    // proptest: fold determinism
-    // ------------------------------------------------------------------
 
     proptest! {
         #[test]

@@ -378,10 +378,6 @@ impl NonInterferenceSessionSubjectV1 for GPubSessionSubjectV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Subject
-// ---------------------------------------------------------------------------
-
 struct GPubPlugin;
 
 impl Plugin for GPubPlugin {
@@ -439,10 +435,6 @@ fn live_events(experiment: Experiment) -> Result<Vec<Event>, NonInterferenceNonE
         .and_then(|mut session| recorded(&mut session))
         .map(|(_, events)| events)
 }
-
-// ---------------------------------------------------------------------------
-// Surfaces
-// ---------------------------------------------------------------------------
 
 /// The position-relative export: its Event stream and the export record
 /// `[mode code, name or null, owner ordinal or null, head, stream]`, the
@@ -502,10 +494,6 @@ fn seam_order(unauthorized_value: &[u8]) -> [SeamRole; 2] {
         [SeamRole::Subject, SeamRole::Denied]
     }
 }
-
-// ---------------------------------------------------------------------------
-// NI-EVAL-007: exported artifact and evaluator input
-// ---------------------------------------------------------------------------
 
 fn evaluator_surfaces(
     run: &GPubRunV1<'_>,
@@ -731,10 +719,6 @@ fn evaluator_attempt(
         },
     }
 }
-
-// ---------------------------------------------------------------------------
-// NI-PUBLIC-006: public Gateway protocol
-// ---------------------------------------------------------------------------
 
 fn public_surfaces(
     run: &GPubRunV1<'_>,

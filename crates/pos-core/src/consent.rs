@@ -21,10 +21,6 @@ use crate::{
     ids::{EntityId, TimelineId},
 };
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 /// Versioned event type for consent grants (ADR-039).
 pub const EVENT_TYPE_CONSENT_GRANTED_V1: &str = "consent.granted.v1";
 
@@ -60,10 +56,6 @@ pub const MODALITY_EXPORT: u8 = 0x08;
 
 /// Maximum durable consent events accepted by one authority recovery pass.
 pub const MAX_CONSENT_HISTORY_EVENTS: usize = 10_000;
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
 
 /// Errors returned by consent CBOR codec operations.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -159,10 +151,6 @@ pub fn is_consent_sensitive_event_type(event_type: &Kind) -> bool {
 pub fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
     is_consent_sensitive_event_type(event_type) || is_consent_event_type(event_type)
 }
-
-// ---------------------------------------------------------------------------
-// CBOR helpers (private)
-// ---------------------------------------------------------------------------
 
 fn cbor_bytes(b: &[u8]) -> Value {
     Value::Bytes(b.to_vec())
@@ -536,10 +524,6 @@ impl ConsentRevokedV1 {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// ConsentCapabilityToken and ConsentGate
-// ---------------------------------------------------------------------------
 
 /// Capability token issued by the Gateway on a valid `consent.granted.v1`.
 ///
@@ -1449,10 +1433,6 @@ pub trait ConsentGate: Send + Sync {
         Err(ConsentError::NoConsent)
     }
 }
-
-// ---------------------------------------------------------------------------
-// FieldStateV1 — Replay sentinel for destroyed keys (ADR-039/ADR-060)
-// ---------------------------------------------------------------------------
 
 /// Deterministic state of a protected field during replay.
 ///

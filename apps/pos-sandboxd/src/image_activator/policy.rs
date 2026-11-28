@@ -16,9 +16,6 @@
 //! carries filesystem flags, so the effective policy loses them. The returned
 //! policy is therefore accepted when it is equivalent to the request, or to
 //! the request with only its filesystem flags removed, and to nothing else.
-//!
-//! Every bit operation goes through the small helpers below so that each one
-//! is exercised with overlapping operands.
 
 /// The ADR-087 requested policy: a signed EROFS root and nothing else.
 pub(super) const REQUESTED: &str = "root=signed+erofs:=absent";

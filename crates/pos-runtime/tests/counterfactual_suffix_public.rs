@@ -216,10 +216,6 @@ const fn committed_head(last: u64) -> u64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backends
-// ---------------------------------------------------------------------------
-
 trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
     fn open() -> TestResult<Self>;
 
@@ -727,10 +723,6 @@ impl<B: Backend> Backend for Faulty<B> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plan, graph, and host ports
-// ---------------------------------------------------------------------------
-
 fn intervention(effective_tick: u64, intervention_id: [u8; 16]) -> InterventionV1 {
     InterventionV1 {
         intervention_id,
@@ -1063,10 +1055,6 @@ impl Stager {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dependency declarations
-// ---------------------------------------------------------------------------
-
 /// The declared nodes and edges of one Tick record.
 type Declaration = (Vec<DependencyNodeRecordV1>, Vec<DependencyEdgeRecordV1>);
 /// One edit of a Tick's declaration before it is staged.
@@ -1272,10 +1260,6 @@ fn recorded<B: RecordingBackend>(setup: &Setup<B>) -> TestResult<Declaration> {
     assert!(nodes.next().is_none() && edges.next().is_none());
     Ok((nodes.items().to_vec(), edges.items().to_vec()))
 }
-
-// ---------------------------------------------------------------------------
-// Fixture
-// ---------------------------------------------------------------------------
 
 /// The host reports every frozen artifact as available.
 struct AllPresent;
@@ -1762,10 +1746,6 @@ fn assert_failed_at<B: Backend>(
     assert_eq!(head(setup)?, committed_head(tick - 1));
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Scenarios
-// ---------------------------------------------------------------------------
 
 macro_rules! both_backends {
     ($scenario:ident) => {
@@ -2653,10 +2633,6 @@ fn suffix_length_is_bounded_by_the_checkpoint_limit() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Dependency records
-// ---------------------------------------------------------------------------
-
 /// The Tick whose declaration the rejection cases tamper with; Tick 13 is
 /// the last committed one then.
 const DECLARATION_TICK: u64 = 14;
@@ -3031,10 +3007,6 @@ fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {
     assert_eq!(head(&setup)?, FIRST_TICK_HEAD);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Classified Forks
-// ---------------------------------------------------------------------------
 
 /// Lends a classified world's live session and one permit, records every
 /// call, and refuses its `refuse_from`th call and every later one.
@@ -3481,10 +3453,6 @@ fn unknown_classified_outcomes_resolve_from_the_basis<B: ClassifiedBackend>() ->
     Ok(())
 }
 both_backends!(unknown_classified_outcomes_resolve_from_the_basis);
-
-// ---------------------------------------------------------------------------
-// ADR-099 revision 12 conformance: the suffix read and the manifest producer
-// ---------------------------------------------------------------------------
 
 /// The admitted creator of every classified fixture Fork: its `POC1` Owner.
 const CREATOR: &str = classified::OWNER;

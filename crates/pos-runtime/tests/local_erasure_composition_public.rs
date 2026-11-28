@@ -961,10 +961,8 @@ fn the_classification_is_exactly_the_owner_table() {
     assert_eq!(permitted, 48);
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §5/§6: `LocalErasureAuthorityV1` and `submit_local_erasure`
 // (acceptance tests 3b, 5 and 6, authority parts).
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
@@ -2497,10 +2495,8 @@ fn destruction_goes_only_to_an_owner_the_bundle_names() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Freeze and Fork scope extension at the public seams (ADR-136 amendment
 // decisions 1B, 4A and 5A; acceptance tests 2, 3, 3b, 5 and 6).
-// ---------------------------------------------------------------------------
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
@@ -3662,10 +3658,8 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ARD1 rows bound to an affected Timeline (decision 2A over C1′). The MRM1
 // closure fixture follows `pos-store/tests/artifact_registration_persistence_public.rs`.
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
@@ -4197,13 +4191,11 @@ fn an_anchor_only_scope_freezes_and_recovers() -> TestResult {
     assert_committed_freeze(&store, host, request, Vec::new(), &cells, &signed)
 }
 
-// ---------------------------------------------------------------------------
 // Attempt, acknowledgement and receipt admission at the public seams
 // (ADR-136 §5 and §6; acceptance tests 4, 6 and 8, authority parts). The
 // tests play the C4 driver and signer: owner results are retained ELO1
 // records, and every signature is made with the fixture signer key the
 // bundle pins.
-// ---------------------------------------------------------------------------
 
 use std::sync::Mutex;
 
@@ -6180,11 +6172,9 @@ fn a_retry_recovers_on_its_retained_frozen_bundle_after_a_rotation() -> TestResu
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §4a: `LocalErasureExecutorV1`, `destroy_key_for_erasure` and the
 // dispatch outbox, with MemoryStore/SQLite parity, and the Q18 subject-fence
 // exemption (#1430).
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     ErasureAuthorityExecutionV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
@@ -7175,11 +7165,9 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 §5/§6: `LocalErasureSignerV1` and `LocalErasureDriverV1`, the
 // rotation rule and the startup sweep (#1431; acceptance tests 1, 4, 7 and
 // the signer parts of 6).
-// ---------------------------------------------------------------------------
 
 use pos_runtime::{
     LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureSignerV1,
@@ -8371,11 +8359,9 @@ fn an_overflowing_sweep_is_skipped() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-138 §5 and §7: the `export-recipient` owner withdraws the grantee's
 // publication at the host seam (acceptance tests 1, 3, 6 and 7, and ADR-136
 // acceptance test 3 as ADR-138 §2 amends it; #1446).
-// ---------------------------------------------------------------------------
 
 use pos_core::LocalErasureRecipientExportWithdrawalV1;
 use pos_store::sqlite::{RecipientExportPublicationErrorV1, RecipientKeyOwnerV1};
@@ -9150,11 +9136,9 @@ fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // #1449: the ELADM1 submission binding (owner decision D5 on #1413), the
 // typed admission refusals (D3, D9) and the `getErasure` projection
 // (ADR-136 §7).
-// ---------------------------------------------------------------------------
 
 use pos_core::LocalErasureAdmissionV1;
 use pos_runtime::{LocalErasureClassCountV1, LocalErasureProjectionV1};
@@ -9486,11 +9470,9 @@ fn the_redaction_generation_rises_across_requests() -> TestResult {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
 // a subject-scoped export through core `export_timeline`, then erasure,
 // then the export again through the public offline evaluator.
-// ---------------------------------------------------------------------------
 
 use pos_core::{
     store::export_timeline, ArtifactClaimInputV1, ArtifactOptionalityV1, ArtifactStateV1,
@@ -9589,30 +9571,24 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // The ADR-136 acceptance matrix, slice C6a (#1469): the runtime gaps of
 // acceptance tests 2 to 6, over both adapters. It reuses every fixture
 // above; `docs/erasure/adr-136-acceptance-matrix.md` maps each bullet.
-// ---------------------------------------------------------------------------
 
 #[path = "local_erasure_composition/acceptance.rs"]
 mod acceptance;
 
-// ---------------------------------------------------------------------------
 // ADR-129 revision 13 (#560 A4b-2, R13-1): the Memory community
 // erasure-budget counters against the authority's closure.
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
 #[path = "local_erasure_composition/community_budget.rs"]
 mod community_budget;
 
-// ---------------------------------------------------------------------------
 // ADR-136 follow-up F3 (#1408): the operator's admissions record closes
 // fresh Local submissions only. An exact replay, the driver and its startup
 // sweep never read it, so every admitted request still freezes and
 // completes.
-// ---------------------------------------------------------------------------
 
 use pos_core::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
 

@@ -27,10 +27,6 @@ mod reducer;
 
 pub use reducer::PersonaReducer;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 /// Event type for preference updates.
 pub const EVENT_TYPE_PREFERENCE: &str = "persona.preference";
 /// Event type for decisions.
@@ -43,10 +39,6 @@ pub const EVENT_TYPE_PREDICTION_SOURCE: &str = "persona.prediction";
 pub const PREDICTION_SOURCE_VERSION_V1: u32 = 1;
 /// Entity kind for personas.
 pub const ENTITY_KIND: &str = "persona";
-
-// ---------------------------------------------------------------------------
-// Payload types (CBOR-serialized)
-// ---------------------------------------------------------------------------
 
 /// Payload for a `persona.preference` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,10 +110,6 @@ pub fn draft_prediction_source(
         CanonicalBytes::from_vec(buf),
     )
 }
-
-// ---------------------------------------------------------------------------
-// PersonaPlugin descriptor
-// ---------------------------------------------------------------------------
 
 /// Persona plugin.
 pub struct PersonaPlugin {
@@ -273,10 +261,6 @@ impl PersonaModel {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// PersonaEvalDriver — closes the eval loop
-// ---------------------------------------------------------------------------
 
 /// One binary preference question used by [`PersonaEvalDriver`].
 #[derive(Debug, Clone)]
