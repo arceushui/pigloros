@@ -11,7 +11,7 @@ use pos_core::community_lifecycle::{
 
 use super::{
     publication, snapshot, target, Case, Fallible, Roster, TestResult, FAILURE, HORIZON, METADATA,
-    OPERATION, SEAL,
+    OPERATION, SAMPLE, SEAL,
 };
 use crate::community::private_hash::private_digest;
 use crate::community::{
@@ -119,7 +119,7 @@ fn a_published_reserve_is_aborted_once_its_call_ended() -> TestResult {
         .domain
         .world
         .domain
-        .original_reserve(target(), OPERATION)?;
+        .original_reserve(target(), OPERATION, SAMPLE)?;
     assert_eq!(
         original.reservation(),
         reservation.to_canonical_cbor().as_slice()
@@ -167,7 +167,7 @@ fn a_published_reserve_is_aborted_once_its_call_ended() -> TestResult {
         .domain
         .world
         .domain
-        .original_reserve(target(), OPERATION)?;
+        .original_reserve(target(), OPERATION, SAMPLE)?;
     assert_eq!(after.request(), original.request());
 
     // A retry returns the original receipt.
