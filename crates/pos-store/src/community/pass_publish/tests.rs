@@ -915,6 +915,68 @@ fn a_resolved_pass_is_discovered_by_the_same_horizon() -> TestResult {
     Ok(())
 }
 
+/// R13.2(4): the horizon a Reserve keeps with its sealed records is the
+/// CPR1's own `evidence_not_after_micros`, decoded from the sealed CPR1.
+#[test]
+fn the_kept_horizon_is_the_sealed_cpr1_horizon() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    let original = domain.original_reserve(target(), OPERATION, SAMPLE)?;
+    let sealed = CommunityReservationV1::from_canonical_cbor(original.reservation())?;
+    let kept = domain
+        .reserve_publications
+        .get(&(target(), OPERATION))
+        .ok_or("publication")?
+        .evidence_not_after_micros;
+    assert_eq!(kept, sealed.as_input().evidence_not_after_micros);
+    assert!(kept > SAMPLE);
+    Ok(())
+}
+
+/// R10.7 4a: a truncated or a flipped record is disposed evidence, 12, at
+/// and after `H_r` as before it; intact evidence at `H_r` is 13.
+#[test]
+fn an_unopenable_record_is_12_past_the_horizon() -> TestResult {
+    let roster = Roster::release_one()?;
+    let rows = roster.rows()?;
+    let mut case = Case::new(&roster, &rows)?;
+    let staged = case.stage(OPERATION)?;
+    let horizon = staged.record.reserved.reservation.evidence_not_after_micros;
+    let publication = publication(&case.profile, &case.policy);
+    let domain = &mut case.domain.world.domain;
+    domain.publish_reserved_pass(&SEAL, staged, publication)?;
+    assert_eq!(
+        domain.original_reserve(target(), OPERATION, horizon).err(),
+        Some(Error::EvidenceExpired)
+    );
+    for index in [0, 1] {
+        flip(domain, index)?;
+        for sample in [SAMPLE, horizon, u64::MAX] {
+            assert_eq!(
+                domain.original_reserve(target(), OPERATION, sample).err(),
+                Some(Error::EvidenceUnavailable)
+            );
+        }
+        flip(domain, index)?;
+    }
+    domain
+        .reserve_publications
+        .get_mut(&(target(), OPERATION))
+        .ok_or("publication")?
+        .records
+        .truncate(1);
+    assert_eq!(
+        domain.original_reserve(target(), OPERATION, horizon).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
 /// R10.7 4a ("disposed or expired original evidence 12 or 13"): evidence
 /// that is gone is 12 whatever the sample, and only evidence that is there
 /// and past `H_r` is 13: a pass whose metadata key is missing is 12 before
