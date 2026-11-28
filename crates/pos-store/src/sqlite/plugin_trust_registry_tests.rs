@@ -1251,6 +1251,32 @@ fn a_failing_read_statement_or_schema_probe_fails_an_evaluation_cleanly() -> Tes
     Ok(())
 }
 
+// EV2, faults for the retained path: its first read is the scope row, so a failing read statement
+// is `StorageFailed` there as well and ends through `ROLLBACK`.
+#[test]
+fn a_failing_scope_read_fails_a_retained_evaluation_cleanly() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let (ptr1, prv1) = genesis.histories();
+    let one = release_one();
+    let retained = || -> TestResult<_> {
+        Ok(h.store.evaluate_retained_release(
+            "scope",
+            &ptr1,
+            &prv1,
+            &one.projection()?,
+            genesis.trusted()?,
+            genesis.tick,
+        ))
+    };
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 12)?;
+    assert_eq!(retained()?, Err(Error::StorageFailed));
+    assert!(h.store.conn.is_autocommit());
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 2000)?;
+    assert!(retained()?.is_ok());
+    Ok(())
+}
+
 #[test]
 fn a_locked_rollback_journal_store_is_busy_at_the_first_read_and_needs_no_wal() -> TestResult {
     let h = admitted()?;
