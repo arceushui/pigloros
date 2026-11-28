@@ -662,7 +662,7 @@ fn assert_regenerated(directory: &Path) -> TestResult {
 }
 
 fn blake3_mac(key: [u8; 32], field_tag: &str, plaintext: &[u8]) -> [u8; 32] {
-    let mut input = b"pigloros/subject-data-append-mac/v1\0".to_vec();
+    let mut input = b"pigloros/subject-data-append-mac/v2\0".to_vec();
     input.push(field_tag.len().to_le_bytes()[0]);
     input.extend(field_tag.as_bytes());
     input.extend(plaintext);
@@ -816,7 +816,7 @@ fn a_nul_in_the_field_tag_no_longer_makes_requests_ambiguous() -> TestResult {
 fn the_length_byte_is_part_of_the_request_mac_preimage() -> TestResult {
     let directory = tempfile::tempdir()?;
     let key = load_with(directory.path(), euid(), fixed_entropy)?;
-    let mut preimage = b"pigloros/subject-data-append-mac/v1\0".to_vec();
+    let mut preimage = b"pigloros/subject-data-append-mac/v2\0".to_vec();
     preimage.extend([3]);
     preimage.extend(b"tagpayload");
     let expected = *blake3::keyed_hash(&[7; 32], &preimage).as_bytes();
@@ -838,6 +838,32 @@ fn field_tags_of_one_and_128_bytes_are_admitted_and_others_refused() -> TestResu
     assert_eq!(key.request_mac("", b"p"), refused);
     assert_eq!(key.request_mac(&"t".repeat(129), b"p"), refused);
     assert_eq!(key.request_mac(&"t".repeat(300), b"p"), refused);
+    Ok(())
+}
+
+#[test]
+fn a_non_ascii_field_tag_of_valid_length_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let key = load_with(directory.path(), euid(), fixed_entropy)?;
+    let tag = "caf\u{e9}";
+    assert!((1..=128).contains(&tag.len()));
+    assert_eq!(
+        key.request_mac(tag, b"p"),
+        Err(SubjectAppendReceiptRefusalV1::InvalidRequest)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_request_mac_domain_is_pinned_to_v2() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let key = load_with(directory.path(), euid(), fixed_entropy)?;
+    let mut hasher = blake3::Hasher::new_keyed(&[7; 32]);
+    hasher.update(b"pigloros/subject-data-append-mac/v2\0");
+    hasher.update(&[1]);
+    hasher.update(b"t");
+    hasher.update(b"p");
+    assert_eq!(key.request_mac("t", b"p")?, *hasher.finalize().as_bytes());
     Ok(())
 }
 

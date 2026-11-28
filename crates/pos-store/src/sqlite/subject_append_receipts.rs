@@ -48,7 +48,7 @@ use super::{sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStor
 pub const APPEND_MAC_KEY_FILE_NAME: &str = "subject-append-mac.v1.key";
 
 /// Domain prefix of the keyed request MAC.
-const REQUEST_MAC_DOMAIN: &[u8] = b"pigloros/subject-data-append-mac/v1\0";
+const REQUEST_MAC_DOMAIN: &[u8] = b"pigloros/subject-data-append-mac/v2\0";
 
 /// The longest admitted `field_tag`, so its length fits the one-byte prefix.
 const MAX_FIELD_TAG_LEN: u8 = 128;
@@ -444,7 +444,8 @@ impl SubjectAppendMacKeyV1 {
     ///
     /// # Errors
     /// Returns [`SubjectAppendReceiptRefusalV1::InvalidRequest`] for a
-    /// `field_tag` that is not 1 to 128 bytes long.
+    /// `field_tag` that is not 1 to 128 ASCII bytes, the same rule as
+    /// [`subject_append_request_digest`].
     pub fn request_mac(
         &self,
         field_tag: &str,
@@ -453,6 +454,7 @@ impl SubjectAppendMacKeyV1 {
         let length = u8::try_from(field_tag.len())
             .ok()
             .filter(|length| (1..=MAX_FIELD_TAG_LEN).contains(length))
+            .filter(|_| field_tag.is_ascii())
             .ok_or(SubjectAppendReceiptRefusalV1::InvalidRequest)?;
         let mut hasher = blake3::Hasher::new_keyed(&self.0);
         hasher.update(REQUEST_MAC_DOMAIN);
