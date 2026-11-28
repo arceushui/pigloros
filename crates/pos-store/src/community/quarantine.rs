@@ -410,6 +410,23 @@ impl MetadataWriteV1 {
     }
 }
 
+/// The CFO1 horizon: the quarantine and metadata horizons, whichever ends
+/// first.
+fn failure_horizon(context: CommunityQuarantineContextV1<'_>) -> u64 {
+    context
+        .profile
+        .as_input()
+        .retention
+        .quarantine_not_after_micros
+        .min(
+            context
+                .binding
+                .metadata_policy
+                .as_input()
+                .metadata_not_after_micros,
+        )
+}
+
 /// The facts every staging step reads.
 pub(super) struct OperationV1<'c> {
     pub(super) context: CommunityQuarantineContextV1<'c>,
@@ -517,31 +534,38 @@ impl MemoryCommunityDomainV1 {
                 .retry_set_reason(original, &bound)
                 .map(SetReasonPreparedV1::Original);
         }
-        let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
+        let operation = self.operation(lifecycle, context, call, (key, write))?;
+        let bound = operation.authority.bound;
+        self.stage_set_reason(seal, lifecycle, &operation)
+            .map(|staged| SetReasonPreparedV1::Staged(Box::new(staged), reservation, bound))
+    }
+
+    /// The facts of a new `SetReason` once the retry lookup found nothing:
+    /// the failure's re-verification (A5.5 step 3) and the premises of step
+    /// 4 under `key` and the metadata `write` decision.
+    fn operation<'c>(
+        &self,
+        lifecycle: &CommunityLifecycleAuthorityV1,
+        context: CommunityQuarantineContextV1<'c>,
+        call: CommunitySetReasonCallV1<'c>,
+        (key, write): (Hash, MetadataWriteV1),
+    ) -> Result<OperationV1<'c>, Error> {
+        let trust_snapshot_digest =
+            self.verify_failure(lifecycle.trust_scope(), &call.failure.0)?;
         let authority = write.with_trust(trust_snapshot_digest);
         let member = self.member(context, &call)?;
         let current = self.quarantine_index.get(&key);
         if current.map(|ledger| ledger.head) != call.expected_ledger_digest {
             return Err(Error::Conflict);
         }
-        let retention = context.profile.as_input().retention;
-        let operation = OperationV1 {
+        Ok(OperationV1 {
             context,
             call,
             key,
             member,
             authority,
-            failure_horizon: retention.quarantine_not_after_micros.min(
-                context
-                    .binding
-                    .metadata_policy
-                    .as_input()
-                    .metadata_not_after_micros,
-            ),
-        };
-        let bound = operation.authority.bound;
-        self.stage_set_reason(seal, lifecycle, &operation)
-            .map(|staged| SetReasonPreparedV1::Staged(Box::new(staged), reservation, bound))
+            failure_horizon: failure_horizon(context),
+        })
     }
 
     /// Step 3, after the step-2 reservation: its bound and the metadata

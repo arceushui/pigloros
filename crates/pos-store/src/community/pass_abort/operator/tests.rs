@@ -7,8 +7,10 @@ use std::time::Duration;
 use pos_core::community_lifecycle::{
     CommunityAbortReasonV1 as Reason, CommunityAbortV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1,
-    CommunityCurrentViewV1, CommunityDurableProfileV1, CommunityKeyIntentInputV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityMetadataPolicyV1,
+    CommunityAuthorityViewRowV1, CommunityCurrentViewV1, CommunityDurableProfileV1,
+    CommunityInitializationRequestV1, CommunityKeyIntentInputV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationReferenceV1,
+    CommunityMaterializationV1, CommunityMemberSlotsV1, CommunityMetadataPolicyV1,
     CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
     CommunityPassFrontierV1, CommunityPassKeyV1, CommunityProfileMemberV1, CommunityRecordKindsV1,
     CommunityReservationInputV1, CommunityReservationV1, CommunityScopeMembersV1,
@@ -20,6 +22,10 @@ use zeroize::Zeroizing;
 use super::{
     CommunityPassAbortCallV1, CommunityPassAbortReceiptV1, PreparedAbortV1, StagedPassAbortV1,
 };
+use crate::community::current_view_head::tests::{
+    opened_records, simulate_commit, state_revisions, views_agree,
+};
+use crate::community::current_view_head::CommunitySelectedViewV1;
 use crate::community::erasure_budget::CommunityPendingReservationV1;
 use crate::community::pass_record::{
     CommunityPassMemberDigestsV1, CommunityPassRecordV1, CommunityPassStatusV1,
@@ -546,6 +552,256 @@ fn an_abort_commits_its_records_in_one_transaction() -> TestResult {
     Ok(())
 }
 
+/// I235: the Abort's CAV1 states the initialization head's frontier and the
+/// CMI1 reference of the first roster member's CSR1, which the sealed
+/// initialization records name independently of the domain's selected view.
+#[test]
+fn an_abort_states_the_first_members_state_revision() -> TestResult {
+    let mut case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    assert_eq!(refs.len(), 2);
+    assert!(refs[0] != refs[1]);
+    let selected = case
+        .domain()
+        .selected_views
+        .get(&target())
+        .ok_or("no selected view")?;
+    assert!(matches!(
+        selected.frontier,
+        CommunityPassFrontierV1::Initial
+    ));
+    assert!(selected.head_ref == refs[0]);
+    assert!(views_agree(case.domain(), target()));
+    assert_eq!(selected.head_digest, case.head);
+    case.reserve(false)?;
+    case.abort(Reason::AuthenticatedCancellation)??;
+    let records = case.records()?;
+    let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
+    assert!(matches!(
+        view.as_input().frontier,
+        CommunityPassFrontierV1::Initial
+    ));
+    assert!(view.as_input().selected_head == Some(refs[0]));
+    Ok(())
+}
+
+/// What the head-ref tests read from an initialized Timeline: its CSR1
+/// references, the sealed CGI1 with the digest it lists first, and the CMI1s
+/// in record order. The fixture builds the graph in the CGI1's order
+/// (`check_input` requires it).
+struct HeadRefScene {
+    case: Case,
+    refs: Vec<CommunityMaterializationReferenceV1>,
+    cgi1: Vec<u8>,
+    listed_first: Hash,
+    cmis: Vec<Zeroizing<Vec<u8>>>,
+}
+
+/// The sealed CGI1 and the CMB1 digest it lists first.
+fn sealed_cgi1(opened: &[Zeroizing<Vec<u8>>]) -> Fallible<(Vec<u8>, Hash)> {
+    let cgi1 = opened
+        .iter()
+        .find(|bytes| CommunityInitializationRequestV1::from_canonical_cbor(bytes).is_ok())
+        .ok_or("no CGI1")?
+        .to_vec();
+    let request = CommunityInitializationRequestV1::from_canonical_cbor(&cgi1)?;
+    assert_eq!(request.as_input().member_binding_digests.len(), 2);
+    let first = request
+        .as_input()
+        .member_binding_digests
+        .iter()
+        .next()
+        .ok_or("empty CGI1")?;
+    Ok((cgi1, first))
+}
+
+fn head_ref_scene() -> Fallible<HeadRefScene> {
+    let case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    let opened = opened_records(case.domain())?;
+    let (cgi1, listed_first) = sealed_cgi1(&opened)?;
+    let cmis: Vec<Zeroizing<Vec<u8>>> = opened
+        .into_iter()
+        .filter(|bytes| CommunityMaterializationV1::from_canonical_cbor(bytes).is_ok())
+        .collect();
+    assert_eq!(cmis.len(), 10);
+    Ok(HeadRefScene {
+        case,
+        refs,
+        cgi1,
+        listed_first,
+        cmis,
+    })
+}
+
+/// R16.5(4): `at` takes the CSR1 CMI1 of the index it is given: slot 0's CSR1
+/// is record 2 and slot 1's is record 7, and the domain's selected view is
+/// slot 0's. Another record or an index out of range is refused.
+#[test]
+fn a_view_at_an_index_is_that_state_revision() -> TestResult {
+    let scene = head_ref_scene()?;
+    let head = hash(1);
+    let first = CommunitySelectedViewV1::at(head, 2, &scene.cmis)?;
+    let second = CommunitySelectedViewV1::at(head, 7, &scene.cmis)?;
+    assert!(first.head_ref == scene.refs[0] && second.head_ref == scene.refs[1]);
+    let selected = scene
+        .case
+        .domain()
+        .selected_views
+        .get(&target())
+        .ok_or("no selected view")?;
+    assert!(selected.head_ref == first.head_ref && selected.head_ref != second.head_ref);
+    for index in [0, 1, 3, 4, 99] {
+        assert_eq!(
+            CommunitySelectedViewV1::at(head, index, &scene.cmis).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    assert!(CommunitySelectedViewV1::at(head, 0, &[Zeroizing::new(vec![0xff])]).is_err());
+    Ok(())
+}
+
+/// R16.5(4): `initial` asks for the slot of the digest the CGI1 lists first,
+/// and takes the CSR1 of the index it gets.
+#[test]
+fn the_initial_view_asks_for_the_cgi1_first_member() -> TestResult {
+    let scene = head_ref_scene()?;
+    let listed = scene.listed_first;
+    let view = CommunitySelectedViewV1::initial(
+        hash(1),
+        &scene.cgi1,
+        |member| (member == listed).then_some(7),
+        &scene.cmis,
+    )?;
+    assert!(view.head_ref == scene.refs[1]);
+    Ok(())
+}
+
+/// A member the lookup does not find, and a lookup that finds none, are
+/// refused.
+#[test]
+fn the_initial_view_refuses_an_unknown_member() -> TestResult {
+    let scene = head_ref_scene()?;
+    let listed = scene.listed_first;
+    assert_eq!(
+        CommunitySelectedViewV1::initial(
+            hash(1),
+            &scene.cgi1,
+            |member| (member != listed).then_some(7),
+            &scene.cmis
+        )
+        .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        CommunitySelectedViewV1::initial(hash(1), &scene.cgi1, |_| None, &scene.cmis).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// I235: an operator Abort on a committed head succeeds, and its CAV1 states
+/// that head's frontier and ref. A Commit does not exist yet (slice 3), so
+/// the head is what a Commit will install in one transaction: a new
+/// `pass_states` head and the selected view of a real CSR1 CMI1 reference
+/// (the second member's) under the `Committed` frontier of the pass key.
+#[test]
+fn an_abort_on_a_committed_head_succeeds() -> TestResult {
+    let mut case = Case::new()?;
+    let refs = state_revisions(case.domain())?;
+    let key = pass_key()?;
+    simulate_commit(
+        case.domain_mut(),
+        target(),
+        &CommunitySelectedViewV1 {
+            head_digest: hash(0x77),
+            frontier: CommunityPassFrontierV1::Committed(key),
+            head_ref: refs[1],
+        },
+    )?;
+    assert!(views_agree(case.domain(), target()));
+    case.reserve(false)?;
+    case.abort(Reason::AuthenticatedCancellation)??;
+    assert!(views_agree(case.domain(), target()));
+    let records = case.records()?;
+    let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
+    assert!(matches!(
+        view.as_input().frontier,
+        CommunityPassFrontierV1::Committed(committed) if committed == key
+    ));
+    assert!(view.as_input().selected_head == Some(refs[1]));
+    Ok(())
+}
+
+/// A Timeline with no selected view, or one whose view reads another head
+/// than the pass state's, has no head ref to state: the Abort stages
+/// nothing.
+#[test]
+fn an_abort_without_an_agreeing_selected_view_is_refused() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let view = *case
+        .domain()
+        .selected_views
+        .get(&target())
+        .ok_or("no selected view")?;
+    case.domain_mut().selected_views.insert(
+        target(),
+        CommunitySelectedViewV1 {
+            head_digest: hash(0x78),
+            ..view
+        },
+    );
+    assert!(!views_agree(case.domain(), target()));
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    case.domain_mut().selected_views.clear();
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        case.domain().pass_status(target(), OPERATION),
+        Some(CommunityPassStatusV1::Reserved)
+    );
+    Ok(())
+}
+
+/// R16.2(4): the CAV1 carries the metadata `write` decision's chain row
+/// whenever its key is not another row's. The administrative and metadata
+/// chains share a key in this fixture, so one row stands; a chain row at
+/// another head gives two, ascending.
+#[test]
+fn the_metadata_chain_row_joins_a_distinct_chain_row() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let (alone, joined) = case.with_call(
+        OPERATION,
+        Reason::AuthenticatedCancellation,
+        DATA_LEAF,
+        |domain, context, _, metadata, _| -> Fallible<_> {
+            let write = domain.abort_metadata_write(context, metadata)?;
+            let metadata = (write.leaf_grant_id, &write.request);
+            let alone = domain.head_view(target(), vec![], metadata)?;
+            let chain = alone.authority_rows[0];
+            let later = CommunityAuthorityViewRowV1 {
+                head_seq: chain.head_seq + 1,
+                ..chain
+            };
+            let joined = domain.head_view(target(), vec![later], metadata)?;
+            Ok((alone.authority_rows, joined.authority_rows))
+        },
+    )??;
+    assert_eq!(alone.len(), 1);
+    assert_eq!(alone[0].authority_timeline, authority_timeline());
+    assert_eq!(joined.len(), 2);
+    assert!(joined[0] == alone[0]);
+    assert_eq!(joined[1].head_seq, alone[0].head_seq + 1);
+    Ok(())
+}
+
 /// Reason 4 is the same Abort with its own code.
 #[test]
 fn a_reason_four_abort_records_its_reason() -> TestResult {
@@ -732,8 +988,7 @@ fn an_authority_failure_gives_12_with_no_effect() -> TestResult {
     Ok(())
 }
 
-/// The generation (5) and head (6) fences, and the guard that the head is
-/// still the initialization head (12).
+/// The generation (5) and head (6) fences.
 #[test]
 fn a_moved_generation_or_head_is_refused() -> TestResult {
     let mut case = Case::new()?;
@@ -768,11 +1023,7 @@ fn a_moved_generation_or_head_is_refused() -> TestResult {
         .get_mut(&(target(), OPERATION))
         .ok_or("no pass")?;
     record.reserved.reservation = reservation;
-    case.domain_mut().initializations.clear();
-    assert_eq!(
-        case.abort(Reason::AuthenticatedCancellation)?.err(),
-        Some(Error::EvidenceUnavailable)
-    );
+    assert!(case.abort(Reason::AuthenticatedCancellation)?.is_ok());
     Ok(())
 }
 

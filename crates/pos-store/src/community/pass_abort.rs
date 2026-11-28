@@ -19,8 +19,7 @@ mod operator;
 
 use pos_core::community_lifecycle::{
     CommunityAbortInputV1, CommunityAbortReasonV1, CommunityAbortV1, CommunityArtifactAdmissionV1,
-    CommunityGenerationAdmissionV1, CommunityLifecycleErrorV1 as Error,
-    CommunityReservationInputV1, CommunityReservationV1,
+    CommunityLifecycleErrorV1 as Error, CommunityReservationInputV1, CommunityReservationV1,
 };
 use pos_core::{Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -183,9 +182,9 @@ pub(super) struct FencedV1 {
 
 impl MemoryCommunityDomainV1 {
     /// The fences of a first Abort: the installed CDP1 must be the Reserve's
-    /// (3), then the generation (5), the head (6) and the initialization-head
-    /// guard (12), then the metadata horizon (13), as A5.5 step 4 and A4e-1
-    /// order them. `decision_bound_micros` is the call's decision bound.
+    /// (3), then the generation (5) and the head (6), then the metadata
+    /// horizon (13), as A5.5 step 4 and A4e-1 order them.
+    /// `decision_bound_micros` is the call's decision bound.
     ///
     /// A first Abort at or after the pass's `H_r` still commits its CAB1
     /// (R15.2(3a), N17).
@@ -208,7 +207,6 @@ impl MemoryCommunityDomainV1 {
         if head != reservation.predecessor_head_digest {
             return Err(Error::StaleFrontier);
         }
-        self.require_initial_head(timeline, generation, head)?;
         let metadata_horizon = context
             .binding
             .metadata_policy
@@ -222,37 +220,6 @@ impl MemoryCommunityDomainV1 {
             selection_address,
             metadata_horizon,
         })
-    }
-
-    /// Fail closed unless `head` is the generation's initialization head.
-    ///
-    /// The CAV1 below states the `Initial` frontier with no head ref, which
-    /// is true only until a pass commits. A5 (Commit) replaces this guard
-    /// with the committed frontier and the head's CMI1 reference
-    /// (R15.1(5)).
-    fn require_initial_head(
-        &self,
-        timeline: TimelineId,
-        generation: [u8; 16],
-        head: Hash,
-    ) -> Result<(), Error> {
-        self.initializations
-            .iter()
-            .filter(|((initialized, _), _)| *initialized == timeline)
-            .find_map(|(_, committed)| {
-                self.keys
-                    .get(&committed.metadata_key)
-                    .zip(committed.records.last())
-                    .and_then(|(vault, sealed)| vault.open(sealed).ok())
-                    .and_then(|bytes| {
-                        CommunityGenerationAdmissionV1::from_canonical_cbor(&bytes).ok()
-                    })
-                    .filter(|admission| admission.as_input().generation == generation)
-                    .map(|admission| admission.as_input().initial_selected_head_digest)
-            })
-            .filter(|initial| *initial == head)
-            .map(|_| ())
-            .ok_or(Error::EvidenceUnavailable)
     }
 }
 

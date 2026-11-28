@@ -18,13 +18,12 @@ use pos_core::community_lifecycle::{
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceInputV1,
     CommunityAuthorityEvidenceV1, CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1,
     CommunityClockBoundV1, CommunityCopyHolderV1, CommunityCopyInventoryInputV1,
-    CommunityCopyInventoryV1, CommunityCopyStateV1, CommunityCurrentViewInputV1,
-    CommunityCurrentViewV1, CommunityDecisionRowV1, CommunityDueMemberBudgetV1,
-    CommunityKeyIntentInputV1, CommunityKeyIntentV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationInputV1, CommunityMaterializationReferenceV1,
-    CommunityMaterializationV1, CommunityMemberSlotsV1, CommunityMetadataSchemaV1,
-    CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityObjectBindingV1,
-    CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1, CommunityPassFrontierV1,
+    CommunityCopyInventoryV1, CommunityCopyStateV1, CommunityCurrentViewV1, CommunityDecisionRowV1,
+    CommunityDueMemberBudgetV1, CommunityKeyIntentInputV1, CommunityKeyIntentV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationInputV1,
+    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityMemberSlotsV1,
+    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
+    CommunityObjectBindingV1, CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1,
     CommunityProducerBindingV1, CommunityQuarantineDispositionV1, CommunityQuarantineKeyV1,
     CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
     CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonsV1,
@@ -36,13 +35,13 @@ use pos_core::community_lifecycle::{
 use pos_core::{AuthorityTrustRootSealV1, Hash};
 use zeroize::Zeroizing;
 
+use super::super::current_view_head::CommunityViewRowsV1;
 use super::super::extractor::{
     prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1, CommunityArtifactBatchV1,
     CommunityArtifactRecordInputV1, CommunityControlBatchInputV1,
 };
 use super::super::lifecycle_authority::CommunityLifecycleAuthorityV1;
 use super::super::memory_domain::MemoryCommunityDomainV1;
-use super::super::planner::key_rows;
 use super::super::private_hash::scope_set_digest;
 use super::super::protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
@@ -348,7 +347,7 @@ impl MemoryCommunityDomainV1 {
                     operation,
                     ledger.request_digest,
                     &protected.record,
-                    view,
+                    view.digest(),
                     inventory_generation,
                 )
             })
@@ -374,38 +373,40 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// The CAV1 of the `SetReason`, read inside its guard (R9.9(4)): T's
-    /// current selection (the initial frontier with no head ref, since no
-    /// pass has committed), no scope rows, the metadata chain's authority
-    /// row, the member's trust row, both key rows and the clock latch.
+    /// current selection (its frontier and the head ref of the first roster
+    /// member's CSR1, R16.5(4)), no scope rows, the metadata chain's
+    /// authority row, the member's trust row, both key rows and the clock
+    /// latch.
     fn view(
         &self,
         lifecycle: &CommunityLifecycleAuthorityV1,
         operation: &OperationV1<'_>,
         keys: &[&CommunityKeyIntentV1],
         inventory_generation: u64,
-    ) -> Result<Hash, Error> {
+    ) -> Result<CommunityCurrentViewV1, Error> {
         let authority = &operation.authority;
-        CommunityStoreDomainV1::clock_latch(self).and_then(|clock_latch| {
-            CommunityStoreDomainV1::authority_row(self, authority.leaf_grant_id, &authority.request)
-                .and_then(|authority_row| {
-                    self.trust_row(lifecycle.trust_scope(), operation)
-                        .and_then(|trust_row| {
-                            CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                                store_incarnation: self.store_incarnation,
-                                timeline: operation.timeline(),
-                                generation: operation.member.generation,
-                                inventory_generation,
-                                frontier: CommunityPassFrontierV1::Initial,
-                                selected_head: None,
-                                scope_rows: vec![],
-                                authority_rows: vec![authority_row],
-                                trust_rows: vec![trust_row],
-                                key_rows: key_rows(keys),
-                                clock_latch,
-                            })
-                            .map(|view| view.digest())
-                        })
-                })
+        self.head_view(
+            operation.timeline(),
+            vec![],
+            (authority.leaf_grant_id, &authority.request),
+        )
+        .and_then(|head| {
+            self.trust_row(lifecycle.trust_scope(), operation)
+                .map(|trust_row| (head, trust_row))
+        })
+        .and_then(|(head, trust_row)| {
+            self.current_view(
+                head,
+                CommunityViewRowsV1 {
+                    coordinates: (
+                        operation.timeline(),
+                        operation.member.generation,
+                        inventory_generation,
+                    ),
+                    trust_rows: vec![trust_row],
+                    keys,
+                },
+            )
         })
     }
 
@@ -873,3 +874,7 @@ fn materialization(
     })
     .map(|materialization| materialization.to_canonical_cbor())
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

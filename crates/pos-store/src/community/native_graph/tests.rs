@@ -576,3 +576,34 @@ fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult
     assert!(state.closure.is_empty() && state.generations.is_empty());
     Ok(())
 }
+
+/// R16.5(4): the CSR1 chosen is the one of the slot whose CMB1 digest is
+/// asked for, whatever the CGI1 lists first. Each slot holds CSC1, CIS1,
+/// CSR1 and two CPN1s.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_state_revision_is_found_by_the_members_slot() {
+    let bindings = [hash(1), hash(2), hash(3)];
+    let magics: Vec<[u8; 4]> = (0..3)
+        .flat_map(|_| [*b"CSC1", *b"CIS1", *b"CSR1", *b"CPN1", *b"CPN1"])
+        .collect();
+    for (member, index) in [(hash(1), 2), (hash(2), 7), (hash(3), 12)] {
+        assert_eq!(
+            super::state_revision_slot(&bindings, &magics, member),
+            Some(index)
+        );
+    }
+    assert_eq!(
+        super::state_revision_slot(&bindings, &magics, hash(9)),
+        None
+    );
+    assert_eq!(super::state_revision_slot(&[], &magics, hash(1)), None);
+    assert_eq!(
+        super::state_revision_slot(&bindings, &magics[..9], hash(3)),
+        None
+    );
+    assert_eq!(
+        super::state_revision_slot(&bindings, &magics[..9], hash(2)),
+        Some(7)
+    );
+}

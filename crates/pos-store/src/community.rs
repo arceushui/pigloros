@@ -9,6 +9,8 @@
 //! records, State or the backing store.
 
 mod attestation;
+#[cfg(target_os = "linux")]
+mod current_view_head;
 mod erasure_budget;
 mod extractor;
 #[cfg(target_os = "linux")]

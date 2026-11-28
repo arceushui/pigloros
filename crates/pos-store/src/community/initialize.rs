@@ -50,6 +50,7 @@ use pos_core::{
 };
 use zeroize::Zeroizing;
 
+use super::current_view_head::CommunitySelectedViewV1;
 use super::extractor::{
     prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
     CommunityArtifactBatchInputV1, CommunityArtifactBatchV1, CommunityArtifactRecordInputV1,
@@ -194,6 +195,8 @@ pub(super) struct StagedInitializationV1 {
     members: u64,
     /// T's pass state: the seeded counters and the initial graph.
     pass_state: CommunityPassStateV1,
+    /// T's selected head as a CAV1 reads it (R16.5(4)).
+    selected_view: CommunitySelectedViewV1,
 }
 
 /// The read-only inputs of the staging steps.
@@ -829,7 +832,16 @@ impl MemoryCommunityDomainV1 {
                 ))
                 .map(|receipt| (selection, receipt))
             })
-            .map(|(selection, receipt)| {
+            .and_then(|(selection, receipt)| {
+                CommunitySelectedViewV1::initial(
+                    graph.selected_head_digest(),
+                    records.request(),
+                    |member| graph.state_revision_index(member),
+                    &evidenced.materializations,
+                )
+                .map(|selected_view| (selection, receipt, selected_view))
+            })
+            .map(|(selection, receipt, selected_view)| {
                 key.close();
                 cohort_key.close();
                 StagedInitializationV1 {
@@ -855,6 +867,7 @@ impl MemoryCommunityDomainV1 {
                     receipt,
                     read_selection: operation.selection_address,
                     members,
+                    selected_view,
                 }
             })
     }
@@ -979,6 +992,9 @@ impl MemoryCommunityDomainV1 {
         self.inventory_generation += 1;
         self.count_erasure_context(staged.key.0, staged.members);
         self.pass_states.insert(staged.key.0, staged.pass_state);
+        // A re-initialization replaces both, as it replaces `pass_states`.
+        self.selected_views
+            .insert(staged.key.0, staged.selected_view);
         self.initializations.insert(staged.key, staged.committed);
         Ok(staged.receipt)
     }
