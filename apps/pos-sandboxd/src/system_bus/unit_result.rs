@@ -209,6 +209,31 @@ impl SystemdUnitOutcome {
     }
 }
 
+/// The `Result` systemd would have reported for `main` without `SuccessExitStatus=`.
+///
+/// The attempt unit lists every exit status and signal as a success (ADR-069 R17-E6), so that a
+/// failed main exit leaves the unit `active (exited)` with its cgroup, and systemd reports
+/// `success` whatever the main process did. The broker records the result of its own rule instead,
+/// which is systemd's `is_clean_exit` for a non-oneshot service: a nonzero exit status is
+/// `exit-code`, a signal other than the clean ones is `signal`, and a dump is `core-dump`. Every
+/// other result, and `success` for a clean exit, is systemd's own.
+fn derived(result: SystemdServiceResult, main: SystemdMainExit) -> SystemdServiceResult {
+    match (result, main) {
+        (SystemdServiceResult::Success, SystemdMainExit::Exited { status }) if status != 0 => {
+            SystemdServiceResult::ExitCode
+        }
+        (SystemdServiceResult::Success, SystemdMainExit::Killed { signal })
+            if !is_daemon_clean_signal(signal) =>
+        {
+            SystemdServiceResult::Signal
+        }
+        (SystemdServiceResult::Success, SystemdMainExit::Dumped { .. }) => {
+            SystemdServiceResult::CoreDump
+        }
+        _ => result,
+    }
+}
+
 fn is_daemon_clean_signal(signal: u8) -> bool {
     DAEMON_CLEAN_SIGNALS
         .iter()
@@ -340,6 +365,7 @@ impl SystemdUnitResultObservation {
         let result = SystemdServiceResult::parse(result)
             .ok_or_else(|| SystemdUnitResultError::UnknownResult(result.to_owned()))?;
         let main = SystemdMainExit::decode(code, status)?;
+        let result = derived(result, main);
         SystemdUnitOutcome::combine(result, main)
             .map(|outcome| Self {
                 unit_name: started.unit_name.clone(),
@@ -891,18 +917,56 @@ mod tests {
         Ok(())
     }
 
+    /// The attempt unit lists every exit status and signal as a success (ADR-069 R17-E6), so
+    /// systemd reports `success` for a main process that failed, was killed or dumped core: the
+    /// result is derived from the main exit by the rule systemd applies without the list.
+    #[tokio::test]
+    async fn a_success_with_a_failed_main_exit_is_reported_as_its_derived_result() -> TestResult {
+        let exit_code = |status| SystemdUnitOutcome::ExitCode { status };
+        let clean = |signal| SystemdUnitOutcome::CleanSignal { signal };
+        for (code, status, result, outcome) in [
+            // A failed exit.
+            (CLD_EXITED, 1, "exit-code", exit_code(1)),
+            (CLD_EXITED, 255, "exit-code", exit_code(255)),
+            // A signal, a signal systemd treats as clean, and the file-size ceiling.
+            (CLD_KILLED, 9, "signal", signaled(9, false)),
+            (CLD_KILLED, 3, "signal", signaled(3, false)),
+            (CLD_KILLED, 14, "signal", signaled(14, false)),
+            (CLD_KILLED, 25, "signal", file_size(false)),
+            (CLD_KILLED, 15, "success", clean(15)),
+            (CLD_KILLED, 1, "success", clean(1)),
+            // A dump, whatever the signal.
+            (CLD_DUMPED, 6, "core-dump", signaled(6, true)),
+            (CLD_DUMPED, 15, "core-dump", signaled(15, true)),
+            (CLD_DUMPED, 25, "core-dump", file_size(true)),
+            // A clean exit stays a success.
+            (CLD_EXITED, 0, "success", SystemdUnitOutcome::Success),
+        ] {
+            let observed = read("success", code, status).await??;
+            assert_eq!(observed.result().as_str(), result, "{code} {status}");
+            assert_eq!(observed.outcome(), outcome, "{code} {status}");
+            assert_eq!(observed.main_exit(), main_of(code, u8::try_from(status)?));
+        }
+        // No main exit recorded is still a contradiction for a success.
+        assert!(matches!(
+            read("success", CLD_NONE, 0).await?,
+            Err(SystemdUnitResultError::Inconsistent { .. })
+        ));
+        // A result other than `success` is systemd's own, whatever the main exit.
+        for result in ["timeout", "oom-kill", "resources"] {
+            let observed = read(result, CLD_EXITED, 3).await??;
+            assert_eq!(observed.result().as_str(), result);
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn every_contradictory_result_and_main_exit_is_refused() -> TestResult {
+        // `success` with a failed main exit is not a contradiction: it is how systemd reports any
+        // exit of the attempt unit, and `derived` turns it into the result systemd would have
+        // reported (`a_success_with_a_failed_main_exit_is_reported_as_its_derived_result`).
         let cases = [
             ("success", CLD_NONE, 0),
-            ("success", CLD_EXITED, 1),
-            ("success", CLD_KILLED, 3),
-            ("success", CLD_KILLED, 9),
-            ("success", CLD_KILLED, 14),
-            ("success", CLD_KILLED, 16),
-            ("success", CLD_KILLED, 25),
-            ("success", CLD_DUMPED, 15),
-            ("success", CLD_DUMPED, 6),
             ("exit-code", CLD_NONE, 0),
             ("exit-code", CLD_EXITED, 0),
             ("exit-code", CLD_KILLED, 9),
