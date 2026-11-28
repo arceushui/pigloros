@@ -124,10 +124,13 @@ fn insert_unchecked(store: &SqliteStore, values: &str) -> rusqlite::Result<()> {
     ))
 }
 
+/// Replaces any journal table (real or stub) with a one-column stub, so the tests do not depend
+/// on whether the store creates the real journal on open.
 fn stub_journal(store: &SqliteStore, rows: bool) -> rusqlite::Result<()> {
-    store
-        .conn
-        .execute_batch("CREATE TABLE consent_revocation_journal (id INTEGER NOT NULL)")?;
+    store.conn.execute_batch(
+        "DROP TABLE IF EXISTS consent_revocation_journal;
+         CREATE TABLE consent_revocation_journal (id INTEGER NOT NULL)",
+    )?;
     if rows {
         store
             .conn
@@ -359,6 +362,9 @@ fn a_missing_row_with_an_empty_journal_starts_at_one() -> TestResult {
 fn a_missing_row_needs_a_readable_journal() -> TestResult {
     let fixture = Fixture::new(true)?;
     let store = SqliteStore::open_in_memory()?;
+    store
+        .conn
+        .execute_batch("DROP TABLE IF EXISTS consent_revocation_journal")?;
     assert_eq!(fixture.generation(&store), Err(Refusal::StoreUnreadable));
     assert_eq!(stored(&store)?, Vec::new());
     assert!(store.conn.is_autocommit());
@@ -374,7 +380,7 @@ fn a_present_row_ignores_the_journal() -> TestResult {
     assert_eq!(fixture.generation(&store), Ok(5));
     store
         .conn
-        .execute_batch("DROP TABLE consent_revocation_journal")?;
+        .execute_batch("DROP TABLE IF EXISTS consent_revocation_journal")?;
     assert_eq!(fixture.generation(&store), Ok(6));
     Ok(())
 }
