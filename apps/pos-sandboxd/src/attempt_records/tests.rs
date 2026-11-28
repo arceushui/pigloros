@@ -310,6 +310,9 @@ struct Released {
     /// The ledger the output is charged to, one byte per captured byte;
     /// `None` for an uncharged output.
     output_ledger: Option<crate::StagingLedger>,
+    /// The terminal cgroup counters could not be read: systemd had removed the cgroup (the
+    /// `RuntimeMaxUSec` stop, a payload exit status of 200..=255), or a source was unreadable.
+    terminal_unreadable: bool,
 }
 
 impl Default for Released {
@@ -333,6 +336,7 @@ impl Default for Released {
             cleaned_at: Some(CLEANED_AT),
             grant: None,
             output_ledger: None,
+            terminal_unreadable: false,
         }
     }
 }
@@ -423,11 +427,15 @@ fn terminal(run: &Released) -> TestResult<TerminalResources> {
         None => Err(TerminalServiceError::Unstarted),
     };
     Ok(TerminalResources::new(
-        Ok(AttemptLimitEventSnapshot::for_test(
-            run.terminal_cgroup,
-            run.terminal.clone(),
-            run.terminal_at,
-        )?),
+        if run.terminal_unreadable {
+            Err(crate::AttemptCgroupError::InvalidPath)
+        } else {
+            Ok(AttemptLimitEventSnapshot::for_test(
+                run.terminal_cgroup,
+                run.terminal.clone(),
+                run.terminal_at,
+            )?)
+        },
         run.work_after
             .map(|(mount_id, capacity)| Ok(WorkUsage::for_test(mount_id, capacity, 7))),
         service,
@@ -878,6 +886,36 @@ fn a_reversed_snapshot_is_code_2() -> TestResult {
 
 /// A missing service result or an unproved cleanup is code 2; a cancelled
 /// run with an unproved cleanup reports Cancelled and is quarantined.
+/// A released attempt whose cgroup was removed before its counters could be read records a null
+/// terminal snapshot, which is missing evidence, code 2 (R17-E6): the timeout stop of systemd
+/// (`Result=timeout`) and a payload exit that fails the unit both end this way.
+#[test]
+fn a_released_attempt_without_its_terminal_snapshot_is_missing_evidence() -> TestResult {
+    for service in [
+        Some(("success", 1, 0)),
+        Some(("timeout", 2, 15)),
+        Some(("exit-code", 1, 203)),
+    ] {
+        let records = Released {
+            terminal_unreadable: true,
+            service,
+            ..Released::default()
+        }
+        .records()?;
+        assert_recomputed(&records);
+        let fields = records.termination().fields();
+        assert_eq!(fields.progress, AttemptProgressCode::Released);
+        assert!(fields.unit.is_some() && fields.baseline.is_some());
+        assert!(fields.terminal.is_none(), "{service:?}");
+        assert_eq!(
+            records.classification().code(),
+            Some(TerminalCode::CleanupFailed),
+            "{service:?}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn missing_evidence_and_failed_cleanup_are_code_2() -> TestResult {
     let missing = Released {

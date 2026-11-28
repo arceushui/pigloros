@@ -27,8 +27,8 @@ const MAX_PAIRS: usize = 64;
 const MAX_COMMANDS: usize = 8;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_DESCRIPTORS: usize = 8;
-/// The most exit statuses and the most signals a code-11 value lists: every status `1..=255` and
-/// every signal `1..=64`.
+/// The most exit statuses and the most signals a code-11 value lists: a list holds at most the
+/// statuses `1..=255` and the signals `1..=64`, as ascending bytes.
 const MAX_EXIT_STATUSES: usize = 255;
 const MAX_EXIT_SIGNALS: usize = 64;
 const MAX_DESCRIPTOR_NAME_BYTES: usize = 255;
