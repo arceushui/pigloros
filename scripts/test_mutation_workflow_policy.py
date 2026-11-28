@@ -20,6 +20,22 @@ cargo test --workspace --all-features --locked -- \\
   2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
 bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
 """
+CHANGES_RUN = """set -euo pipefail
+relevant=false
+if [[ "$FORCE_MUTATION" = true ]]; then
+  relevant=true
+else
+  while IFS= read -r path; do
+    case "$path" in
+      *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/config.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/run_mutation_canary.sh|scripts/test_mutation_workflow_policy.py)
+        relevant=true
+        break
+        ;;
+    esac
+  done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
+fi
+echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+"""
 MUTATION_IF = (
     "needs.mutation-changes.outputs.relevant == 'true' && "
     "needs.mutation-baseline.result == 'success' && "
@@ -37,16 +53,72 @@ else
 fi
 """
 CANARY_RUN = "bash scripts/run_mutation_canary.sh"
-CANARY_SCRIPT_SHA256 = "3c9625dc976dcadef7b0676d39f7d9cb6c1f68ed834eb0aa54509cb44169b0b7"
+CANARY_SCRIPT_SHA256 = "63b2cd804a68009427485f06dc24a7880cabda0968e9a8fdb104c55d89cb6792"
 # Pin the complete reviewed parsed program, including comments and heredoc data.
 # This policy snapshot is not a shell-semantics oracle; digest changes need review.
 MUTATION_RUN_SHA256 = (
     "8db86bdd9fb7b873e7014b286b0e61ec0f3134a508fe490a0cc2be044746a70b"
 )
+SHARED_HARNESS_ARGS = [
+    "--workspace", "--all-features", "--no-shuffle", "--baseline", "run",
+    "--jobs", "1", "--cap-lints", "true", "--cargo-arg=--locked",
+    "--", "--", "-Zunstable-options", "--fail-fast", "--include-ignored",
+    "--test-threads=4",
+]
 
 
-def check_contract(workflow: dict) -> None:
+def cargo_mutants_arguments(command: str) -> list[str]:
+    tokens = " ".join(command.replace("\\\n", " ").split()).split()
+    start = next(
+        (index for index in range(len(tokens) - 1)
+         if tokens[index:index + 2] == ["cargo", "mutants"]),
+        None,
+    )
+    if start is None:
+        raise AssertionError("mutation producer command must invoke cargo mutants")
+    end = next(
+        (index for index in range(start + 2, len(tokens))
+         if tokens[index].startswith("--test-threads=")),
+        None,
+    )
+    if end is None:
+        raise AssertionError("mutation producer command must select its libtest threads")
+    return tokens[start + 2:end + 1]
+
+
+def shared_harness_arguments(arguments: list[str]) -> list[str]:
+    shared: list[str] = []
+    index = 0
+    value_options = {"--baseline", "--jobs", "--cap-lints"}
+    standalone_options = {"--workspace", "--all-features", "--no-shuffle"}
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in standalone_options or argument == "--cargo-arg=--locked":
+            shared.append(argument)
+        elif argument in value_options:
+            shared.extend(arguments[index:index + 2])
+            index += 1
+        elif argument == "--":
+            shared.extend(arguments[index:])
+            break
+        index += 1
+    return shared
+
+
+def check_contract(workflow: dict, canary_script: str | None = None) -> None:
     """Reject toolchain drift, baseline bypasses, and permissive fan-in."""
+    if workflow.get("on", workflow.get(True)) != {
+        "workflow_call": None,
+        "workflow_dispatch": None,
+    }:
+        raise AssertionError("preserve the reviewed mutation workflow triggers")
+    if workflow.get("permissions") != {"contents": "read"}:
+        raise AssertionError("mutation workflow permissions must remain read-only")
+    if workflow.get("concurrency") != {
+        "group": "mutation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }:
+        raise AssertionError("preserve mutation workflow concurrency controls")
     if workflow.get("env") != {
         "RUSTUP_TOOLCHAIN": NIGHTLY,
         "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
@@ -56,6 +128,11 @@ def check_contract(workflow: dict) -> None:
             "baseline and mutants must share the pinned nightly and serial compiler jobs"
         )
     jobs = workflow["jobs"]
+    if set(jobs) != {
+        "mutation-changes", "mutation-baseline", "mutation-canary",
+        "mutation", "mutation-gate",
+    }:
+        raise AssertionError("preserve the reviewed mutation workflow job set")
     harness_steps = {
         "mutation-baseline": "Prove the mutation test harness",
         "mutation": "Run mutants in changed lines",
@@ -99,53 +176,74 @@ def check_contract(workflow: dict) -> None:
         "run": BASELINE_RUN,
     }]:
         raise AssertionError("baseline must execute the complete mutation harness")
-    changes = next(
-        step for step in jobs["mutation-changes"]["steps"]
-        if step.get("name") == "Classify changed paths"
-    )
-    if "scripts/run_mutation_canary.sh" not in changes["run"]:
-        raise AssertionError("canary changes must trigger the mutation workflow")
+    changes = jobs["mutation-changes"]
+    if changes != {
+        "name": "detect mutation-relevant changes",
+        "runs-on": "ubuntu-24.04",
+        "outputs": {"relevant": "${{ steps.changes.outputs.relevant }}"},
+        "steps": [
+            {
+                "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                "with": {"fetch-depth": 0},
+            },
+            {
+                "id": "changes",
+                "name": "Classify changed paths",
+                "env": {
+                    "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+                    "HEAD_SHA": "${{ github.event.pull_request.head.sha || github.sha }}",
+                    "FORCE_MUTATION": "${{ github.event_name == 'workflow_dispatch' }}",
+                },
+                "run": CHANGES_RUN,
+            },
+        ],
+    }:
+        raise AssertionError("preserve the changed-path producer and canary trigger")
     canary = jobs["mutation-canary"]
+    if canary != {
+        "name": "mutation gate canary",
+        "needs": "mutation-changes",
+        "if": "needs.mutation-changes.outputs.relevant == 'true'",
+        "runs-on": "ubuntu-24.04",
+        "timeout-minutes": 10,
+        "steps": [
+            {
+                "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            },
+            {
+                "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
+                "with": {"toolchain": "${{ env.RUSTUP_TOOLCHAIN }}"},
+            },
+            {
+                "uses": "taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519",
+                "with": {"tool": "cargo-mutants@27.1.0"},
+            },
+            {
+                "name": "Run the deliberately weakened-test canary",
+                "run": CANARY_RUN,
+            },
+            {
+                "name": "Upload mutation canary report",
+                "if": "always()",
+                "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+                "with": {
+                    "name": "mutation-canary",
+                    "path": "${{ runner.temp }}/mutation-canary.*/",
+                    "if-no-files-found": "error",
+                },
+            },
+        ],
+    }:
+        raise AssertionError("preserve the ordered, blocking canary execution graph")
+    if canary_script is None:
+        canary_script = (ROOT / "scripts/run_mutation_canary.sh").read_text(encoding="utf-8")
     if (
-        canary.get("needs") != "mutation-changes"
-        or canary.get("if") != "needs.mutation-changes.outputs.relevant == 'true'"
-        or canary.get("timeout-minutes") != 10
-        or canary.get("env") is not None
-        or "continue-on-error" in canary
+        'cp "${script_directory}/../rust-toolchain.toml" "${project}/rust-toolchain.toml"'
+        not in canary_script
+        or 'pipeline_status=("${PIPESTATUS[@]}")' not in canary_script
+        or 'tee_status="${pipeline_status[1]}"' not in canary_script
     ):
-        raise AssertionError("run the canary for every relevant mutation change")
-    canary_toolchains = [
-        step for step in canary["steps"]
-        if step.get("uses", "").startswith("dtolnay/rust-toolchain@")
-    ]
-    if len(canary_toolchains) != 1 or canary_toolchains[0].get("with") != {
-        "toolchain": "${{ env.RUSTUP_TOOLCHAIN }}"
-    }:
-        raise AssertionError("the canary must use the mutation workflow's pinned nightly")
-    canary_installers = [
-        step for step in canary["steps"]
-        if step.get("uses", "").startswith("taiki-e/install-action@")
-    ]
-    if len(canary_installers) != 1 or canary_installers[0].get("with") != {
-        "tool": "cargo-mutants@27.1.0"
-    }:
-        raise AssertionError("the canary must use the pinned cargo-mutants release")
-    canary_runs = [step for step in canary["steps"] if "run" in step]
-    if canary_runs != [{
-        "name": "Run the deliberately weakened-test canary",
-        "run": CANARY_RUN,
-    }]:
-        raise AssertionError("the hosted canary must execute its reviewed script")
-    if hashlib.sha256(
-        (ROOT / "scripts/run_mutation_canary.sh").read_bytes()
-    ).hexdigest() != CANARY_SCRIPT_SHA256:
-        raise AssertionError("preserve the reviewed mutation-canary program")
-    canary_artifacts = [
-        step for step in canary["steps"]
-        if step.get("name") == "Upload mutation canary report"
-    ]
-    if len(canary_artifacts) != 1 or canary_artifacts[0].get("if") != "always()":
-        raise AssertionError("retain the hosted canary report on both success and failure")
+        raise AssertionError("the canary must use the repository toolchain and retain its full report")
     mutation = jobs["mutation"]
     if (
         mutation.get("needs") != [
@@ -174,6 +272,16 @@ def check_contract(workflow: dict) -> None:
     )
     if "if" in mutation_step:
         raise AssertionError("mutation execution must be unconditional")
+    canary_arguments = cargo_mutants_arguments(canary_script)
+    worker_arguments = cargo_mutants_arguments(mutation_step["run"])
+    canary_harness = shared_harness_arguments(canary_arguments)
+    worker_harness = shared_harness_arguments(worker_arguments)
+    if canary_harness != SHARED_HARNESS_ARGS or worker_harness != SHARED_HARNESS_ARGS:
+        raise AssertionError("canary and mutation shards must share the test harness")
+    if "--annotations=none" not in canary_arguments:
+        raise AssertionError("the expected canary survivor must not emit a GitHub warning")
+    if hashlib.sha256(canary_script.encode("utf-8")).hexdigest() != CANARY_SCRIPT_SHA256:
+        raise AssertionError("preserve the reviewed mutation-canary program")
     command = " ".join(mutation_step["run"].replace("\\\n", " ").split())
     required = (
         "timeout --foreground 60m cargo mutants --workspace --all-features "
@@ -221,6 +329,78 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
              "run": "python scripts/test_mutation_workflow_policy.py"},
             ci["jobs"]["pinned-dependencies"]["steps"],
         )
+
+    def test_rejects_trigger_permission_and_job_set_drift(self) -> None:
+        on_key = "on" if "on" in self.workflow else True
+        cases = []
+
+        missing_trigger = copy.deepcopy(self.workflow)
+        missing_trigger[on_key].pop("workflow_dispatch")
+        cases.append(("missing dispatch trigger", missing_trigger))
+
+        elevated_permissions = copy.deepcopy(self.workflow)
+        elevated_permissions["permissions"]["contents"] = "write"
+        cases.append(("write permission", elevated_permissions))
+
+        extra_job = copy.deepcopy(self.workflow)
+        extra_job["jobs"]["unreviewed"] = {"runs-on": "ubuntu-latest", "steps": []}
+        cases.append(("extra job", extra_job))
+
+        for description, changed in cases:
+            with self.subTest(change=description), self.assertRaises(AssertionError):
+                check_contract(changed)
+
+    def test_rejects_canary_execution_graph_drift(self) -> None:
+        changes_run = self.workflow["jobs"]["mutation-changes"]["steps"][1]["run"]
+
+        def changed_checkout_order(workflow: dict) -> None:
+            steps = workflow["jobs"]["mutation-canary"]["steps"]
+            steps[0], steps[3] = steps[3], steps[0]
+
+        def added_action(workflow: dict) -> None:
+            workflow["jobs"]["mutation-canary"]["steps"].insert(
+                3, {"uses": "actions/checkout@unreviewed"},
+            )
+
+        def replaced_artifact(workflow: dict) -> None:
+            workflow["jobs"]["mutation-canary"]["steps"][-1] = {
+                "name": "Upload mutation canary report",
+                "if": "always()",
+                "uses": "actions/checkout@unreviewed",
+            }
+
+        def made_producer_nonblocking(workflow: dict) -> None:
+            workflow["jobs"]["mutation-canary"]["steps"][3]["continue-on-error"] = True
+
+        def hid_canary_path(workflow: dict) -> None:
+            workflow["jobs"]["mutation-changes"]["steps"][1]["run"] = (
+                changes_run.replace("|scripts/run_mutation_canary.sh", "|scripts/other.sh")
+                .replace("fi\n", "# scripts/run_mutation_canary.sh\nfi\n", 1)
+            )
+
+        for description, mutate in (
+            ("checkout after producer", changed_checkout_order),
+            ("extra action", added_action),
+            ("artifact replaced", replaced_artifact),
+            ("nonblocking producer", made_producer_nonblocking),
+            ("canary path only in comment", hid_canary_path),
+        ):
+            changed = copy.deepcopy(self.workflow)
+            mutate(changed)
+            with self.subTest(change=description), self.assertRaises(AssertionError):
+                check_contract(changed)
+
+    def test_rejects_canary_harness_and_report_drift(self) -> None:
+        script = (ROOT / "scripts/run_mutation_canary.sh").read_text(encoding="utf-8")
+        weakened_harness = script.replace("--include-ignored", "", 1)
+        with self.assertRaisesRegex(AssertionError, "share the test harness"):
+            check_contract(self.workflow, weakened_harness)
+
+        unrecorded_output = script.replace(
+            'tee_status="${pipeline_status[1]}"', "", 1,
+        )
+        with self.assertRaisesRegex(AssertionError, "retain its full report"):
+            check_contract(self.workflow, unrecorded_output)
 
     def test_rejects_wrong_or_missing_toolchain(self) -> None:
         for value in (

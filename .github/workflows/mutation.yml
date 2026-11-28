@@ -116,7 +116,7 @@ jobs:
         with:
           name: mutation-canary
           path: ${{ runner.temp }}/mutation-canary.*/
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   mutation:
     name: diff mutation testing (shard ${{ matrix.shard }})

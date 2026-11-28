@@ -25,6 +25,14 @@ Shared reference for humans and agents.
 
 ## Mutation baseline policy
 
+Every mutation-relevant run also executes `mutation-canary` alongside the
+baseline. It creates a temporary crate with the repository's stable toolchain
+pin, weakens a test assertion, and requires cargo-mutants to report the
+expected survivor as `MISSED`. This is a recurring regression guard for the
+mutation evidence path. The initial hosted run (46118791975) used 22 runner
+seconds and completed 17m 02s before the shared baseline, adding no shard wait
+on that run. Runner time is incurred once per mutation-relevant run.
+
 Before any diff-mutation shard starts, `mutation-baseline` must pass the full
 unmutated workspace with all features, the locked dependency graph, and the
 same pinned nightly and libtest arguments as the shards. The workflow sets

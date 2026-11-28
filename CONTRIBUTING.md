@@ -343,15 +343,23 @@ as the shards. Stable core tests cannot prove the nightly-only harness. After
 that same-run baseline succeeds, every shard uses `--baseline run` to prove its
 own unmutated scratch copy before testing mutations. This prevents missing
 scratch-copy fixtures from counting as caught mutants. The aggregate requires
-both the shared baseline and every shard.
+the shared baseline, the passing weakened-test canary, and every shard. The
+canary runs beside the baseline and is limited to mutation-relevant changes; it
+requires the named deliberately missed mutant in the uploaded report. This is
+an ongoing regression guard and used 22 runner seconds in a measured hosted
+run, with no added shard wait because it completed before the 17-minute shared
+baseline.
 
 ```mermaid
 flowchart TD
     G["standard pass rule"] --> R{"Mutation-relevant PR?"}
     R -->|"no"| S["Successful skip"]
     R -->|"yes"| B["Full same-nightly mutation baseline"]
+    R -->|"yes"| C["Deliberately weakened-test canary"]
     B --> M["Sixteen changed-line shards, at most eight runners"]
+    C --> M
     B --> MG["diff mutation testing"]
+    C --> MG["diff mutation testing"]
     M --> MG["diff mutation testing"]
     MG --> CI["ci-gate"]
     S --> CI

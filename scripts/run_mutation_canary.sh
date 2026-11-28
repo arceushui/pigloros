@@ -4,6 +4,7 @@ set -euo pipefail
 temporary_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 canary_root="$(mktemp -d "${temporary_root%/}/mutation-canary.XXXXXX")"
 project="${canary_root}/project"
+script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "${project}/src"
 
 cat > "${project}/Cargo.toml" <<'EOF'
@@ -20,6 +21,8 @@ version = 4
 name = "mutation-gate-canary"
 version = "0.1.0"
 EOF
+
+cp "${script_directory}/../rust-toolchain.toml" "${project}/rust-toolchain.toml"
 
 cat > "${project}/src/lib.rs" <<'EOF'
 pub fn deliberately_weakened_canary() -> bool {
@@ -40,7 +43,7 @@ EOF
 git -C "${project}" init --quiet
 git -C "${project}" config user.name "Mutation Gate Canary"
 git -C "${project}" config user.email "mutation-canary@localhost"
-git -C "${project}" add Cargo.toml Cargo.lock src/lib.rs
+git -C "${project}" add Cargo.toml Cargo.lock rust-toolchain.toml src/lib.rs
 git -C "${project}" commit --quiet -m "Add strong mutation canary assertion"
 
 # Touch the function line so diff-scoped mutation testing selects it, then
@@ -74,6 +77,7 @@ timeout --foreground 8m cargo mutants \
   --all-features \
   --in-diff "${canary_root}/changes.diff" \
   --no-shuffle \
+  --annotations=none \
   --baseline run \
   --jobs 1 \
   --timeout 90 \
@@ -87,8 +91,15 @@ timeout --foreground 8m cargo mutants \
   --include-ignored \
   --test-threads=4 \
   2>&1 | tee "${canary_root}/cargo-mutants.log"
-mutation_status=${PIPESTATUS[0]}
+pipeline_status=("${PIPESTATUS[@]}")
 set -e
+
+mutation_status="${pipeline_status[0]}"
+tee_status="${pipeline_status[1]}"
+if [[ "${tee_status}" -ne 0 ]]; then
+  echo "tee failed while recording cargo-mutants output (status ${tee_status})." >&2
+  exit "${tee_status}"
+fi
 
 if [[ "${mutation_status}" -ne 2 ]]; then
   echo "Expected cargo mutants to exit 2 for the deliberately missed canary; got ${mutation_status}."
