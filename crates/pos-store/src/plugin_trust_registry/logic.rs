@@ -489,7 +489,9 @@ pub(crate) fn plan_evaluate(
 }
 
 /// Decide `evaluate_retained_release`: `plan_evaluate` under the anchor and the TPS1 bytes the
-/// retained scope holds. A scope that is not provisioned is `MissingState`.
+/// retained scope holds. A scope that is not provisioned is `MissingState`, reported before any
+/// evidence check: the scope name is the caller's choice, and nothing is read for a scope that is
+/// not installed.
 pub(crate) fn plan_evaluate_retained(
     tx: &impl PluginTrustTransactionV1,
     scope: &str,

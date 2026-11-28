@@ -267,4 +267,26 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             tick,
         )
     }
+
+    /// Records the call like `evaluate_current_release`, then delegates.
+    fn evaluate_retained_release(
+        &self,
+        scope: &str,
+        evidence: &VerifiedPluginTrustEvidenceV1,
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> Registry<CurrentReleaseEvaluationV1> {
+        let call = Call::Evaluate {
+            stamp: self.next_stamp(),
+            utc: trusted_utc.as_i64(),
+            tick,
+        };
+        self.calls.borrow_mut().push(call);
+        if let Some(evaluation) = &self.historical_evaluation {
+            return Ok(evaluation.clone());
+        }
+        self.store
+            .evaluate_retained_release(scope, evidence, projection, trusted_utc, tick)
+    }
 }

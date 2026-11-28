@@ -855,6 +855,8 @@ fn a_scope_that_is_not_installed_is_missing_state() -> TestResult {
         Err(RegistryError::MissingState)
     );
     let h = admitted()?;
+    // On purpose the evidence is the one built for scope "scope": the scope name is the caller's
+    // choice, and a scope that is not installed is reported before any evidence check.
     assert_eq!(
         h.store.evaluate_retained_release(
             "other",
