@@ -40,6 +40,9 @@ MUTATION_RUN_SHA256 = (
 )
 
 
+MUTATION_RUST_CACHE_ACTION = "Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266"
+
+
 def check_contract(workflow: dict) -> None:
     """Reject toolchain drift, baseline bypasses, and permissive fan-in."""
     if workflow.get("env") != {
@@ -52,15 +55,24 @@ def check_contract(workflow: dict) -> None:
         )
     jobs = workflow["jobs"]
     harness_steps = {
-        "mutation-baseline": "Prove the mutation test harness",
-        "mutation": "Run mutants in changed lines",
+        "mutation-baseline": (
+            "Prove the mutation test harness",
+            {"CARGO_BUILD_JOBS": "3", "CARGO_INCREMENTAL": "1"},
+        ),
+        "mutation": (
+            "Run mutants in changed lines",
+            {"CARGO_INCREMENTAL": "1"},
+        ),
+    }
+    expected_caches = {
+        "mutation-baseline": {"shared-key": "mutation"},
+        "mutation": {"shared-key": "mutation", "save-if": "false"},
     }
     for name in ("mutation-baseline", "mutation"):
         job = jobs[name]
-        expected_env = {"CARGO_BUILD_JOBS": "3"} if name == "mutation-baseline" else None
-        if job.get("env") != expected_env or "continue-on-error" in job:
+        if job.get("env") is not None or "continue-on-error" in job:
             raise AssertionError(
-                "only the baseline may select three compiler jobs; failures stay blocking"
+                "mutation jobs must not override workflow env or become nonblocking"
             )
         toolchains = [
             step for step in job["steps"]
@@ -70,14 +82,23 @@ def check_contract(workflow: dict) -> None:
             "toolchain": "${{ env.RUSTUP_TOOLCHAIN }}"
         }:
             raise AssertionError("install the selected nightly in both jobs")
-        for step in job["steps"]:
-            expected_step_env = (
-                {"CARGO_INCREMENTAL": "1"}
-                if step.get("name") == harness_steps[name] else None
+        caches = [
+            step for step in job["steps"]
+            if step.get("uses", "").startswith("Swatinem/rust-cache@")
+        ]
+        if len(caches) != 1 or caches[0] != {
+            "uses": MUTATION_RUST_CACHE_ACTION,
+            "with": expected_caches[name],
+        }:
+            raise AssertionError(
+                "mutation cache must share one baseline key with restore-only shards"
             )
+        harness_name, harness_env = harness_steps[name]
+        for step in job["steps"]:
+            expected_step_env = harness_env if step.get("name") == harness_name else None
             if "continue-on-error" in step or step.get("env") != expected_step_env:
                 raise AssertionError(
-                    "only harness steps must override incremental compilation; "
+                    "only harness steps must override build jobs or incremental compilation; "
                     "all failures stay blocking"
                 )
     baseline = jobs["mutation-baseline"]
@@ -90,7 +111,7 @@ def check_contract(workflow: dict) -> None:
     runs = [step for step in baseline["steps"] if "run" in step]
     if runs != [{
         "name": "Prove the mutation test harness",
-        "env": {"CARGO_INCREMENTAL": "1"},
+        "env": {"CARGO_BUILD_JOBS": "3", "CARGO_INCREMENTAL": "1"},
         "run": BASELINE_RUN,
     }]:
         raise AssertionError("baseline must execute the complete mutation harness")
@@ -306,24 +327,60 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
     def test_rejects_incorrect_baseline_compiler_budget(self) -> None:
         for value in (
             None, {},
-            {"CARGO_BUILD_JOBS": "1"}, {"CARGO_BUILD_JOBS": "2"},
-            {"CARGO_BUILD_JOBS": "4"}, {"CARGO_BUILD_JOBS": 3},
-            {"CARGO_BUILD_JOBS": "3", "RUSTUP_TOOLCHAIN": "stable"},
+            {"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "1"},
+            {"CARGO_BUILD_JOBS": "2", "CARGO_INCREMENTAL": "1"},
+            {"CARGO_BUILD_JOBS": "4", "CARGO_INCREMENTAL": "1"},
+            {"CARGO_BUILD_JOBS": 3, "CARGO_INCREMENTAL": "1"},
+            {"CARGO_BUILD_JOBS": "3", "CARGO_INCREMENTAL": "1", "RUSTUP_TOOLCHAIN": "stable"},
         ):
-            with self.subTest(value=value):
+            with self.subTest(step_env=value):
                 changed = copy.deepcopy(self.workflow)
+                step = next(
+                    step for step in changed["jobs"]["mutation-baseline"]["steps"]
+                    if step.get("name") == "Prove the mutation test harness"
+                )
                 if value is None:
-                    changed["jobs"]["mutation-baseline"].pop("env")
+                    step.pop("env", None)
                 else:
-                    changed["jobs"]["mutation-baseline"]["env"] = value
-                with self.assertRaisesRegex(AssertionError, "only the baseline"):
+                    step["env"] = value
+                with self.assertRaisesRegex(AssertionError, "override build jobs"):
+                    check_contract(changed)
+        changed = copy.deepcopy(self.workflow)
+        changed["jobs"]["mutation-baseline"]["env"] = {"CARGO_BUILD_JOBS": "3"}
+        with self.assertRaisesRegex(AssertionError, "override workflow env"):
+            check_contract(changed)
+
+    def test_rejects_missing_or_wrong_mutation_cache_policy(self) -> None:
+        for name, mutate in (
+            ("shard saves cache", lambda w: next(
+                s for s in w["jobs"]["mutation"]["steps"]
+                if s.get("uses", "").startswith("Swatinem/rust-cache@")
+            )["with"].pop("save-if")),
+            ("shard bool save-if", lambda w: next(
+                s for s in w["jobs"]["mutation"]["steps"]
+                if s.get("uses", "").startswith("Swatinem/rust-cache@")
+            )["with"].update({"save-if": False})),
+            ("shard mismatched key", lambda w: next(
+                s for s in w["jobs"]["mutation"]["steps"]
+                if s.get("uses", "").startswith("Swatinem/rust-cache@")
+            )["with"].update({"shared-key": "other"})),
+            ("baseline save-if disabled", lambda w: next(
+                s for s in w["jobs"]["mutation-baseline"]["steps"]
+                if s.get("uses", "").startswith("Swatinem/rust-cache@")
+            )["with"].update({"save-if": "false"})),
+        ):
+            with self.subTest(case=name):
+                changed = copy.deepcopy(self.workflow)
+                mutate(changed)
+                with self.assertRaisesRegex(AssertionError, "restore-only shards"):
                     check_contract(changed)
 
     def test_rejects_missing_or_wrong_harness_incremental_mode(self) -> None:
         for name in ("mutation-baseline", "mutation"):
-            for value in (None, {}, {"CARGO_INCREMENTAL": "0"},
-                          {"CARGO_INCREMENTAL": 1},
-                          {"CARGO_INCREMENTAL": "1", "RUSTUP_TOOLCHAIN": "stable"}):
+            extra = {"CARGO_BUILD_JOBS": "3"} if name == "mutation-baseline" else {}
+            for value in (None, {}, {**extra, "CARGO_INCREMENTAL": "0"},
+                          {**extra, "CARGO_INCREMENTAL": 1},
+                          {**extra, "CARGO_INCREMENTAL": "1", "RUSTUP_TOOLCHAIN": "stable"}):
                 with self.subTest(job=name, value=value):
                     changed = copy.deepcopy(self.workflow)
                     step = next(step for step in changed["jobs"][name]["steps"]

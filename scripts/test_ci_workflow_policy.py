@@ -52,6 +52,18 @@ CORE_CACHE_KEYS = {
     "clippy": ("clippy", TRUSTED_MAIN_SAVE_IF),
     "coverage": ("coverage", TRUSTED_MAIN_SAVE_IF),
 }
+REPORT_RESTORE_ONLY_CACHE_KEYS = {
+    "modules-structure": "clippy",
+}
+COVERAGE_GENERATE_STEP = {
+    "name": "Generate coverage report for changed-code gate",
+    "run": (
+        "cargo llvm-cov nextest --workspace --all-features --locked "
+        '--json --output-path "${{ runner.temp }}/coverage.json" '
+        "--user-config-file none --ignore-default-filter "
+        "--run-ignored all --no-fail-fast\n"
+    ),
+}
 COVERAGE_FLOOR_STEP = {
     "name": "Enforce workspace coverage floor",
     "run": (
@@ -60,6 +72,9 @@ COVERAGE_FLOOR_STEP = {
         '"${{ runner.temp }}/coverage.json"\n'
     ),
 }
+COVERAGE_FLOOR_CHECKER_SHA256 = (
+    "4df098437dc32da8c7dad32529cb78cbf25f0a49cb6f75690532c62f1ee8b004"
+)
 CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
 CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
 # Phase-1 package scope: on a pull request these jobs build, lint and test only
@@ -766,9 +781,27 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
             "shared-key": shared_key,
             "save-if": expected_save_if,
         }:
-            raise AssertionError(f"{job_name} cache must use the trusted-main policy")
+            raise AssertionError(
+                f"{job_name} cache must use its pinned shared-key and trusted-main/restore-only policy"
+            )
         if "if" in cache_step:
             raise AssertionError(f"{job_name} cache must remain reachable on pull requests")
+    for job_name, shared_key in REPORT_RESTORE_ONLY_CACHE_KEYS.items():
+        steps = workflow["jobs"][job_name]["steps"]
+        cache_steps = [
+            step
+            for step in steps
+            if isinstance(step, dict)
+            and isinstance(step.get("uses"), str)
+            and step["uses"].startswith("Swatinem/rust-cache@")
+        ]
+        if len(cache_steps) != 1 or cache_steps[0] != {
+            "uses": RUST_CACHE_ACTION,
+            "with": {"shared-key": shared_key, "save-if": RESTORE_ONLY_SAVE_IF},
+        }:
+            raise AssertionError(
+                f"{job_name} cache must restore {shared_key} with save-if: 'false'"
+            )
 
 
 TEST_SHARDS_NEEDS = ["test-shard"]
@@ -833,23 +866,65 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
             uses = step.get("uses", "") if isinstance(step, dict) else ""
             if uses.startswith("Swatinem/rust-cache@"):
                 if step.get("with", {}).get("save-if") not in ALLOWED_NON_PR_SAVE_IFS:
-                    raise AssertionError(f"{job_name} Rust cache must save only from main")
+                    raise AssertionError(
+                        f"{job_name} Rust cache must save only from main or be restore-only"
+                    )
             if uses.startswith("docker/build-push-action@"):
                 cache_to = step.get("with", {}).get("cache-to")
                 if cache_to is not None and cache_to != TRUSTED_MAIN_DOCKER_CACHE_TO:
                     raise AssertionError(f"{job_name} Docker cache must save only from main")
 
 
-def assert_workspace_coverage_floor_contract(workflow: dict) -> None:
-    steps = workflow["jobs"]["coverage"]["steps"]
-    matches = [
-        step
-        for step in steps
+def assert_workspace_coverage_floor_contract(
+    workflow: dict,
+    checker_source: str | None = None,
+) -> None:
+    coverage = workflow["jobs"]["coverage"]
+    if "continue-on-error" in coverage or "defaults" in coverage:
+        raise AssertionError("coverage job must remain blocking without shell overrides")
+    steps = coverage["steps"]
+    generate_matches = [
+        (idx, step)
+        for idx, step in enumerate(steps)
+        if isinstance(step, dict) and step.get("name") == COVERAGE_GENERATE_STEP["name"]
+    ]
+    if len(generate_matches) != 1 or generate_matches[0][1] != COVERAGE_GENERATE_STEP:
+        raise AssertionError("coverage must generate coverage.json from the complete nextest run")
+    floor_matches = [
+        (idx, step)
+        for idx, step in enumerate(steps)
         if isinstance(step, dict) and step.get("name") == COVERAGE_FLOOR_STEP["name"]
     ]
-    if matches != [COVERAGE_FLOOR_STEP]:
+    if len(floor_matches) != 1 or floor_matches[0][1] != COVERAGE_FLOOR_STEP:
         raise AssertionError(
             "coverage must enforce the 99% line and region floors from coverage.json"
+        )
+    export_idx = next(
+        (idx for idx, step in enumerate(steps)
+         if isinstance(step, dict) and step.get("name") == "Export LCOV for cargo-crap"),
+        None,
+    )
+    upload_idx = next(
+        (idx for idx, step in enumerate(steps)
+         if isinstance(step, dict) and step.get("name") == "Upload LCOV for cargo-crap"),
+        None,
+    )
+    if (
+        export_idx is None
+        or upload_idx is None
+        or not (generate_matches[0][0] < floor_matches[0][0] < export_idx < upload_idx)
+    ):
+        raise AssertionError(
+            "coverage floor check must run after generating coverage.json and before LCOV upload"
+        )
+    source = (
+        (ROOT / "scripts/check_workspace_coverage_floor.py").read_text(encoding="utf-8")
+        if checker_source is None
+        else checker_source
+    )
+    if hashlib.sha256(source.encode("utf-8")).hexdigest() != COVERAGE_FLOOR_CHECKER_SHA256:
+        raise AssertionError(
+            "workspace coverage floor checker differs from its reviewed program"
         )
 
 
@@ -3075,6 +3150,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         for before, after in (
             ("--fail-under-lines 99", "--fail-under-lines 98"),
             ("--fail-under-regions 99", "--fail-under-regions 98"),
+            ("scripts/check_workspace_coverage_floor.py", "true #"),
+            ("${{ runner.temp }}/coverage.json", "/tmp/fake.json"),
         ):
             mutated = copy.deepcopy(workflow)
             step = next(
@@ -3086,6 +3163,103 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 AssertionError, "99% line and region floors"
             ):
                 assert_workspace_coverage_floor_contract(mutated)
+        for label, mutate, message in (
+            ("step removed", lambda w: w["jobs"]["coverage"]["steps"].remove(
+                next(s for s in w["jobs"]["coverage"]["steps"]
+                     if s.get("name") == COVERAGE_FLOOR_STEP["name"])),
+             "99% line and region floors"),
+            ("step duplicated", lambda w: w["jobs"]["coverage"]["steps"].append(
+                copy.deepcopy(COVERAGE_FLOOR_STEP)),
+             "99% line and region floors"),
+            ("step conditional", lambda w: next(
+                s for s in w["jobs"]["coverage"]["steps"]
+                if s.get("name") == COVERAGE_FLOOR_STEP["name"]).update({"if": "false"}),
+             "99% line and region floors"),
+            ("step nonblocking", lambda w: next(
+                s for s in w["jobs"]["coverage"]["steps"]
+                if s.get("name") == COVERAGE_FLOOR_STEP["name"]).update(
+                {"continue-on-error": True}),
+             "99% line and region floors"),
+            ("step shell override", lambda w: next(
+                s for s in w["jobs"]["coverage"]["steps"]
+                if s.get("name") == COVERAGE_FLOOR_STEP["name"]).update(shell="true {0}"),
+             "99% line and region floors"),
+            ("job defaults override", lambda w: w["jobs"]["coverage"].update(
+                defaults={"run": {"shell": "true {0}"}}),
+             "without shell overrides"),
+            ("job nonblocking", lambda w: w["jobs"]["coverage"].update(
+                {"continue-on-error": True}),
+             "without shell overrides"),
+            ("producer path changed", lambda w: next(
+                s for s in w["jobs"]["coverage"]["steps"]
+                if s.get("name") == COVERAGE_GENERATE_STEP["name"]).update(
+                run="true\n"),
+             "generate coverage.json"),
+            ("floor before generate", lambda w: w["jobs"]["coverage"]["steps"].insert(
+                0, w["jobs"]["coverage"]["steps"].pop(
+                    next(i for i, s in enumerate(w["jobs"]["coverage"]["steps"])
+                         if s.get("name") == COVERAGE_FLOOR_STEP["name"]))),
+             "after generating coverage.json"),
+            ("floor after lcov upload", lambda w: w["jobs"]["coverage"]["steps"].append(
+                w["jobs"]["coverage"]["steps"].pop(
+                    next(i for i, s in enumerate(w["jobs"]["coverage"]["steps"])
+                         if s.get("name") == COVERAGE_FLOOR_STEP["name"]))),
+             "after generating coverage.json"),
+        ):
+            mutated = copy.deepcopy(workflow)
+            mutate(mutated)
+            with self.subTest(label=label), self.assertRaisesRegex(AssertionError, message):
+                assert_workspace_coverage_floor_contract(mutated)
+        with self.assertRaisesRegex(AssertionError, "reviewed program"):
+            assert_workspace_coverage_floor_contract(workflow, checker_source="raise SystemExit(0)\n")
+
+    def test_conformance_fixture_validation_parallel_runner_fails_closed(self) -> None:
+        script = (ROOT / "scripts/test-conformance-fixture-validation.sh").read_text(encoding="utf-8")
+        preamble = script.split("\nnew_fixture_copy()", 1)[0]
+
+        def run_harness(body: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["bash", "-c", preamble + "\n" + body + "\nwait_for_all_cases\n"],
+                capture_output=True, text=True, check=False, timeout=15,
+            )
+
+        ok = run_harness(
+            'ok_case() { echo "ok $1"; }\n'
+            'for i in 1 2 3 4 5; do run_case "ok-$i" ok_case "$i"; done\n'
+        )
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+        non_final = run_harness(
+            'silent_fail() { false; true; }\n'
+            'ok_case() { true; }\n'
+            'run_case ok-1 ok_case\n'
+            'run_case non-final silent_fail\n'
+        )
+        self.assertEqual(non_final.returncode, 1)
+        self.assertIn("FAIL: conformance fixture validation case non-final (status=1)", non_final.stderr)
+
+        explicit_exit = run_harness(
+            'exit_case() { echo "marker"; exit 42; }\n'
+            'run_case bad-exit exit_case\n'
+        )
+        self.assertEqual(explicit_exit.returncode, 1)
+        self.assertIn("FAIL: conformance fixture validation case bad-exit (status=42)", explicit_exit.stderr)
+        self.assertIn("marker", explicit_exit.stderr)
+
+        duplicate = run_harness(
+            'ok_case() { true; }\n'
+            'run_case same ok_case\n'
+            'run_case same ok_case\n'
+        )
+        self.assertEqual(duplicate.returncode, 1)
+        self.assertIn("duplicate conformance fixture validation case same", duplicate.stderr)
+
+        killed = run_harness(
+            'kill_case() { kill -9 "$BASHPID"; }\n'
+            'run_case killed-case kill_case\n'
+        )
+        self.assertEqual(killed.returncode, 1)
+        self.assertIn("FAIL: conformance fixture validation case killed-case", killed.stderr)
 
     def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -3621,15 +3795,43 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 assert_pull_requests_never_write_caches(load_workflow(workflow_path))
 
     def test_cache_write_contract_rejects_pull_request_rust_cache_write(self) -> None:
-        mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
-        cache_step = next(
-            step
-            for step in mutated["jobs"]["clippy"]["steps"]
-            if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
-        )
-        del cache_step["with"]["save-if"]
-        with self.assertRaisesRegex(AssertionError, "clippy Rust cache must save only from main"):
-            assert_pull_requests_never_write_caches(mutated)
+        for label, value in (
+            ("missing save-if", None),
+            ("yaml bool false", False),
+            ("always true", "true"),
+        ):
+            with self.subTest(case=label):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                cache_step = next(
+                    step
+                    for step in mutated["jobs"]["clippy"]["steps"]
+                    if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+                )
+                if value is None:
+                    del cache_step["with"]["save-if"]
+                else:
+                    cache_step["with"]["save-if"] = value
+                with self.assertRaisesRegex(
+                    AssertionError, "clippy Rust cache must save only from main or be restore-only"
+                ):
+                    assert_pull_requests_never_write_caches(mutated)
+        for job_name, mutate, message in (
+            ("test writes on main", lambda w: next(
+                s for s in w["jobs"]["test"]["steps"]
+                if str(s.get("uses", "")).startswith("Swatinem/rust-cache@")
+            )["with"].update({"save-if": TRUSTED_MAIN_SAVE_IF}),
+             "test cache must use its pinned shared-key"),
+            ("modules-structure writes separate cache", lambda w: next(
+                s for s in w["jobs"]["modules-structure"]["steps"]
+                if str(s.get("uses", "")).startswith("Swatinem/rust-cache@")
+            )["with"].update({"shared-key": "modules", "save-if": TRUSTED_MAIN_SAVE_IF}),
+             "modules-structure cache must restore clippy with save-if: 'false'"),
+        ):
+            with self.subTest(case=job_name):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                mutate(mutated)
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_core_rust_cache_contract(mutated)
 
     def test_cache_write_contract_rejects_pull_request_docker_cache_write(self) -> None:
         mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))

@@ -61,10 +61,6 @@ jobs:
     needs: mutation-changes
     if: needs.mutation-changes.outputs.relevant == 'true'
     runs-on: ubuntu-24.04
-    # The baseline builds one workspace with three compiler jobs;
-    # mutant workers retain the single-job workflow default above.
-    env:
-      CARGO_BUILD_JOBS: "3"
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,8 +73,10 @@ jobs:
       # The stable core suite does not prove nightly-only libtest arguments.
       # Prove them once on the full unmutated workspace before any shard starts.
       - name: Prove the mutation test harness
-        # rust-cache exports 0; step scope keeps baseline and mutant builds aligned.
+        # Step-scoped jobs keep Swatinem/rust-cache's CARGO_* key identical to
+        # the shard workers; incremental matches baseline and mutant builds.
         env:
+          CARGO_BUILD_JOBS: "3"
           CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail

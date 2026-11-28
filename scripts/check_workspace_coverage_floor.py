@@ -10,8 +10,20 @@ import sys
 from typing import Any
 
 
+MAX_REPORTED_FILES = 25
+
+
 class CoverageExportError(ValueError):
-    """The llvm-cov export JSON is malformed or inconsistent."""
+    """The llvm-cov export JSON or floor threshold is malformed or inconsistent."""
+
+
+def _require_threshold(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CoverageExportError(f"invalid {name} threshold: {value!r}")
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold < 0.0 or threshold > 100.0:
+        raise CoverageExportError(f"invalid {name} threshold: {value!r}")
+    return threshold
 
 
 def _require_metric(totals: dict[str, Any], name: str) -> tuple[int, int, float]:
@@ -44,31 +56,63 @@ def _require_metric(totals: dict[str, Any], name: str) -> tuple[int, int, float]
     return covered, count, min(float(percent), computed)
 
 
+def _missed_count(metric: Any) -> int:
+    if not isinstance(metric, dict):
+        return 0
+    count = metric.get("count")
+    covered = metric.get("covered")
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or isinstance(covered, bool)
+        or not isinstance(covered, int)
+    ):
+        return 0
+    return max(0, count - covered)
+
+
 def uncovered_lines_from_segments(segments: list[Any]) -> list[int]:
     """Return sorted 1-based line numbers with zero execution count from LLVM segments.
 
     Each LLVM export segment is ``[line, col, count, has_count, is_region_entry,
-    is_gap_region?]``. A line is considered uncovered if it has at least one
-    non-gap counted segment and its maximum observed execution count is 0.
+    is_gap_region?]`` marking state transitions in source order. Active non-gap
+    counted states propagate across intermediate lines until the next segment.
     """
-    line_max_count: dict[int, int] = {}
+    parsed: list[tuple[int, int, int, bool, bool]] = []
     for segment in segments:
         if not isinstance(segment, list) or len(segment) < 5:
             continue
-        line, _col, count, has_count, _is_entry = segment[:5]
+        line, col, count, has_count, _is_entry = segment[:5]
         is_gap = bool(segment[5]) if len(segment) >= 6 else False
         if (
-            is_gap
-            or not has_count
-            or isinstance(line, bool)
+            isinstance(line, bool)
             or not isinstance(line, int)
+            or isinstance(col, bool)
+            or not isinstance(col, int)
             or isinstance(count, bool)
             or not isinstance(count, int)
+            or not isinstance(has_count, bool)
         ):
             continue
-        previous = line_max_count.get(line)
+        parsed.append((line, col, count, has_count, is_gap))
+
+    line_max_count: dict[int, int] = {}
+
+    def record(line_number: int, count: int) -> None:
+        previous = line_max_count.get(line_number)
         if previous is None or count > previous:
-            line_max_count[line] = count
+            line_max_count[line_number] = count
+
+    for idx, (line, _col, count, has_count, is_gap) in enumerate(parsed):
+        if not has_count or is_gap:
+            continue
+        record(line, count)
+        if idx + 1 < len(parsed):
+            next_line, next_col, _, _, _ = parsed[idx + 1]
+            for spanned_line in range(line + 1, next_line):
+                record(spanned_line, count)
+            if next_line > line and next_col > 1:
+                record(next_line, count)
     return sorted(line for line, max_count in line_max_count.items() if max_count == 0)
 
 
@@ -95,6 +139,8 @@ def check_coverage_data(
     fail_under_regions: float,
 ) -> tuple[str, list[str]]:
     """Validate workspace totals and return ``(summary_line, failure_details)``."""
+    lines_floor = _require_threshold(fail_under_lines, "fail-under-lines")
+    regions_floor = _require_threshold(fail_under_regions, "fail-under-regions")
     if not isinstance(payload, dict):
         raise CoverageExportError("coverage JSON root must be an object")
     data = payload.get("data")
@@ -113,13 +159,13 @@ def check_coverage_data(
     )
 
     failures: list[str] = []
-    if lines_pct < fail_under_lines:
+    if lines_pct < lines_floor:
         failures.append(
-            f"line coverage {lines_pct:.4f}% is below threshold {fail_under_lines:.2f}%"
+            f"line coverage {lines_pct:.4f}% is below threshold {lines_floor:.2f}%"
         )
-    if regions_pct < fail_under_regions:
+    if regions_pct < regions_floor:
         failures.append(
-            f"region coverage {regions_pct:.4f}% is below threshold {fail_under_regions:.2f}%"
+            f"region coverage {regions_pct:.4f}% is below threshold {regions_floor:.2f}%"
         )
 
     if failures:
@@ -133,12 +179,8 @@ def check_coverage_data(
                 file_summary = file_entry.get("summary")
                 if not isinstance(file_summary, dict):
                     continue
-                f_lines = file_summary.get("lines") or {}
-                f_regions = file_summary.get("regions") or {}
-                missed_lines = int(f_lines.get("count", 0)) - int(f_lines.get("covered", 0))
-                missed_regions = int(f_regions.get("count", 0)) - int(
-                    f_regions.get("covered", 0)
-                )
+                missed_lines = _missed_count(file_summary.get("lines"))
+                missed_regions = _missed_count(file_summary.get("regions"))
                 if missed_lines > 0 or missed_regions > 0:
                     segments = file_entry.get("segments")
                     missing_str = (
@@ -148,7 +190,7 @@ def check_coverage_data(
                     )
                     incomplete.append((missed_regions, missed_lines, filename, missing_str))
             incomplete.sort(key=lambda item: (-item[0], -item[1], item[2]))
-            for missed_regions, missed_lines, filename, missing_str in incomplete[:25]:
+            for missed_regions, missed_lines, filename, missing_str in incomplete[:MAX_REPORTED_FILES]:
                 detail = (
                     f"  {filename}: missed_lines={missed_lines}, "
                     f"missed_regions={missed_regions}"
@@ -156,6 +198,9 @@ def check_coverage_data(
                 if missing_str:
                     detail += f" (lines: {missing_str})"
                 failures.append(detail)
+            omitted = len(incomplete) - MAX_REPORTED_FILES
+            if omitted > 0:
+                failures.append(f"  ... and {omitted} more files")
     return summary, failures
 
 

@@ -68,7 +68,7 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
             "Workspace coverage: lines 990/1000 (99.0%); regions 990/1000 (99.0%)",
         )
 
-    def test_rejects_lines_or_regions_below_floor_and_reports_missing_lines(self) -> None:
+    def test_rejects_lines_or_regions_below_floor_and_reports_multiline_spans(self) -> None:
         payload = make_payload(
             lines_covered=989,
             lines_count=1000,
@@ -78,18 +78,18 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
                 {
                     "filename": "crates/pos-core/src/lib.rs",
                     "summary": {
-                        "lines": {"count": 100, "covered": 97},
+                        "lines": {"count": 100, "covered": 94},
                         "regions": {"count": 120, "covered": 115},
                     },
                     "segments": [
                         make_segment(10, 1, count=5),
                         make_segment(12, 1, count=0),
-                        make_segment(13, 1, count=0, is_entry=False),
-                        make_segment(14, 1, count=0, is_entry=False),
-                        make_segment(15, 1, count=0, is_entry=False, is_gap=True),
+                        make_segment(16, 1, count=5, is_entry=False),
+                        make_segment(17, 1, count=0, is_entry=False, is_gap=True),
                         make_segment(20, 1, count=0),
                         make_segment(20, 8, count=2),
                         make_segment(25, 1, count=0),
+                        make_segment(26, 1, count=0, has_count=False, is_entry=False),
                     ],
                 }
             ],
@@ -102,7 +102,43 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
         self.assertIn("line coverage 98.9000% is below threshold 99.00%", joined)
         self.assertIn("region coverage 98.5000% is below threshold 99.00%", joined)
         self.assertIn("crates/pos-core/src/lib.rs", joined)
-        self.assertIn("lines: 12-14, 25", joined)
+        self.assertIn("lines: 12-15, 25", joined)
+
+    def test_rejects_single_metric_failures_independently(self) -> None:
+        _summary, line_only = floor.check_coverage_data(
+            make_payload(lines_covered=989, lines_count=1000, regions_covered=995, regions_count=1000),
+            fail_under_lines=99.0,
+            fail_under_regions=99.0,
+        )
+        self.assertEqual(len(line_only), 1)
+        self.assertIn("line coverage", line_only[0])
+
+        _summary, region_only = floor.check_coverage_data(
+            make_payload(lines_covered=995, lines_count=1000, regions_covered=989, regions_count=1000),
+            fail_under_lines=99.0,
+            fail_under_regions=99.0,
+        )
+        self.assertEqual(len(region_only), 1)
+        self.assertIn("region coverage", region_only[0])
+
+    def test_truncation_reports_omitted_file_count_and_handles_malformed_file_summaries(self) -> None:
+        files = [
+            {
+                "filename": f"crates/pkg/src/f{idx:02d}.rs",
+                "summary": {
+                    "lines": {"count": 10, "covered": 9},
+                    "regions": {"count": 10, "covered": 9},
+                },
+            }
+            for idx in range(28)
+        ]
+        files.append({"filename": "bad-summary.rs", "summary": {"lines": "invalid", "regions": None}})
+        _summary, failures = floor.check_coverage_data(
+            make_payload(lines_covered=980, regions_covered=980, files=files),
+            fail_under_lines=99.0,
+            fail_under_regions=99.0,
+        )
+        self.assertIn("  ... and 3 more files", failures)
 
     def test_rejects_rounded_up_percent_when_computed_ratio_is_below_floor(self) -> None:
         payload = make_payload(
@@ -117,6 +153,18 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
         )
         self.assertTrue(any("line coverage" in msg for msg in failures))
 
+    def test_fails_closed_on_invalid_thresholds(self) -> None:
+        payload = make_payload()
+        for bad in (float("nan"), float("inf"), float("-inf"), -0.1, 100.1, True):
+            with self.subTest(bad_lines=bad), self.assertRaises(floor.CoverageExportError):
+                floor.check_coverage_data(
+                    payload, fail_under_lines=bad, fail_under_regions=99.0
+                )
+            with self.subTest(bad_regions=bad), self.assertRaises(floor.CoverageExportError):
+                floor.check_coverage_data(
+                    payload, fail_under_lines=99.0, fail_under_regions=bad
+                )
+
     def test_fails_closed_on_malformed_or_tampered_payloads(self) -> None:
         bad_payloads = [
             [],
@@ -126,9 +174,15 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
             {"data": [{}]},
             {"data": [{"totals": {"lines": {"count": 0, "covered": 0, "percent": 100.0},
                                   "regions": {"count": 10, "covered": 10, "percent": 100.0}}}]},
+            {"data": [{"totals": {"lines": {"count": 10, "covered": -1, "percent": 0.0},
+                                  "regions": {"count": 10, "covered": 10, "percent": 100.0}}}]},
             {"data": [{"totals": {"lines": {"count": 10, "covered": 11, "percent": 100.0},
                                   "regions": {"count": 10, "covered": 10, "percent": 100.0}}}]},
             {"data": [{"totals": {"lines": {"count": 100, "covered": 50, "percent": 99.5},
+                                  "regions": {"count": 100, "covered": 100, "percent": 100.0}}}]},
+            {"data": [{"totals": {"lines": {"count": 100, "covered": 100, "percent": float("nan")},
+                                  "regions": {"count": 100, "covered": 100, "percent": 100.0}}}]},
+            {"data": [{"totals": {"lines": {"count": 100, "covered": 100, "percent": float("inf")},
                                   "regions": {"count": 100, "covered": 100, "percent": 100.0}}}]},
             {"data": [{"totals": {"lines": {"count": True, "covered": 1, "percent": 100.0},
                                   "regions": {"count": 1, "covered": 1, "percent": 100.0}}}]},
@@ -139,7 +193,7 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
                     payload, fail_under_lines=99.0, fail_under_regions=99.0
                 )
 
-    def test_cli_exit_codes_for_passing_failing_and_missing_files(self) -> None:
+    def test_cli_exit_codes_for_passing_failing_nan_and_missing_files(self) -> None:
         script = pathlib.Path(floor.__file__)
         with tempfile.TemporaryDirectory() as directory:
             passing = pathlib.Path(directory) / "pass.json"
@@ -151,6 +205,13 @@ class WorkspaceCoverageFloorTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Workspace coverage: lines 995/1000", result.stdout)
+
+            nan_res = subprocess.run(
+                [sys.executable, str(script), "--fail-under-lines", "nan",
+                 "--fail-under-regions", "99", str(passing)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(nan_res.returncode, 1)
 
             failing = pathlib.Path(directory) / "fail.json"
             failing.write_text(json.dumps(make_payload(regions_covered=980)), encoding="utf-8")

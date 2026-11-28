@@ -13,43 +13,50 @@ if [[ ! "${max_jobs}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 case_names=()
-case_logs=()
-case_statuses=()
+declare -A seen_cases=()
 
 run_case() {
   local name="$1"
   shift
+  if [[ -n "${seen_cases[${name}]+x}" ]]; then
+    printf 'FAIL: duplicate conformance fixture validation case %s\n' "${name}" >&2
+    exit 1
+  fi
+  seen_cases["${name}"]=1
   while (( $(jobs -pr | wc -l) >= max_jobs )); do
     wait -n || true
   done
   local log="${temporary_base}/case-${name}.log"
   local status_file="${temporary_base}/case-${name}.status"
   (
-    set -euo pipefail
-    rc=0
-    "$@" || rc=$?
+    set +e
+    (
+      set -euo pipefail
+      "$@"
+    )
+    rc=$?
     printf '%s\n' "${rc}" >"${status_file}"
     exit "${rc}"
   ) >"${log}" 2>&1 &
   case_names+=("${name}")
-  case_logs+=("${log}")
-  case_statuses+=("${status_file}")
 }
 
 wait_for_all_cases() {
   wait || true
   local failed=0
-  local idx status
-  for idx in "${!case_names[@]}"; do
+  local name log status_file status
+  for name in "${case_names[@]}"; do
+    log="${temporary_base}/case-${name}.log"
+    status_file="${temporary_base}/case-${name}.status"
     status=""
-    if [[ -f "${case_statuses[$idx]}" ]]; then
-      status="$(<"${case_statuses[$idx]}")"
+    if [[ -f "${status_file}" ]]; then
+      status="$(<"${status_file}")"
     fi
     if [[ "${status}" != "0" ]]; then
       printf 'FAIL: conformance fixture validation case %s (status=%s)\n' \
-        "${case_names[$idx]}" "${status:-missing}" >&2
-      if [[ -f "${case_logs[$idx]}" ]]; then
-        cat "${case_logs[$idx]}" >&2
+        "${name}" "${status:-missing}" >&2
+      if [[ -f "${log}" ]]; then
+        cat "${log}" >&2
       fi
       failed=1
     fi
