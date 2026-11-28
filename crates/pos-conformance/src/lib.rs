@@ -41,6 +41,7 @@ mod non_interference_report;
 mod plugin_trust_bridge;
 mod profile_contract;
 mod provider_adapter_plan;
+mod provider_case_manifest;
 mod provider_conformance;
 mod provider_contract;
 mod report_attestation;
@@ -170,6 +171,7 @@ pub use provider_adapter_plan::{
     AdapterPlan, MEMORY_CEILING_BYTES, OUTPUT_CEILING_BYTES, OVERSHOOT, TASK_CEILING,
     WATCHDOG_CEILING_MS, WORK_CEILING_BYTES,
 };
+pub use provider_case_manifest::case_manifest_v1;
 pub use provider_conformance::{
     evaluate, run_suite, verify_gate, CaseRecord, CaseVerdict, ExpectedPublicOutcome,
     FailureReason, GateError, ObservedAttempt, ObservedPublic, ProviderConformanceCase,
