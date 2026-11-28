@@ -14,7 +14,8 @@
 //! Interleavings covered: Reserve, Abort and Commit across the two Timelines.
 //! Not covered here: `fork_current` (no implementation exists yet), and
 //! `SetReason` and reset, whose `F_q` spend and re-arm are the failure-path
-//! tests (the I136 PR on the reset's 14, #1589 and its follow-up). At the
+//! tests of I136: the reset's 14 is in `reset/tests.rs` (#1589) and the
+//! `SetReason` limits are in `quarantine/tests/limits.rs` (#1593). At the
 //! writer level an Abort or Commit replaces the pending entry by the rows it
 //! registers or binds, and those rows are the pipeline's: the committed rows
 //! do not change, so the edge sizes exercise the entry-size compare (3), not
@@ -341,14 +342,16 @@ fn finish_abort(domain: &mut MemoryCommunityDomainV1, held: Held, rows: u64) -> 
 /// stays, so a later 6 is the budget's.
 fn finish_commit(domain: &mut MemoryCommunityDomainV1, held: Held, rows: u64) -> TestResult {
     let timeline = timeline_of(held.timeline);
-    let before = domain.pass_states.get(&timeline).map(|state| state.head);
+    let before = head_of(domain, timeline);
     let staged = domain.stage_commit(commit_of(domain, timeline, held.operation, rows)?)?;
     domain.apply_commit(&SEAL, staged)?;
-    assert_eq!(
-        domain.pass_states.get(&timeline).map(|state| state.head),
-        before
-    );
+    assert_eq!(head_of(domain, timeline), before);
     Ok(())
+}
+
+/// The selected head T's pass state holds.
+fn head_of(domain: &MemoryCommunityDomainV1, timeline: TimelineId) -> Option<Hash> {
+    domain.pass_states.get(&timeline).map(|state| state.head)
 }
 
 /// Resolve the pending reservation a draw picks by an Abort, or by a Commit
@@ -414,15 +417,21 @@ fn assert_model(domain: &MemoryCommunityDomainV1, model: &Model) -> TestResult {
     assert_eq!(domain_ledger(domain), model.ledger());
     assert!(model.within_bounds());
     for timeline in [id(1), id(2)] {
-        let budget = domain.erasure_budget(timeline)?;
-        for owner in &budget.actors {
-            let pending = domain.pending_erasure_demand(owner.actor);
-            assert!(owner.targets + owner.quarantine_reserve + pending.targets <= LINE);
-            for (affected, committed) in &budget.rows {
-                let held = pending.rows.get(affected).copied().unwrap_or(0);
-                let reserve = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
-                assert!(committed + held + reserve <= ROW_BOUND);
-            }
+        assert_budget_within(domain, timeline)?;
+    }
+    Ok(())
+}
+
+/// What the domain reports for `timeline`'s scope is within the spec bounds.
+fn assert_budget_within(domain: &MemoryCommunityDomainV1, timeline: TimelineId) -> TestResult {
+    let budget = domain.erasure_budget(timeline)?;
+    for owner in &budget.actors {
+        let pending = domain.pending_erasure_demand(owner.actor);
+        assert!(owner.targets + owner.quarantine_reserve + pending.targets <= LINE);
+        for (affected, committed) in &budget.rows {
+            let held = pending.rows.get(affected).copied().unwrap_or(0);
+            let reserve = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
+            assert!(committed + held + reserve <= ROW_BOUND);
         }
     }
     Ok(())
@@ -474,14 +483,7 @@ fn random_interleavings_never_exceed_the_bounds() -> TestResult {
     let mut edges = [[0_u32; 4]; 2];
     for seed in [0x9e37_79b9_7f4a_7c15_u64, 0x1234_5678_9abc_def1, 7] {
         let (mut domain, mut model) = seeded()?;
-        let sizes = [
-            1,
-            24,
-            model.largest(0),
-            model.largest(0) + 1,
-            model.largest(1),
-            model.largest(1) + 1,
-        ];
+        let sizes = pass_sizes(&model);
         let mut state = seed;
         for step in 1..=120_u8 {
             let draw = next(&mut state);
@@ -500,6 +502,19 @@ fn random_interleavings_never_exceed_the_bounds() -> TestResult {
     // Every edge of an entry's rows is reached by an Abort and by a Commit.
     assert!(edges.iter().flatten().all(|count| *count > 0), "{edges:?}");
     Ok(())
+}
+
+/// The pass sizes the property draws: a small one, one the whole context
+/// holds, and each Timeline's largest fitting pass and one row more.
+fn pass_sizes(model: &Model) -> [u64; 6] {
+    [
+        1,
+        24,
+        model.largest(0),
+        model.largest(0) + 1,
+        model.largest(1),
+        model.largest(1) + 1,
+    ]
 }
 
 /// Count an accepted Reserve, a 6 and any other refusal.

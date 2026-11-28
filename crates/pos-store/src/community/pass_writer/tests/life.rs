@@ -76,7 +76,7 @@ fn set_window(
 /// (`recovery_window` 1 s, wait 3 s). The second pass has its own `H_r`,
 /// clamped to `H_g`; the first stays retained and still counts toward the
 /// retained outcomes. Discovery of the first pass then gives 13
-/// (`original_reserve`, tested with the publication).
+/// (`original_reserve`, tested in `pass_publish/tests.rs`, #1587).
 #[test]
 fn a_context_passes_again_beyond_one_recovery_window() -> TestResult {
     for (window, wait) in [(WINDOW, 1_000_000), (1_000_000, 3_000_000)] {
