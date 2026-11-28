@@ -281,10 +281,8 @@ fn payload_class(projection: &Value) -> TestResult<Value> {
         .clone())
 }
 
-/// Acceptance test 2 at the Gateway, with the golden check of test 9.
-///
 /// The actor's erasure freezes its own root and the import of a Timeline it
-/// owns (owner decision of 2026-11-20); another actor's root, an unowned
+/// owns; another actor's root, an unowned
 /// root and the imports of another owner's and of an unowned Timeline stay
 /// readable through the served router. Every erasure answer discloses only
 /// its declared digests and ids, and the projection's generation only rises

@@ -1,7 +1,6 @@
-//! ADR-064 Fork artifact export and comparison (ADR-062 Revision 8 slice R6,
-//! #1225).
+//! Fork artifact export and comparison.
 //!
-//! [`run_fork_v1`] executes one ADR-064 counterfactual Fork from a
+//! [`run_fork_v1`] executes one counterfactual Fork from a
 //! [`ForkFixtureV1`] and exports its artifacts through their public
 //! encodings: every `INT1` Intervention and the `CFP1` counterfactual plan
 //! the run admits, the `RCF1` recomputation frontier and `SIV1` suffix
@@ -20,7 +19,7 @@
 //!    claimed); a Replay or Fork mode is
 //!    [`ForkRunErrorV1::ModeUnsupported`]. An Air-Gapped run whose EPF1
 //!    allows network is [`ForkRunErrorV1::NetworkDenied`] before anything
-//!    runs (as slice R5 decided for the replay adapter). Nothing else depends
+//!    runs. Nothing else depends
 //!    on the mode, so a Local and an Air-Gapped run of one fixture export the
 //!    same bytes.
 //! 2. The factual history (the `history` module): `cut_tick` factual Ticks on
@@ -30,9 +29,8 @@
 //! 3. The `CFP1` plan: it cuts the factual Timeline at that Tick, recomputes
 //!    from the next Tick through `horizon_span` more Ticks and binds the
 //!    fixture's Intervention, EPF1, TPS1 and pinned digests.
-//! 4. The provisional Ticks come from the records form (the `records_form`
-//!    module, owner answer Q7). Per Q7 such a run is a genuine ADR-064 Fork
-//!    execution; it is re-run when the ADR-064 R7 steps form (#1204) lands.
+//! 4. The `records_form` module builds the provisional dependency graph for
+//!    every planned Tick.
 //! 5. The frontier: `pos-time`'s `PrefixSeededFrontierSourceV1` reads the
 //!    recorded prefix through the cut, stitches the provisional graph and
 //!    derives the `RCF1`. It runs before the coordinator takes exclusive
