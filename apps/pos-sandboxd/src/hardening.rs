@@ -72,9 +72,10 @@ pub enum SystemdHardeningProperty {
     /// leaves the unit `active (exited)` and its cgroup in place until the broker stops the unit,
     /// so the terminal counters can be read after the exit.
     RemainAfterExit,
-    /// `SuccessExitStatus: (aiai)` = every exit status and signal (ADR-069 R17-E6): any main
-    /// exit counts as a success for systemd, so the unit stays `active (exited)` with its cgroup
-    /// and the broker, not systemd, classifies the exit from `ExecMainCode` and `ExecMainStatus`.
+    /// `SuccessExitStatus: (aiai)` = every payload exit status (`1..=199`) and signal (ADR-069
+    /// R17-E6): such a main exit counts as a success for systemd, so the unit stays
+    /// `active (exited)` with its cgroup and the broker, not systemd, classifies the exit from
+    /// `ExecMainCode` and `ExecMainStatus`.
     SuccessExitStatus,
 }
 
@@ -91,13 +92,14 @@ pub enum SystemdHardeningValue {
     U32(u32),
     /// A D-Bus `as` value.
     StringArray(&'static [&'static str]),
-    /// A D-Bus `(aiai)` value: every exit status `1..=255` and every signal `1..=64`, as
-    /// `SuccessExitStatus` takes them (ADR-069 R17-E6).
+    /// A D-Bus `(aiai)` value: every exit status `1..=199` and every signal `1..=64`, as
+    /// `SuccessExitStatus` takes them (ADR-069 R17-E6). Statuses `200..=255` are systemd's own
+    /// (`EXIT_CHDIR` and up: a failed exec or namespace setup) and stay failures of the unit.
     EveryExit,
 }
 
 /// The exit statuses of [`SystemdHardeningValue::EveryExit`].
-const EVERY_EXIT_STATUS: std::ops::RangeInclusive<i32> = 1..=255;
+const EVERY_EXIT_STATUS: std::ops::RangeInclusive<i32> = 1..=199;
 /// The signals of [`SystemdHardeningValue::EveryExit`].
 const EVERY_EXIT_SIGNAL: std::ops::RangeInclusive<i32> = 1..=64;
 
