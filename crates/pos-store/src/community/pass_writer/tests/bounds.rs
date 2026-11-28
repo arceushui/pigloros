@@ -223,19 +223,8 @@ fn seeded() -> Result<(MemoryCommunityDomainV1, Model), Box<dyn std::error::Erro
     let mut domain = domain()?;
     domain.pass_states.insert(id(2), child_state());
     domain.count_erasure_context(id(1), MEMBERS);
-    let consented = (0..CONSENTED_ROWS)
-        .map(|seed| erasure_row("budget", ArtifactDataClassV1::ConsentedSharedData, 0, seed))
-        .collect::<Result<Vec<_>, _>>()?;
-    domain.store.bind_erasure_rows_for_test(id(1), consented);
-    domain
-        .store
-        .bind_erasure_rows_for_test(id(1), community_rows(10_000, COMMUNITY_ROWS)?);
-    // R13.1(1): one store target, one `timeline-payload` per affected
-    // Timeline (T's owner holds T and its child, the child's owner its own)
-    // and two targets per community row: 1 + 2 + 2,000 and 1 + 1.
-    let committed = [2_003, 2];
-    assert_eq!(committed[0], committed_of(&domain, id(1), 10)?);
-    assert_eq!(committed[1], committed_of(&domain, id(2), 11)?);
+    bind_seed_rows(&mut domain)?;
+    let committed = assert_committed(&domain)?;
     Ok((
         domain,
         Model {
@@ -243,6 +232,31 @@ fn seeded() -> Result<(MemoryCommunityDomainV1, Model), Box<dyn std::error::Erro
             pending: Vec::new(),
         },
     ))
+}
+
+/// Bind the seed's consented and community rows to T.
+fn bind_seed_rows(domain: &mut MemoryCommunityDomainV1) -> TestResult {
+    let consented = (0..CONSENTED_ROWS)
+        .map(|seed| erasure_row("budget", ArtifactDataClassV1::ConsentedSharedData, 0, seed))
+        .collect::<Result<Vec<_>, _>>()?;
+    domain.store.bind_erasure_rows_for_test(id(1), consented);
+    domain
+        .store
+        .bind_erasure_rows_for_test(id(1), community_rows(10_000, COMMUNITY_ROWS)?);
+    Ok(())
+}
+
+/// The committed targets of the two owners, checked against R13.1(1): one
+/// store target, one `timeline-payload` per affected Timeline (T's owner
+/// holds T and its child, the child's owner its own) and two targets per
+/// community row, so 1 + 2 + 2,000 and 1 + 1.
+fn assert_committed(
+    domain: &MemoryCommunityDomainV1,
+) -> Result<[u64; 2], Box<dyn std::error::Error>> {
+    let committed = [2_003, 2];
+    assert_eq!(committed[0], committed_of(domain, id(1), 10)?);
+    assert_eq!(committed[1], committed_of(domain, id(2), 11)?);
+    Ok(committed)
 }
 
 /// A Reserve of `rows` rows on the model Timeline `timeline`, reusing the
