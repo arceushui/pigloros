@@ -704,8 +704,9 @@ fn a_moved_inventory_generation_or_selection_refuses_the_writer() -> TestResult 
 
 /// The writer refuses (12) at and after the deadline `B`, which is the FAE1
 /// expiry here, and the quarantine stays; one microsecond before it commits.
-/// Every case reads all six scripted marks, so the writer's marks are the
-/// script's fifth and sixth and the offset is the writer's elapsed time.
+/// Every case reads all five scripted marks (the reservation's two, the
+/// guard's two and the writer's elapsed mark), so the offset on the fifth is
+/// the writer's elapsed time.
 #[test]
 fn the_writer_refuses_at_and_after_the_deadline() -> TestResult {
     let bound = EXPIRES - NOW;
@@ -721,9 +722,9 @@ fn the_writer_refuses_at_and_after_the_deadline() -> TestResult {
         };
         let setup = marks(&case);
         case.domain
-            .script_mono(&[zero, zero, zero, zero, Duration::from_micros(offset), zero]);
+            .script_mono(&[zero, zero, zero, zero, Duration::from_micros(offset)]);
         let result = reset(&mut case, &Claim::of_seeded())?;
-        assert_eq!(marks(&case) - setup, 6);
+        assert_eq!(marks(&case) - setup, 5);
         if refused {
             assert_eq!(result.err(), Some(Error::EvidenceUnavailable));
             assert_eq!(ledger(&case)?.head, HEAD);
@@ -804,8 +805,7 @@ fn a_late_writer_with_a_changed_decision_refuses() -> TestResult {
     let mut case = seeded(Revocation::None)?;
     let zero = Duration::ZERO;
     let late = Duration::from_micros(EXPIRES - NOW);
-    case.domain
-        .script_mono(&[zero, zero, zero, zero, late, zero]);
+    case.domain.script_mono(&[zero, zero, zero, zero, late]);
     let before = untouched(&case)?;
     let result = reset_between(&mut case, |_, staged| {
         staged.premises.trust_snapshot_digest = hash(0x55);
@@ -827,6 +827,7 @@ fn a_changed_trust_snapshot_refuses_the_writer() -> TestResult {
         },
         &tps_after(&case.material),
     )?;
+    assert_ne!(newer.tps1_digest(), case.material.tps1_digest());
     let anchor = case.domain.harness.env.anchor.clone();
     let trusted = newer.trusted()?;
     let before = untouched(&case)?;
