@@ -554,4 +554,33 @@ for value in 0 1 2; do
 done
 restore_fb_tunnels
 
+# DIAGNOSTIC (diag branch only): what systemd 260 does with a unit that fails to start when
+# `SuccessExitStatus=` lists the statuses of the unit, for the E6 review: the start job result, the
+# state and the status, for a missing executable (203/EXEC), a namespace failure (226/NAMESPACE) and
+# a payload exit, under the list 1-199 and under 1-255.
+exec_probe() { # NAME LIST COMMAND...
+  local name="$1" list="$2" dir status=0
+  shift 2
+  dir="probes/${name}"
+  mkdir -p "${dir}"
+  timeout 40 systemd-run --unit="probe-${name}" --wait --collect \
+    -p Type=exec -p RemainAfterExit=yes -p "SuccessExitStatus=${list}" \
+    "$@" >"${dir}/run-out" 2>"${dir}/run-err" || status=$?
+  printf '%s\n' "${status}" >"${dir}/run-status"
+  systemctl show "probe-${name}.service" \
+    -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus >"${dir}/show" 2>&1 || true
+  journalctl --no-pager --output=short-monotonic -u "probe-${name}.service" >"${dir}/journal" 2>&1 || true
+  systemctl stop "probe-${name}.service" >/dev/null 2>&1 || true
+  systemctl reset-failed "probe-${name}.service" >/dev/null 2>&1 || true
+}
+mkdir probes
+shell=/run/current-system/sw/bin/sh
+for list in 1-199 1-255; do
+  exec_probe "missing-${list}" "${list}" -- /nonexistent/binary
+  exec_probe "namespace-${list}" "${list}" -p BindReadOnlyPaths=/nonexistent/x:/mnt -- "${shell}" -c 'exit 0'
+  exec_probe "exit7-${list}" "${list}" -- "${shell}" -c 'exit 7'
+  exec_probe "exit203-${list}" "${list}" -- "${shell}" -c 'exit 203'
+  exec_probe "exit0-${list}" "${list}" -- "${shell}" -c 'exit 0'
+done
+
 printf 'complete\n' >status
