@@ -163,7 +163,7 @@ INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
     // peer check for a non-root user; as root the launch proceeds to the
     // adapter, which does not exist in the unit's root here.
     let expected = if rustix::process::getuid().is_root() {
-        "pos-sandboxd: adapter is not a regular native ELF beneath the root\n"
+        "pos-sandboxd: adapter is not a regular native ELF beneath the root: Open(2)\n"
     } else {
         "pos-sandboxd: release channel peer is not the root provider\n"
     };
