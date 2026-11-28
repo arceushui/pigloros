@@ -231,7 +231,8 @@ def _parse_events(value: str) -> list[int]:
     events = []
     for part in value.split(","):
         canonical = part == "0" or not part.startswith("0")
-        if not (part.isascii() and part.isdigit() and canonical and len(part) <= 3 and int(part) <= 255):
+        digits = part.isascii() and part.isdigit() and len(part) <= 3
+        if not (digits and canonical and int(part) <= 255):
             raise EvidenceError(f"events holds {part!r}, not an event code")
         events.append(int(part))
     return events
