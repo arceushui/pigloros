@@ -3673,8 +3673,8 @@ use pos_core::{
     WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
 
-// This fixture isolates the store's transactional port. Its synthetic WCR1
-// registration is not Wave 8 owner-verification evidence.
+// This fixture isolates the store's transactional port. Its verifier checks
+// the TimelineReplay class and canonical WCR1 encoding only.
 struct TestOnlyStructuralOwnerVerifier {
     recording_data_class: ArtifactDataClassV1,
     recording_keys: Vec<pos_core::ArtifactKeyDependencyV1>,
@@ -9025,8 +9025,9 @@ fn signer_rotation(
     )
 }
 
-/// A routine role-2 key change waits until no request pins a bundle. A
-/// compromise rotation requires installed TPS1 to revoke the old signer.
+/// A routine role-2 key change is refused while any request pins a bundle.
+/// A compromise rotation requires installed TPS1 to revoke the old signer and
+/// each pinned bundle's root or signer.
 /// Re-requesting the current registered key is a no-op.
 #[test]
 fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResult {

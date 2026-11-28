@@ -2,7 +2,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-society` — Wave 6 social-layer metrics scaffold (#71 / ADR-011 slice 2).
+//! `pos-plugin-society` records and aggregates Society Signals.
 //!
 //! Owns event type `"society.signal"` and entity kind `"society-aggregate"`.
 //! Thin reducer tracks running means for trust / opinion / economy / culture /
@@ -33,7 +33,7 @@
 //!     &[],
 //!     "deterministic-local-v1",
 //! );
-//! // Wave 8 has no installed Society EPF1. Workspace doctests may enable
+//! // This fixture does not install a Society EPF1. Workspace doctests may enable
 //! // `test-support` and construct a Draft fixture; neither path installs it.
 //! match binding {
 //!     Ok(binding) => assert!(!binding.execution_profile_artifact().is_empty()),

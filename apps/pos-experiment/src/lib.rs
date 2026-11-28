@@ -2,7 +2,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-experiment` — Wave 4 closed experiment host loop.
+//! Experiment host and conformance tooling for `PiglorOS`.
 //!
 //! An [`Experiment`] composes plugins and runs them through a closed tick loop,
 //! driving drivers, validating event types, appending to the store, and folding

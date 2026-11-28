@@ -1,4 +1,4 @@
-//! Wave 8 parameterized proof kernel.
+//! Parameterized conformance proof kernel.
 //!
 //! The kernel composes the existing Tick Boundary host with the versioned
 //! World plugin and two deliberately small, swappable proof Plugins. It is an

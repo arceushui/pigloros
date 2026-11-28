@@ -2,7 +2,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-eval` — Wave 5 calibration harness.
+//! `pos-plugin-eval` computes calibration reports from committed prediction and outcome Events.
 //!
 //! Owns event types `"eval.prediction"` and `"eval.outcome"` exclusively
 //! (ADR-024 Revision 1). Tracks predictions and outcomes in State, provides
