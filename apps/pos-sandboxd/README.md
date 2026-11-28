@@ -322,10 +322,13 @@ The launcher's standard error is `/dev/null` in the unit, so its exit status is
 the trace of why it did not run the adapter. Each closed failure has its own
 status (`launcher::failure_status`): 64 launch parameters not a valid LPV1, 65
 launch environment invalid, 66 inherited descriptor layout invalid, 67 release
-channel peer not the provider, 68 adapter not a regular native ELF beneath the
-root, 69 launcher or adapter identity unreadable, 70 `ReadyV1` not sent, 71
-`ReleaseV1` not received, 72 `ReleaseV1` rejected, 73 adapter exec failed. Any
-other mode failure exits 1 and a usage error 2.
+channel peer not the provider, 68 adapter not a regular file, 69 launcher or
+adapter identity unreadable, 70 `ReadyV1` not sent, 71 `ReleaseV1` not received,
+72 `ReleaseV1` rejected, 73 adapter exec failed, 74 adapter ELF header
+unreadable, 75 adapter not a 64-bit little-endian ELF executable for this
+architecture, and 100 plus the OS error number when the adapter could not be
+opened beneath the root (102 is a missing adapter). Any other mode failure
+exits 1 and a usage error 2.
 
 The launcher code path never calls admission or the verifier (a hosted source
 test enforces it). CI builds the binary for `x86_64` and `aarch64`

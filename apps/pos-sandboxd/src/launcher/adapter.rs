@@ -12,7 +12,7 @@ use std::{
 use pos_reference::sandbox_provider_protocol::{blake3_digest_of, FdIdentity};
 use rustix::fs::{openat, statx, AtFlags, Mode, OFlags, StatxFlags};
 
-use super::error::LauncherError;
+use super::error::{AdapterFault, LauncherError};
 
 /// The ELF header bytes needed to classify an executable.
 pub(super) const ELF_HEADER_BYTES: usize = 20;
@@ -99,14 +99,22 @@ fn open_in(
 /// `ReadyV1`. A `PT_INTERP` is allowed by the ADR and covered by the admitted
 /// image digest.
 pub(super) fn hold_adapter(file: File) -> Result<HeldExecutable, LauncherError> {
-    let is_regular = file
-        .metadata()
-        .is_ok_and(|metadata| std::fs::Metadata::is_file(&metadata));
-    let mut header = [0_u8; ELF_HEADER_BYTES];
-    if !is_regular || file.read_exact_at(&mut header, 0).is_err() || !native_elf(&header) {
-        return Err(LauncherError::Adapter);
-    }
+    check_adapter(&file).map_err(LauncherError::Adapter)?;
     hold(file)
+}
+
+/// Whether `file` is a regular native ELF executable, and if not, which check failed first.
+fn check_adapter(file: &File) -> Result<(), AdapterFault> {
+    let mut header = [0_u8; ELF_HEADER_BYTES];
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        Err(AdapterFault::NotRegular)
+    } else if file.read_exact_at(&mut header, 0).is_err() {
+        Err(AdapterFault::Unreadable)
+    } else if !native_elf(&header) {
+        Err(AdapterFault::NotNative)
+    } else {
+        Ok(())
+    }
 }
 
 /// Hold the launcher's own executable image.

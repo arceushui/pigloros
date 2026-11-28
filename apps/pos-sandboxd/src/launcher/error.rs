@@ -21,6 +21,19 @@ pub enum ReleaseDefect {
     Duplicate,
 }
 
+/// Why the adapter could not be held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdapterFault {
+    /// It could not be opened beneath the root; this is the OS error number.
+    Open(i32),
+    /// What was opened is not a regular file.
+    NotRegular,
+    /// The ELF header could not be read.
+    Unreadable,
+    /// It is not a 64-bit little-endian ELF executable for this architecture.
+    NotNative,
+}
+
 /// Closed failures of the launch barrier. None is retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum LauncherError {
@@ -38,8 +51,8 @@ pub enum LauncherError {
     Peer,
     /// The adapter could not be opened beneath the root or is not the
     /// regular native ELF for this architecture.
-    #[error("adapter is not a regular native ELF beneath the root")]
-    Adapter,
+    #[error("adapter is not a regular native ELF beneath the root: {0:?}")]
+    Adapter(AdapterFault),
     /// A descriptor identity or digest could not be read.
     #[error("launcher or adapter identity could not be read")]
     Identity,

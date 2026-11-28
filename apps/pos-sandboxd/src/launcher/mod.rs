@@ -45,7 +45,7 @@ pub mod process_identity;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
-pub use error::{LauncherError, ReleaseDefect};
+pub use error::{AdapterFault, LauncherError, ReleaseDefect};
 
 use std::convert::Infallible;
 
@@ -69,12 +69,15 @@ pub const LAUNCH_BARRIER_MODE: &str = "launch-barrier";
 /// | 65 | the launch environment is invalid |
 /// | 66 | the inherited descriptor layout is invalid |
 /// | 67 | the release channel peer is not the provider |
-/// | 68 | the adapter is not a regular native ELF beneath the root |
+/// | 68 | the adapter is not a regular file |
 /// | 69 | the launcher or adapter identity could not be read |
 /// | 70 | `ReadyV1` could not be sent |
 /// | 71 | `ReleaseV1` was not received |
 /// | 72 | `ReleaseV1` was rejected |
 /// | 73 | the adapter exec failed |
+/// | 74 | the adapter's ELF header could not be read |
+/// | 75 | the adapter is not a 64-bit little-endian ELF executable for this architecture |
+/// | 100 + n | the adapter could not be opened beneath the root, with OS error number n (at most 27) |
 #[must_use]
 pub const fn failure_status(error: &LauncherError) -> u8 {
     match error {
@@ -82,12 +85,25 @@ pub const fn failure_status(error: &LauncherError) -> u8 {
         LauncherError::Environment => 65,
         LauncherError::Layout => 66,
         LauncherError::Peer => 67,
-        LauncherError::Adapter => 68,
+        LauncherError::Adapter(fault) => adapter_status(*fault),
         LauncherError::Identity => 69,
         LauncherError::Ready => 70,
         LauncherError::ReleaseUnavailable => 71,
         LauncherError::Release(_) => 72,
         LauncherError::Exec(_) => 73,
+    }
+}
+
+/// The exit status of an adapter that could not be held (see [`failure_status`]).
+const fn adapter_status(fault: AdapterFault) -> u8 {
+    match fault {
+        AdapterFault::NotRegular => 68,
+        AdapterFault::Unreadable => 74,
+        AdapterFault::NotNative => 75,
+        // Error numbers are at most 133 on Linux, so the sum stays below 256; the mask keeps it
+        // defined for any value.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        AdapterFault::Open(number) => 100 + (number & 0x7f) as u8,
     }
 }
 

@@ -37,7 +37,7 @@ use super::{
         RELEASE_NAME,
     },
     environment::LaunchEnvironment,
-    error::{LauncherError, ReleaseDefect},
+    error::{AdapterFault, LauncherError, ReleaseDefect},
     host::{LaunchHost, ProcessHost},
 };
 
@@ -467,8 +467,13 @@ fn hold_adapter_rejects_everything_but_a_regular_native_64_bit_le_elf() -> TestR
     cases.push(mutate(17, 1));
     for bytes in cases {
         let (_directory, file) = directory_with("adapter", &bytes)?;
+        let expected = if bytes.len() < ELF_HEADER_BYTES {
+            AdapterFault::Unreadable
+        } else {
+            AdapterFault::NotNative
+        };
         assert!(
-            matches!(hold_adapter(file), Err(LauncherError::Adapter)),
+            matches!(hold_adapter(file), Err(LauncherError::Adapter(fault)) if fault == expected),
             "{bytes:?}"
         );
     }
@@ -482,7 +487,7 @@ fn hold_adapter_rejects_everything_but_a_regular_native_64_bit_le_elf() -> TestR
     let directory = File::open("/")?;
     assert!(matches!(
         hold_adapter(directory),
-        Err(LauncherError::Adapter)
+        Err(LauncherError::Adapter(AdapterFault::NotRegular))
     ));
     Ok(())
 }
@@ -797,7 +802,10 @@ fn a_launch_that_cannot_prove_itself_never_sends_ready() -> TestResult {
     }
 
     let script = launch(|_| {}, b"#!/bin/sh\n", Vec::new(), |_, _| Ok(()))?;
-    assert!(matches!(script.error, LauncherError::Adapter));
+    assert!(matches!(
+        script.error,
+        LauncherError::Adapter(AdapterFault::Unreadable)
+    ));
     assert!(script.ready.is_none());
 
     let no_listing = launch(
@@ -831,7 +839,10 @@ fn a_launch_that_cannot_prove_itself_never_sends_ready() -> TestResult {
         Vec::new(),
         |_, _| Ok(()),
     )?;
-    assert!(matches!(no_adapter.error, LauncherError::Adapter));
+    assert!(matches!(
+        no_adapter.error,
+        LauncherError::Adapter(AdapterFault::Open(_))
+    ));
     Ok(())
 }
 
@@ -1110,7 +1121,7 @@ fn a_directory_opens_and_is_not_an_adapter() -> TestResult {
     let directory = open_beneath(&root, "a/b")?;
     assert!(matches!(
         hold_adapter(directory),
-        Err(LauncherError::Adapter)
+        Err(LauncherError::Adapter(AdapterFault::NotRegular))
     ));
     Ok(())
 }
@@ -1119,7 +1130,10 @@ fn a_directory_opens_and_is_not_an_adapter() -> TestResult {
 fn a_fifo_opens_without_blocking_and_is_not_an_adapter() -> TestResult {
     let (_tree, root) = beneath_tree()?;
     let fifo = open_beneath(&root, "fifo")?;
-    assert!(matches!(hold_adapter(fifo), Err(LauncherError::Adapter)));
+    assert!(matches!(
+        hold_adapter(fifo),
+        Err(LauncherError::Adapter(AdapterFault::NotRegular))
+    ));
     Ok(())
 }
 
@@ -1260,7 +1274,12 @@ fn every_launcher_failure_has_its_own_exit_status() {
         (LauncherError::Environment, 65),
         (LauncherError::Layout, 66),
         (LauncherError::Peer, 67),
-        (LauncherError::Adapter, 68),
+        (LauncherError::Adapter(AdapterFault::NotRegular), 68),
+        (LauncherError::Adapter(AdapterFault::Unreadable), 74),
+        (LauncherError::Adapter(AdapterFault::NotNative), 75),
+        (LauncherError::Adapter(AdapterFault::Open(2)), 102),
+        (LauncherError::Adapter(AdapterFault::Open(0)), 100),
+        (LauncherError::Adapter(AdapterFault::Open(27)), 127),
         (LauncherError::Identity, 69),
         (LauncherError::Ready, 70),
         (LauncherError::ReleaseUnavailable, 71),
