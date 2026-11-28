@@ -68,6 +68,14 @@ pub enum SystemdHardeningProperty {
     StandardOutput,
     /// `StandardError: s = null`: fd 2 is the provider's checked `/dev/null`.
     StandardError,
+    /// `RemainAfterExit: b = true` (ADR-069 R17-E6): a main process that exited successfully
+    /// leaves the unit `active (exited)` and its cgroup in place until the broker stops the unit,
+    /// so the terminal counters can be read after the exit.
+    RemainAfterExit,
+    /// `SuccessExitStatus: (aiai)` = every exit status and signal (ADR-069 R17-E6): any main
+    /// exit counts as a success for systemd, so the unit stays `active (exited)` with its cgroup
+    /// and the broker, not systemd, classifies the exit from `ExecMainCode` and `ExecMainStatus`.
+    SuccessExitStatus,
 }
 
 /// A systemd D-Bus value with one of the exact signatures this bundle permits.
@@ -83,9 +91,23 @@ pub enum SystemdHardeningValue {
     U32(u32),
     /// A D-Bus `as` value.
     StringArray(&'static [&'static str]),
+    /// A D-Bus `(aiai)` value: every exit status `1..=255` and every signal `1..=64`, as
+    /// `SuccessExitStatus` takes them (ADR-069 R17-E6).
+    EveryExit,
 }
 
+/// The exit statuses of [`SystemdHardeningValue::EveryExit`].
+const EVERY_EXIT_STATUS: std::ops::RangeInclusive<i32> = 1..=255;
+/// The signals of [`SystemdHardeningValue::EveryExit`].
+const EVERY_EXIT_SIGNAL: std::ops::RangeInclusive<i32> = 1..=64;
+
 impl SystemdHardeningValue {
+    /// The exit statuses and the signals of [`Self::EveryExit`].
+    #[must_use]
+    pub fn every_exit() -> (Vec<i32>, Vec<i32>) {
+        (EVERY_EXIT_STATUS.collect(), EVERY_EXIT_SIGNAL.collect())
+    }
+
     /// Return the exact D-Bus signature for this value.
     #[must_use]
     pub const fn dbus_signature(self) -> &'static str {
@@ -95,6 +117,7 @@ impl SystemdHardeningValue {
             Self::U64(_) => "t",
             Self::U32(_) => "u",
             Self::StringArray(_) => "as",
+            Self::EveryExit => "(aiai)",
         }
     }
 
@@ -118,6 +141,10 @@ impl SystemdHardeningValue {
                     .copied()
                     .eq(actual.iter().map(String::as_str))
             }
+            (Self::EveryExit, SystemdHardeningReadbackValue::ExitStatuses(statuses, signals)) => {
+                statuses.iter().copied().eq(EVERY_EXIT_STATUS)
+                    && signals.iter().copied().eq(EVERY_EXIT_SIGNAL)
+            }
             _ => false,
         }
     }
@@ -139,6 +166,8 @@ pub enum SystemdHardeningReadbackValue {
     U32(u32),
     /// A D-Bus `as` value.
     StringArray(Vec<String>),
+    /// A D-Bus `(aiai)` value: exit statuses, then signals.
+    ExitStatuses(Vec<i32>, Vec<i32>),
 }
 
 impl From<SystemdHardeningValue> for SystemdHardeningReadbackValue {
@@ -150,6 +179,10 @@ impl From<SystemdHardeningValue> for SystemdHardeningReadbackValue {
             SystemdHardeningValue::U32(value) => Self::U32(value),
             SystemdHardeningValue::StringArray(value) => {
                 Self::StringArray(value.iter().map(ToString::to_string).collect())
+            }
+            SystemdHardeningValue::EveryExit => {
+                let (statuses, signals) = SystemdHardeningValue::every_exit();
+                Self::ExitStatuses(statuses, signals)
             }
         }
     }
@@ -205,6 +238,8 @@ impl SystemdHardeningProperty {
             Self::LockPersonality => "LockPersonality",
             Self::SystemCallArchitectures => "SystemCallArchitectures",
             Self::UMask => "UMask",
+            Self::RemainAfterExit => "RemainAfterExit",
+            Self::SuccessExitStatus => "SuccessExitStatus",
             Self::KillMode
             | Self::SendSigKill
             | Self::StandardInput
@@ -243,7 +278,8 @@ impl SystemdHardeningProperty {
             | Self::ProtectHostname
             | Self::RestrictSuidSgid
             | Self::RestrictRealtime
-            | Self::LockPersonality => SystemdHardeningValue::Bool(true),
+            | Self::LockPersonality
+            | Self::RemainAfterExit => SystemdHardeningValue::Bool(true),
             Self::PrivatePids | Self::ProtectHome => SystemdHardeningValue::String("yes"),
             Self::PrivateUsersEx => SystemdHardeningValue::String("self"),
             Self::CapabilityBoundingSet | Self::AmbientCapabilities => {
@@ -257,6 +293,7 @@ impl SystemdHardeningProperty {
             Self::RestrictNamespaces => SystemdHardeningValue::U64(0x7e02_0080),
             Self::SystemCallArchitectures => SystemdHardeningValue::StringArray(&["native"]),
             Self::UMask => SystemdHardeningValue::U32(0o077),
+            Self::SuccessExitStatus => SystemdHardeningValue::EveryExit,
             Self::KillMode
             | Self::SendSigKill
             | Self::StandardInput
@@ -288,7 +325,7 @@ pub enum TransientUnitHardeningError {
 pub struct TransientUnitHardening;
 
 impl TransientUnitHardening {
-    const REQUESTED_PROPERTIES: [SystemdHardeningProperty; 32] = [
+    const REQUESTED_PROPERTIES: [SystemdHardeningProperty; 34] = [
         SystemdHardeningProperty::TypeExec,
         SystemdHardeningProperty::DynamicUser,
         SystemdHardeningProperty::NoNewPrivileges,
@@ -321,6 +358,8 @@ impl TransientUnitHardening {
         SystemdHardeningProperty::StandardInput,
         SystemdHardeningProperty::StandardOutput,
         SystemdHardeningProperty::StandardError,
+        SystemdHardeningProperty::RemainAfterExit,
+        SystemdHardeningProperty::SuccessExitStatus,
     ];
 
     /// Return the complete ordered static requested-state bundle.
